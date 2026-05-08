@@ -263,19 +263,19 @@ class ChartTab(QWidget):
         self.hline = pg.InfiniteLine(
             angle=0, pen=pg.mkPen(QColor(80, 80, 110, 180), style=Qt.PenStyle.DashLine, width=1)
         )
-        self.plot_widget.addItem(self.vline, ignoreBounds=True)
-        self.plot_widget.addItem(self.hline, ignoreBounds=True)
+        self.plot_widget.addItem(self.vline, ignoreBounds=True)  # type: ignore[call-arg]
+        self.plot_widget.addItem(self.hline, ignoreBounds=True)  # type: ignore[call-arg]
 
         # Crosshair label
         self.cross_label = pg.TextItem(color="#B0B0C0", anchor=(0, 0.5))
         self.cross_label.setZValue(100)
-        self.plot_widget.addItem(self.cross_label, ignoreBounds=True)
+        self.plot_widget.addItem(self.cross_label, ignoreBounds=True)  # type: ignore[call-arg]
         self.cross_label.hide()
 
         # OHLC info label — top-left corner
         self.ohlc_label = pg.TextItem(color="#9A9AAE", anchor=(0, 1))
         self.ohlc_label.setZValue(100)
-        self.plot_widget.addItem(self.ohlc_label, ignoreBounds=True)
+        self.plot_widget.addItem(self.ohlc_label, ignoreBounds=True)  # type: ignore[call-arg]
         self.ohlc_label.hide()
 
         self.proxy = pg.SignalProxy(
@@ -1066,19 +1066,6 @@ class ChartTab(QWidget):
             if self.autofit_y:
                 self._autofit_y(vb, res_df, n)
         t_camera = _time.perf_counter() - t0
-
-        t_all = _time.perf_counter() - t_total
-        if t_all > 0.030:  # Only log when redraw takes > 30ms
-            logger.info(
-                f"⏱ redraw: data={t_data*1000:.1f}ms "
-                f"candles={t_candles*1000:.1f}ms "
-                f"markers={t_markers*1000:.1f}ms "
-                f"strategy={t_strategy*1000:.1f}ms "
-                f"user_draw={t_user*1000:.1f}ms "
-                f"camera={t_camera*1000:.1f}ms "
-                f"TOTAL={t_all*1000:.1f}ms "
-                f"(n={n}, trades={len(self.engine.trades)}, drawings={len(self.engine.drawings)})"
-            )
 
     def _autofit_y(self, vb, res_df, n):
         """Auto-fit Y axis to the high/low range of visible candles."""
