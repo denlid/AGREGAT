@@ -471,16 +471,6 @@ class ChartTab(QWidget):
 
         idx = int(round(mp.x()))
         if 0 <= idx < len(self.res_times):
-            # Pre-computed for the OHLC overlay (currently disabled — see
-            # comment below). Kept here so re-enabling it is a one-line
-            # change rather than a recompute.
-            try:
-                t = pd.to_datetime(self.res_times[idx])
-                if self.time_axis.tz_offset != 0:
-                    t = t + pd.Timedelta(hours=self.time_axis.tz_offset)
-                _ = t.strftime("%Y-%m-%d  %H:%M")
-            except Exception:
-                pass
             _ = self.candlestick_item.get_ohlc_at(idx)
 
         # Price label on right side of crosshair
@@ -954,6 +944,7 @@ class ChartTab(QWidget):
     # Main redraw
     # ==============================
     def redraw_chart(self):
+        """Redraw the current rendering window of candles."""
         import time as _time
         t_total = _time.perf_counter()
 
@@ -1002,6 +993,12 @@ class ChartTab(QWidget):
         self._prev_res_times = rt
 
         self.res_times = rt
+        # Cache floating point timestamps for instant O(1) lookups during mouse scrolling
+        try:
+            self._res_ts = pd.DatetimeIndex(rt).view(np.int64) / 10**9
+        except Exception:
+            self._res_ts = np.array([pd.to_datetime(t).timestamp() for t in rt])
+            
         self.time_axis.set_times(rt)
 
         n = len(res_df)
@@ -1067,6 +1064,19 @@ class ChartTab(QWidget):
                 self._autofit_y(vb, res_df, n)
         t_camera = _time.perf_counter() - t0
 
+        t_all = _time.perf_counter() - t_total
+        if t_all > 0.030:  # Only log when redraw takes > 30ms
+            logger.info(
+                f"⏱ redraw: data={t_data*1000:.1f}ms "
+                f"candles={t_candles*1000:.1f}ms "
+                f"markers={t_markers*1000:.1f}ms "
+                f"strategy={t_strategy*1000:.1f}ms "
+                f"user_draw={t_user*1000:.1f}ms "
+                f"camera={t_camera*1000:.1f}ms "
+                f"TOTAL={t_all*1000:.1f}ms "
+                f"(n={n}, trades={len(self.engine.trades)}, drawings={len(self.engine.drawings)})"
+            )
+
     def _autofit_y(self, vb, res_df, n):
         """Auto-fit Y axis to the high/low range of visible candles."""
         vr = vb.viewRect()
@@ -1093,9 +1103,9 @@ class ChartTab(QWidget):
         idx = max(0, min(idx, len(self.res_times) - 1))
         i = int(idx)
         frac = idx - i
-        t1 = pd.to_datetime(self.res_times[i]).timestamp()
-        if frac > 0 and i + 1 < len(self.res_times):
-            t2 = pd.to_datetime(self.res_times[i + 1]).timestamp()
+        t1 = float(self._res_ts[i])
+        if frac > 0 and i + 1 < len(self._res_ts):
+            t2 = float(self._res_ts[i + 1])
             return t1 + (t2 - t1) * frac
         return t1
 
@@ -1103,12 +1113,11 @@ class ChartTab(QWidget):
         """Interpolate fractional index for a timestamp."""
         if len(self.res_times) == 0:
             return 0.0
-        # Convert to numpy datetime64[ns] to use searchsorted properly
-        t_dt = pd.to_datetime(ts, unit="s").to_datetime64()
-        i = max(0, int(np.searchsorted(self.res_times, t_dt, side="right")) - 1)
-        if i + 1 < len(self.res_times):
-            t1 = pd.to_datetime(self.res_times[i]).timestamp()
-            t2 = pd.to_datetime(self.res_times[i + 1]).timestamp()
+        # Use the pre-computed _res_ts array for searchsorted
+        i = max(0, int(np.searchsorted(self._res_ts, ts, side="right")) - 1)
+        if i + 1 < len(self._res_ts):
+            t1 = float(self._res_ts[i])
+            t2 = float(self._res_ts[i + 1])
             if t2 > t1 and ts >= t1:
                 return i + min(1.0, (ts - t1) / (t2 - t1))
         return float(i)
