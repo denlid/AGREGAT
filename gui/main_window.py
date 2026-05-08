@@ -46,6 +46,7 @@ from gui.tabs.settings_tab import SettingsTab
 from gui.tabs.stats_tab import StatsTab
 from gui.styling.theme import register_theme_listener
 from gui.tabs.trades_tab import TradesTab
+from gui.tabs.strategy_editor_tab import StrategyEditorTab
 
 logger = logging.getLogger("StrategyTester.gui.main_window")
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -78,6 +79,7 @@ class MainWindow(QMainWindow):
         self.quant_tab = QuantTab(self.engine)
         self.log_console = LogConsole()
         self.settings_tab = SettingsTab(self.engine, parent_window=self)
+        self.strategy_editor_tab = StrategyEditorTab(self.engine, self)
 
         # Asset / session / replay first — toolbar build references them.
         self._asset_ctrl = AssetController(self)
@@ -144,6 +146,7 @@ class MainWindow(QMainWindow):
             (self.quant_tab, "Quant"),
             (self.log_console, "Logs"),
             (self.settings_tab, "Settings"),
+            (self.strategy_editor_tab, "Editor"),
         ):
             self.tabs.addTab(w, name)
         self.tabs.currentChanged.connect(self._on_tab)
@@ -275,4 +278,8 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
     def show_error(self, m: str) -> None:
-        QMessageBox.critical(self, "Error", m)
+        # Auto-fix loop interception
+        if hasattr(self, "strategy_editor_tab") and self.tabs.currentWidget() == self.strategy_editor_tab:
+            self.strategy_editor_tab.handle_backtest_error(m)
+        else:
+            QMessageBox.critical(self, "Error", m)

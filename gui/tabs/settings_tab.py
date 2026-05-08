@@ -80,6 +80,7 @@ class SettingsTab(QWidget):
         performance_pane = _new_pane()
         logs_pane = _new_pane()
         hotkeys_pane = _new_pane()
+        ai_pane = _new_pane()
         # Container for strategy-specific widgets (rebuilt whenever a
         # new strategy is loaded). Settings → Strategy auto-discovers
         # the loaded strategy's PARAMS list and builds a form from it.
@@ -408,6 +409,29 @@ class SettingsTab(QWidget):
 
         layout.addStretch()
 
+        # --- AI Settings ---
+        layout = ai_pane._lay
+        grp7 = self._create_group("🤖 AI Provider")
+        f7 = QFormLayout()
+        f7.setSpacing(8)
+
+        self.ai_provider_cb = QComboBox()
+        self.ai_provider_cb.addItems(["OpenAI (GPT-4o)", "Anthropic (Claude 3.5)", "Mistral (Large)"])
+        self.ai_provider_cb.setCurrentText("OpenAI (GPT-4o)")
+        self.ai_provider_cb.setToolTip("Select the LLM provider for strategy generation")
+        f7.addRow("Provider:", self.ai_provider_cb)
+
+        from PySide6.QtWidgets import QLineEdit
+        self.ai_api_key_le = QLineEdit()
+        self.ai_api_key_le.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ai_api_key_le.setPlaceholderText("sk-...")
+        self.ai_api_key_le.setToolTip("API Key for the selected provider")
+        f7.addRow("API Key:", self.ai_api_key_le)
+
+        grp7.setLayout(f7)
+        layout.addWidget(grp7)
+        layout.addStretch()
+
         # Assemble sub-tabs
         self.sub_tabs.addTab(appearance_pane, "Appearance")
         self.sub_tabs.addTab(chart_pane, "Chart")
@@ -417,6 +441,7 @@ class SettingsTab(QWidget):
         self.sub_tabs.addTab(performance_pane, "Performance")
         self.sub_tabs.addTab(logs_pane, "Logs")
         self.sub_tabs.addTab(hotkeys_pane, "Hotkeys")
+        self.sub_tabs.addTab(ai_pane, "AI")
         main_layout.addWidget(self.sub_tabs)
 
         # Wire persistence — every relevant signal saves the full snapshot.
@@ -430,7 +455,9 @@ class SettingsTab(QWidget):
             self.colors_cb,
             self.exec_profile_cb,
             self.log_level_cb,
+            self.ai_provider_cb,
         ]
+        self.ai_api_key_le.textChanged.connect(self._persist)
         widgets_value = [
             self.font_size_spin,
             self.equity_spin,
@@ -475,6 +502,8 @@ class SettingsTab(QWidget):
             "cache_size": self.cache_size_spin.value(),
             "batch_size": self.batch_size_spin.value(),
             "log_level": self.log_level_cb.currentText(),
+            "ai_provider": self.ai_provider_cb.currentText(),
+            "ai_api_key": self.ai_api_key_le.text(),
             "fast_mode": self.fast_mode_cb.isChecked(),
             "auto_save_logs": self.auto_save_logs_cb.isChecked(),
             "max_log_lines": self.max_log_lines_spin.value(),
@@ -520,6 +549,8 @@ class SettingsTab(QWidget):
             self.cache_size_spin.setValue(int(settings.get("cache_size", 1000)))
             self.batch_size_spin.setValue(int(settings.get("batch_size", 5000)))
             self.log_level_cb.setCurrentText(settings.get("log_level", "INFO"))
+            self.ai_provider_cb.setCurrentText(settings.get("ai_provider", "OpenAI (GPT-4o)"))
+            self.ai_api_key_le.setText(settings.get("ai_api_key", ""))
             self.fast_mode_cb.setChecked(bool(settings.get("fast_mode", False)))
             self.auto_save_logs_cb.setChecked(bool(settings.get("auto_save_logs", True)))
             self.max_log_lines_spin.setValue(int(settings.get("max_log_lines", 5000)))
