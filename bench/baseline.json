@@ -1,0 +1,114 @@
+{
+  "env": {
+    "captured_at": "2026-05-06T18:49:07+00:00",
+    "machine": "x86_64",
+    "platform": "Linux-5.15.200-x86_64-with-glibc2.35",
+    "processor": "x86_64",
+    "python": "3.12.8"
+  },
+  "grid": {
+    "grid_n": 5,
+    "grid_search": {
+      "mean_s": 0.703999,
+      "median_s": 0.704596,
+      "min_s": 0.698924,
+      "runs_s": [
+        0.708477,
+        0.698924,
+        0.704596
+      ],
+      "stdev_s": 0.004805
+    },
+    "grid_search_parallel": {
+      "mean_s": 1.770154,
+      "median_s": 1.763808,
+      "min_s": 1.727132,
+      "runs_s": [
+        1.819522,
+        1.763808,
+        1.727132
+      ],
+      "stdev_s": 0.046521
+    },
+    "n_workers": 4,
+    "repeats": 3,
+    "speedup_median": 0.39947431920027576,
+    "trials": 125
+  },
+  "llc": {
+    "linear_cisd_series": {
+      "mean_s": 1.075556,
+      "median_s": 1.073617,
+      "min_s": 1.066637,
+      "runs_s": [
+        1.086414,
+        1.066637,
+        1.073617
+      ],
+      "stdev_s": 0.01003
+    },
+    "linear_pivots": {
+      "mean_s": 1.077826,
+      "median_s": 1.078107,
+      "min_s": 1.075393,
+      "runs_s": [
+        1.078107,
+        1.079979,
+        1.075393
+      ],
+      "stdev_s": 0.002306
+    },
+    "llc_run_vectorized": {
+      "mean_s": 1.345462,
+      "median_s": 1.346946,
+      "min_s": 1.328832,
+      "runs_s": [
+        1.328832,
+        1.360607,
+        1.346946
+      ],
+      "stdev_s": 0.01594
+    },
+    "n_bars": 200000,
+    "repeats": 3
+  },
+  "lsf": {
+    "linear_cisd_series_close": {
+      "mean_s": 0.950461,
+      "median_s": 0.950101,
+      "min_s": 0.948393,
+      "runs_s": [
+        0.948393,
+        0.950101,
+        0.952889
+      ],
+      "stdev_s": 0.00227
+    },
+    "linear_pivots_close": {
+      "mean_s": 0.940228,
+      "median_s": 0.939526,
+      "min_s": 0.936755,
+      "runs_s": [
+        0.944404,
+        0.939526,
+        0.936755
+      ],
+      "stdev_s": 0.003873
+    },
+    "lsf_run_vectorized": {
+      "mean_s": 1.40487,
+      "median_s": 1.399156,
+      "min_s": 1.387251,
+      "runs_s": [
+        1.399156,
+        1.387251,
+        1.428202
+      ],
+      "stdev_s": 0.021065
+    },
+    "n_bars": 200000,
+    "repeats": 3
+  },
+  "quick_mode": false,
+  "schema_version": 1
+}

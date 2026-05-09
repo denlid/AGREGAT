@@ -1,0 +1,26 @@
+{
+  "strategy": {
+    "name": "HtfFvgTap",
+    "htf": "15m",
+    "ltf": "1m",
+    "dsl_version": "1"
+  },
+  "indicators": [
+    {"id": "htf_fvg", "type": "fvg", "on": "htf"},
+    {"id": "htf_pivots", "type": "pivots_close", "on": "htf", "lookback": 1}
+  ],
+  "filters": [
+    {"id": "tap", "type": "in_zone", "source": "close", "zone": "htf_fvg"}
+  ],
+  "entries": [
+    {"when": "tap", "do": "buy_at_next_open"}
+  ],
+  "exits": [
+    {"type": "pivot_sl", "anchor": "htf_pivots"},
+    {"type": "fixed_rr_tp", "rr": 3}
+  ],
+  "risk": {
+    "risk_pct": 1.0,
+    "lot_cap": {"per_100k": 12}
+  }
+}

@@ -1,0 +1,15 @@
+/* AGREGAT — Dark theme overlay (Sprint 2.8 skeleton).
+ *
+ * The base palette lives in ``gui/theme.py`` (THEMES["dark"]); this
+ * file is the place future GUI work parks "structural" QSS — fonts,
+ * radii, spacing — that the Python-built stylesheet doesn't already
+ * cover. Loaded at runtime by ``ThemeService.qss("dark")``.
+ */
+
+QToolTip {
+    border: 1px solid #252530;
+    background: #1A1A1F;
+    color: #E8E8EE;
+    padding: 4px 6px;
+    border-radius: 4px;
+}

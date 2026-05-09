@@ -1,0 +1,20 @@
+/* AGREGAT — Quant theme overlay (Sprint 2.8 skeleton).
+ *
+ * High-contrast research-desk theme: near-black backdrop with magenta
+ * and cyan accents. Base palette lives in ``gui/theme.py``
+ * (THEMES["quant"]); this file ships the complementary structural
+ * tweaks (extra-tight padding for dense info-grid screens). Loaded at
+ * runtime by ``ThemeService.qss("quant")``.
+ */
+
+QToolTip {
+    border: 1px solid #2A2A3C;
+    background: #13141B;
+    color: #F5F0FF;
+    padding: 4px 6px;
+    border-radius: 4px;
+}
+
+QHeaderView::section {
+    padding: 2px 6px;
+}
