@@ -275,6 +275,17 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e) -> None:  # type: ignore[no-untyped-def]
         self.bar_replay.stop_playback()
         self.save_settings()
+
+        # Sprint 3.5 — Fast startup cache
+        # Save a snapshot of the current engine state to avoid re-simulating on boot
+        if self.engine.current_idx >= 0:
+            try:
+                from engine import save_session
+                cache_path = os.path.join(os.path.dirname(self.settings_file), ".auto_save.agbk")
+                save_session(self.engine, cache_path)
+            except Exception as exc:
+                logger.debug(f"Failed to save startup cache: {exc}")
+
         super().closeEvent(e)
 
     def show_error(self, m: str) -> None:

@@ -485,16 +485,16 @@ def apply_theme(app: QApplication, name: str = "dark"):
             text-transform: uppercase;
             letter-spacing: 0.7px;
         }}
+        QTabBar::tab:hover {{
+            color: {t["text"]};
+            background: {t["hover"]};
+            border-radius: 2px 2px 0 0;
+        }}
         QTabBar::tab:selected {{
             color: {t["accent_light"]};
             border-bottom: 2px solid {t["accent"]};
             background: transparent;
             font-weight: 600;
-        }}
-        QTabBar::tab:hover:!selected {{
-            color: {t["text"]};
-            background: {t["hover"]};
-            border-radius: 2px 2px 0 0;
         }}
         /* West-positioned tabs (left-rail) — narrow vertical strip */
         QTabBar::tab:left {{
@@ -510,16 +510,16 @@ def apply_theme(app: QApplication, name: str = "dark"):
             letter-spacing: 0.6px;
             text-transform: uppercase;
         }}
+        QTabBar::tab:left:hover {{
+            background: {t["hover"]};
+            color: {t["text"]};
+            border-radius: 0;
+        }}
         QTabBar::tab:left:selected {{
             border-right: 2px solid {t["accent"]};
             border-bottom: none;
             color: {t["accent_light"]};
             background: {t["elevated"]};
-        }}
-        QTabBar::tab:left:hover:!selected {{
-            background: {t["hover"]};
-            color: {t["text"]};
-            border-radius: 0;
         }}
 
         /* ── Tables ── */

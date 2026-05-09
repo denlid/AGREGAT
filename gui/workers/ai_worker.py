@@ -16,6 +16,10 @@ class AIAssistantWorker(QThread):
         self.code_context = code_context
         self.error_traceback = error_traceback
         self.full_response = ""
+        self.is_running = True
+
+    def stop(self):
+        self.is_running = False
 
     def run(self):
         if not self.api_key:
@@ -63,6 +67,8 @@ class AIAssistantWorker(QThread):
             stream=True
         )
         for chunk in response:
+            if not self.is_running:
+                break
             content = chunk.choices[0].delta.content
             if content:
                 self.full_response += content
@@ -81,12 +87,14 @@ class AIAssistantWorker(QThread):
             model="claude-3-5-sonnet-20240620",
         ) as stream:
             for text in stream.text_stream:
+                if not self.is_running:
+                    break
                 self.full_response += text
                 self.chunk_received.emit(text)
         self.finished_generation.emit(self.full_response)
 
     def _run_mistral(self, system_prompt, user_content):
-        from mistralai import Mistral
+        from mistralai.client import Mistral
         client = Mistral(api_key=self.api_key)
         response = client.chat.stream(
             model="mistral-large-latest",
@@ -96,6 +104,8 @@ class AIAssistantWorker(QThread):
             ]
         )
         for chunk in response:
+            if not self.is_running:
+                break
             content = chunk.data.choices[0].delta.content
             if content:
                 self.full_response += content

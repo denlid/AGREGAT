@@ -1,13 +1,10 @@
 import logging
 import os
 import importlib.util
-from PySide6.QtCore import Qt, Slot
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSplitter, 
-    QPushButton, QTextBrowser, QPlainTextEdit, QMessageBox
-)
+from PySide6.QtCore import Slot
+from PySide6.QtWidgets import QWidget, QVBoxLayout
 
-from gui.widgets.monaco_editor import MonacoEditor
+from gui.widgets.ai_editor_web import AIAssistantEditor
 from gui.workers.ai_worker import AIAssistantWorker
 
 logger = logging.getLogger("StrategyTester.gui.tabs.strategy_editor_tab")
@@ -25,136 +22,39 @@ class StrategyEditorTab(QWidget):
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(4, 4, 4, 4)
-        main_layout.setSpacing(4)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # Toolbar
-        toolbar = QHBoxLayout()
-        self.btn_run = QPushButton("▶ Run Backtest")
-        self.btn_run.clicked.connect(self.on_run_backtest)
-        toolbar.addWidget(self.btn_run)
+        # Unified Editor + Chat WebEngineView
+        self.editor = AIAssistantEditor(self)
+        main_layout.addWidget(self.editor)
         
-        self.btn_apply = QPushButton("📥 Apply Code from Chat")
-        self.btn_apply.clicked.connect(self.apply_code_from_chat)
-        toolbar.addWidget(self.btn_apply)
-        
-        toolbar.addStretch()
-        main_layout.addLayout(toolbar)
+        # Connect signals from JS bridge
+        self.editor.bridge.chat_requested.connect(self.on_chat_requested)
+        self.editor.bridge.run_backtest_requested.connect(self.on_run_backtest)
+        self.editor.bridge.stop_ai_requested.connect(self.on_stop_ai)
+        self.editor.bridge.save_strategy_requested.connect(self.on_save_strategy)
 
-        # Splitter
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_layout.addWidget(self.splitter, stretch=1)
-
-        # Editor Pane
-        self.editor = MonacoEditor(self)
-        self.splitter.addWidget(self.editor)
-
-        # Chat Pane
-        chat_widget = QWidget()
-        chat_layout = QVBoxLayout(chat_widget)
-        chat_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.chat_history = QTextBrowser()
-        self.chat_history.setOpenExternalLinks(True)
-        chat_layout.addWidget(self.chat_history, stretch=1)
-
-        input_layout = QHBoxLayout()
-        self.chat_input = QPlainTextEdit()
-        self.chat_input.setMaximumHeight(80)
-        self.chat_input.setPlaceholderText("Ask AI to generate or fix a strategy...")
-        input_layout.addWidget(self.chat_input)
-
-        self.btn_send = QPushButton("Send")
-        self.btn_send.setMinimumHeight(80)
-        self.btn_send.clicked.connect(self.on_send_chat)
-        input_layout.addWidget(self.btn_send)
-
-        chat_layout.addLayout(input_layout)
-        self.splitter.addWidget(chat_widget)
-        
-        # Set splitter sizes (70% editor, 30% chat)
-        self.splitter.setSizes([700, 300])
-
-    def on_send_chat(self):
-        prompt = self.chat_input.toPlainText().strip()
-        if not prompt:
-            return
-
-        # Disable input while generating
-        self.btn_send.setEnabled(False)
-        self.chat_input.clear()
-        
-        self.chat_history.append(f"<b>You:</b> {prompt}<br>")
-        self.chat_history.append("<b>AI:</b> <i>Thinking...</i>")
-
-        # Get settings directly from UI to avoid stale dictionary
+    def on_chat_requested(self, prompt, code_context):
+        # Disable inputs and show loading state is handled by JS
         provider = self.pw.settings_tab.ai_provider_cb.currentText()
         api_key = self.pw.settings_tab.ai_api_key_le.text().strip()
 
-        # Get text from editor asynchronously
-        self.editor.get_text(lambda text: self._start_ai_worker(provider, api_key, prompt, text, self.latest_error))
+        self._start_ai_worker(provider, api_key, prompt, code_context, self.latest_error)
 
     def _start_ai_worker(self, provider, api_key, prompt, code_context, error_traceback):
         self.latest_error = None # reset
         self.ai_worker = AIAssistantWorker(provider, api_key, prompt, code_context, error_traceback)
-        self.ai_worker.chunk_received.connect(self.on_ai_chunk)
-        self.ai_worker.error_occurred.connect(self.on_ai_error)
-        self.ai_worker.finished_generation.connect(self.on_ai_finished)
+        self.ai_worker.chunk_received.connect(self.editor.stream_chunk)
+        self.ai_worker.error_occurred.connect(self.editor.show_error)
+        self.ai_worker.finished_generation.connect(self._on_ai_finished)
         self.ai_worker.start()
 
     @Slot(str)
-    def on_ai_chunk(self, chunk):
-        # Extremely basic streaming into QTextBrowser: 
-        # Move cursor to end, insert text.
-        cursor = self.chat_history.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        self.chat_history.setTextCursor(cursor)
-        
-        # If it's the first chunk, remove the "Thinking..."
-        doc_text = self.chat_history.toHtml()
-        if "<i>Thinking...</i>" in doc_text:
-            new_html = doc_text.replace("<i>Thinking...</i>", "")
-            self.chat_history.setHtml(new_html)
-            
-        self.chat_history.insertPlainText(chunk)
-        self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
+    def _on_ai_finished(self, full_text):
+        self.editor.finish_generation()
 
-    @Slot(str)
-    def on_ai_error(self, err_msg):
-        doc_text = self.chat_history.toHtml()
-        if "<i>Thinking...</i>" in doc_text:
-            new_html = doc_text.replace("<i>Thinking...</i>", "")
-            self.chat_history.setHtml(new_html)
-            
-        self.chat_history.append(f"<br><b style='color:red;'>Error:</b> {err_msg}<br>")
-        self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
-        self.btn_send.setEnabled(True)
-
-    @Slot(str)
-    def on_ai_finished(self, full_text):
-        self.chat_history.append("<br><hr>")
-        self.btn_send.setEnabled(True)
-        # We store the latest response for "Apply"
-        self._last_ai_code = self._extract_code(full_text)
-
-    def _extract_code(self, text):
-        import re
-        match = re.search(r'```python\s+(.*?)\s+```', text, re.DOTALL)
-        if match:
-            return match.group(1)
-        return ""
-
-    def apply_code_from_chat(self):
-        if hasattr(self, '_last_ai_code') and self._last_ai_code:
-            self.editor.set_text(self._last_ai_code)
-            self.chat_history.append("<i>Code applied to editor.</i>")
-        else:
-            QMessageBox.information(self, "Info", "No Python code found in the latest AI response.")
-
-    def on_run_backtest(self):
-        self.editor.get_text(self._execute_strategy_code)
-
-    def _execute_strategy_code(self, code):
+    def on_run_backtest(self, code):
         try:
             # 1. Save to file
             os.makedirs(os.path.dirname(TEMP_STRAT_PATH), exist_ok=True)
@@ -189,14 +89,12 @@ class StrategyEditorTab(QWidget):
             
             # 5. Run the backtest
             self.pw.on_reset()
-            # Try to trigger the "Run to End" from MainWindow
             try:
                 self.pw.bar_replay.run_to_end()
             except AttributeError:
-                # If bar_replay doesn't have run_to_end or isn't there, we'll try something else
                 self.pw._replay_ctrl.bar_replay.run_to_end()
 
-            self.chat_history.append("<i>Strategy compiled and backtest started. Check 'Chart' or 'Stats' tab.</i>")
+            self.editor.show_system_message("Strategy compiled and backtest started. Check 'Chart' or 'Stats' tab.")
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -204,12 +102,37 @@ class StrategyEditorTab(QWidget):
 
     def handle_backtest_error(self, traceback_str):
         self.latest_error = traceback_str
-        self.chat_history.append(f"<br><b style='color:red;'>Backtest Error:</b><br><pre>{traceback_str}</pre>")
-        self.chat_history.append("<b>System:</b> Asking AI for a fix...")
+        self.editor.ask_ai_to_fix(traceback_str)
         
         provider = self.pw.settings_tab.ai_provider_cb.currentText()
         api_key = self.pw.settings_tab.ai_api_key_le.text().strip()
         
-        self.editor.get_text(
-            lambda text: self._start_ai_worker(provider, api_key, "Fix this error.", text, self.latest_error)
-        )
+        # We need the code context. Since we are in python, we don't have it directly.
+        # But we saved it to TEMP_STRAT_PATH
+        code_context = ""
+        if os.path.exists(TEMP_STRAT_PATH):
+            with open(TEMP_STRAT_PATH, "r", encoding="utf-8") as f:
+                code_context = f.read()
+                
+        self._start_ai_worker(provider, api_key, "Fix this error.", code_context, self.latest_error)
+
+    def on_stop_ai(self):
+        if self.ai_worker:
+            self.ai_worker.stop()
+
+    def on_save_strategy(self, code):
+        from PySide6.QtWidgets import QFileDialog
+        from config import _APP_DIR
+        
+        start_path = os.path.join(_APP_DIR, "strategies")
+        if not os.path.exists(start_path):
+            os.makedirs(start_path)
+            
+        path, _ = QFileDialog.getSaveFileName(self, "Save Strategy", start_path, "Python Files (*.py)")
+        if path:
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(code)
+                self.editor.show_system_message(f"Successfully saved to {os.path.basename(path)}")
+            except Exception as e:
+                self.editor.show_system_message(f"Save failed: {e}", True)

@@ -116,7 +116,24 @@ class SettingsController:
         h = self._host
         si = self.settings.get("current_idx", -1)
         if si >= 0 and h.engine.df is not None:
-            h.engine.step_n(si + 1)
+            # Sprint 3.5 — Fast startup cache
+            # Attempt to load the pre-calculated session state instead of simulating from scratch
+            cache_path = os.path.join(os.path.dirname(self.settings_file), ".auto_save.agbk")
+            cache_loaded = False
+            
+            if os.path.exists(cache_path):
+                try:
+                    from engine import load_session
+                    load_session(h.engine, cache_path)
+                    logger.info("⚡ Restored state from fast cache (.auto_save.agbk)")
+                    cache_loaded = True
+                except Exception as exc:
+                    logger.warning(f"Failed to load fast cache, falling back to simulation: {exc}")
+            
+            # Fall back to simulating everything from zero if cache missing or corrupted
+            if not cache_loaded:
+                h.engine.step_n(si + 1)
+                
             if h.engine.current_idx >= 0:
                 h.engine.step_completed.emit(
                     h.engine.current_idx,
