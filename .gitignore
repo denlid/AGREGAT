@@ -1,6 +1,5 @@
 __pycache__/
 .venv/
-settings.json
 logs/
 *.log
 .pytest_cache/
@@ -9,4 +8,4 @@ logs/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
-drawings.json
+saves/
