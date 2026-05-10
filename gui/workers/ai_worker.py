@@ -1,8 +1,11 @@
 import logging
 import json
+import os
 from PySide6.QtCore import QThread, Signal
 
 logger = logging.getLogger("StrategyTester.gui.workers.ai_worker")
+_APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_AI_GUIDE_PATH = os.path.join(_APP_DIR, "docs", "ai_strategy_authoring_guide.md")
 
 class AIAssistantWorker(QThread):
     chunk_received = Signal(str)
@@ -28,6 +31,13 @@ class AIAssistantWorker(QThread):
             self.error_occurred.emit("API Key is missing. Please set it in the Settings tab.")
             return
 
+        strategy_guide = ""
+        try:
+            with open(_AI_GUIDE_PATH, "r", encoding="utf-8") as f:
+                strategy_guide = f.read().strip()
+        except Exception:
+            strategy_guide = ""
+
         system_prompt = (
             "You are AGREGAT AI assistant, an expert quantitative developer for Python trading strategies. "
             "Follow the user request exactly and do ONLY what was explicitly asked. "
@@ -44,6 +54,11 @@ class AIAssistantWorker(QThread):
             "9) Always answer in the same language the user used in their latest message.\n"
             "10) Preserve intent over style: prioritize exactly requested behavior and constraints."
         )
+        if strategy_guide:
+            system_prompt += (
+                "\n\nAGREGAT strategy authoring reference (must follow):\n"
+                f"{strategy_guide}"
+            )
 
         user_content = f"Here is my current strategy code:\n```python\n{self.code_context}\n```\n\n"
         if self.error_traceback:

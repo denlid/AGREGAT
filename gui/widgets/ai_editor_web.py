@@ -79,9 +79,15 @@ WEB_APP_HTML = r"""
         .attach-item { width: 100%; background: transparent; color: var(--text); border: none; border-radius: 6px; padding: 8px 10px; text-align: left; cursor: pointer; font-size: 12px; }
         .attach-item:hover { background: var(--elevated); }
         #attachments-list { display: flex; flex-wrap: wrap; gap: 6px; }
+        #input-tools { display: flex; justify-content: flex-end; align-items: center; }
+        #apply-changes-btn { background: var(--elevated); color: var(--text2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer; transition: 0.2s; }
+        #apply-changes-btn:hover { color: #fff; border-color: var(--accent-light); }
+        #apply-changes-btn:disabled { opacity: 0.45; cursor: not-allowed; }
         .attachment-chip { border: 1px solid var(--border); background: var(--elevated); color: var(--text2); border-radius: 999px; padding: 4px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 6px; }
         .attachment-chip button { border: none; background: transparent; color: var(--text2); cursor: pointer; font-size: 11px; }
         .attachment-chip button:hover { color: var(--red); }
+        .ai-line-preview { background: rgba(41, 98, 255, 0.16); border-left: 2px solid rgba(92, 138, 255, 0.95); }
+        .ai-line-preview-glyph { border-left: 3px solid rgba(92, 138, 255, 0.95); }
         
         #chat-input { flex: 1; background: transparent; color: var(--text); border: none; padding: 8px; resize: none; font-family: inherit; font-size: 13px; min-height: 24px; max-height: 150px; outline: none; line-height: 1.5; }
         
@@ -126,6 +132,9 @@ WEB_APP_HTML = r"""
     <div id="chat-container">
         <div id="chat-history"></div>
         <div id="input-area">
+            <div id="input-tools">
+                <button id="apply-changes-btn" onclick="applyPendingChanges()" disabled>Apply Changes</button>
+            </div>
             <div id="attachments-list"></div>
             <div class="input-wrapper">
                 <div class="attach-wrap">
@@ -161,6 +170,9 @@ WEB_APP_HTML = r"""
         var isGenerating = false;
         var chartSelectionContext = null;
         var selectedAttachments = [];
+        var pendingCodeCandidate = "";
+        var previewBaselineCode = "";
+        var previewDecorations = [];
 
         const inputEl = document.getElementById('chat-input');
         const attachBtn = document.getElementById('attach-btn');
@@ -298,6 +310,11 @@ WEB_APP_HTML = r"""
         function sendMessage() {
             const text = inputEl.value.trim();
             if(!text || !pyBridge) return;
+            if (editor) {
+                previewBaselineCode = editor.getValue();
+            }
+            pendingCodeCandidate = "";
+            setApplyButtonEnabled(false);
             
             inputEl.value = "";
             inputEl.style.height = '24px';
@@ -323,6 +340,68 @@ WEB_APP_HTML = r"""
             pyBridge.receive_chat_request_ext(text, code, selectionPayload);
             selectedAttachments = [];
             renderAttachments();
+        }
+
+        function extractLatestCodeBlock(markdownText) {
+            if (!markdownText) return "";
+            const pythonBlocks = [...markdownText.matchAll(/```python\s*([\s\S]*?)```/gi)];
+            if (pythonBlocks.length > 0) {
+                return (pythonBlocks[pythonBlocks.length - 1][1] || "").trim();
+            }
+            const genericBlocks = [...markdownText.matchAll(/```[a-zA-Z0-9_+-]*\s*([\s\S]*?)```/g)];
+            if (genericBlocks.length > 0) {
+                return (genericBlocks[genericBlocks.length - 1][1] || "").trim();
+            }
+            return "";
+        }
+
+        function computeChangedLines(beforeText, afterText) {
+            const a = (beforeText || "").split('\n');
+            const b = (afterText || "").split('\n');
+            const n = Math.max(a.length, b.length);
+            const changed = [];
+            for (let i = 0; i < n; i++) {
+                if ((a[i] || "") !== (b[i] || "")) {
+                    changed.push(i + 1);
+                }
+            }
+            return changed;
+        }
+
+        function applyPreviewToEditor(codeText) {
+            if (!editor || !codeText) return;
+            const before = editor.getValue();
+            if (before === codeText) return;
+            editor.setValue(codeText);
+            highlightChangedLines(previewBaselineCode || before, codeText);
+        }
+
+        function highlightChangedLines(beforeText, afterText) {
+            if (!editor) return;
+            const changed = computeChangedLines(beforeText, afterText);
+            const decs = changed.map((line) => ({
+                range: new monaco.Range(line, 1, line, 1),
+                options: {
+                    isWholeLine: true,
+                    className: 'ai-line-preview',
+                    linesDecorationsClassName: 'ai-line-preview-glyph'
+                }
+            }));
+            previewDecorations = editor.deltaDecorations(previewDecorations, decs);
+        }
+
+        function setApplyButtonEnabled(enabled) {
+            const btn = document.getElementById('apply-changes-btn');
+            if (btn) {
+                btn.disabled = !enabled;
+            }
+        }
+
+        function applyPendingChanges() {
+            if (!editor || !pendingCodeCandidate) return;
+            applyPreviewToEditor(pendingCodeCandidate);
+            previewBaselineCode = editor.getValue();
+            appendSystemMessage("AI changes applied.");
         }
 
         function requestChartSelection() {
@@ -398,6 +477,12 @@ WEB_APP_HTML = r"""
                 }
                 currentAiMarkdown += chunk;
                 currentAiMessageDiv.innerHTML = marked.parse(currentAiMarkdown);
+                const latestCode = extractLatestCodeBlock(currentAiMarkdown);
+                if (latestCode) {
+                    pendingCodeCandidate = latestCode;
+                    setApplyButtonEnabled(true);
+                    applyPreviewToEditor(latestCode);
+                }
                 
                 const history = document.getElementById('chat-history');
                 history.scrollTop = history.scrollHeight;
@@ -408,6 +493,7 @@ WEB_APP_HTML = r"""
             currentAiMessageDiv = null;
             currentAiMarkdown = "";
             setGeneratingState(false);
+            setApplyButtonEnabled(!!pendingCodeCandidate);
             inputEl.focus();
         }
 
@@ -471,6 +557,8 @@ WEB_APP_HTML = r"""
              currentAiMarkdown = "";
              history.scrollTop = history.scrollHeight;
              setGeneratingState(true);
+            pendingCodeCandidate = "";
+            setApplyButtonEnabled(false);
         }
     </script>
 </body>

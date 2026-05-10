@@ -68,7 +68,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("AGREGAT")
         self.resize(1140, 720)
         self.setMinimumSize(1100, 600)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
         self.setStyleSheet("QMenuBar { border: none; }")
 
         self.engine = BacktestEngine()
