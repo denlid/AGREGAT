@@ -1,4 +1,5 @@
 import logging
+import json
 from PySide6.QtCore import QThread, Signal
 
 logger = logging.getLogger("StrategyTester.gui.workers.ai_worker")
@@ -8,13 +9,14 @@ class AIAssistantWorker(QThread):
     error_occurred = Signal(str)
     finished_generation = Signal(str)
 
-    def __init__(self, provider, api_key, prompt, code_context, error_traceback=None):
+    def __init__(self, provider, api_key, prompt, code_context, error_traceback=None, extra_context=None):
         super().__init__()
         self.provider = provider
         self.api_key = api_key
         self.prompt = prompt
         self.code_context = code_context
         self.error_traceback = error_traceback
+        self.extra_context = extra_context or {}
         self.full_response = ""
         self.is_running = True
 
@@ -27,11 +29,20 @@ class AIAssistantWorker(QThread):
             return
 
         system_prompt = (
-            "You are an expert quantitative developer. You write Python backtesting strategies "
-            "for the AGREGAT platform. Your code MUST be clean, well-documented, and inherit from "
-            "`app.Strategy`. "
-            "Provide explanations as normal text, but any generated code MUST be wrapped "
-            "in standard Markdown python blocks (```python ... ```)."
+            "You are AGREGAT AI assistant, an expert quantitative developer for Python trading strategies. "
+            "Follow the user request exactly and do ONLY what was explicitly asked. "
+            "Do not add extra features, unrelated suggestions, or off-topic explanations unless the user asks for them.\n\n"
+            "Execution rules:\n"
+            "1) Be precise and reliable: provide correct, actionable output with no fluff.\n"
+            "2) Keep responses focused and concise by default.\n"
+            "3) Do not ask unnecessary questions. By default, proceed with sensible assumptions.\n"
+            "4) Ask a question only if absolutely blocked and cannot produce a useful answer without it.\n"
+            "5) If a question is unavoidable, ask only ONE short, high-impact question.\n"
+            "6) For AGREGAT code, generate clean, production-ready Python that inherits from `app.Strategy`.\n"
+            "7) Any generated code MUST be wrapped in Markdown python blocks (```python ... ```).\n"
+            "8) If no code is required, respond in plain text.\n"
+            "9) Always answer in the same language the user used in their latest message.\n"
+            "10) Preserve intent over style: prioritize exactly requested behavior and constraints."
         )
 
         user_content = f"Here is my current strategy code:\n```python\n{self.code_context}\n```\n\n"
@@ -39,6 +50,11 @@ class AIAssistantWorker(QThread):
             user_content += f"I ran a backtest and got this error traceback:\n{self.error_traceback}\n\n"
         
         user_content += f"Task: {self.prompt}"
+        if self.extra_context:
+            user_content += (
+                "\n\nAdditional chart context (JSON):\n"
+                f"```json\n{json.dumps(self.extra_context, ensure_ascii=False, indent=2)}\n```"
+            )
 
         try:
             if "OpenAI" in self.provider:

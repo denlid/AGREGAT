@@ -5,8 +5,8 @@ import logging
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PySide6.QtCore import QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainterPath
+from PySide6.QtCore import QPointF, Qt, QTimer, Signal, QRectF
+from PySide6.QtGui import QColor, QPainterPath, QCursor
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -33,9 +33,8 @@ RENDER_WINDOW = 300
 
 
 class ChartTab(QWidget):
-    sigTimeRangeChanged = Signal(
-        object, object
-    )  # emits (t_start, t_end) for cross-chart sync
+    sigTimeRangeChanged = Signal(object, object)  # emits (t_start, t_end) for cross-chart sync
+    sigAreaSelected = Signal(dict)
 
     def __init__(self, engine):
         super().__init__()
@@ -75,7 +74,7 @@ class ChartTab(QWidget):
         self.cancel_btn = QPushButton("❌")
         self.cancel_btn.setFixedSize(28, 28)
         self.cancel_btn.setToolTip("Cancel drawing (Esc)")
-        self.cancel_btn.clicked.connect(lambda: self._set_tool("None"))
+        self.cancel_btn.clicked.connect(self._cancel_active_mode)
         self.cancel_btn.hide()
 
         self.fit_btn = QPushButton("🎯")
@@ -260,12 +259,10 @@ class ChartTab(QWidget):
 
         # Crosshair — thin, subtle
         self.vline = pg.InfiniteLine(
-            angle=90,
-            pen=pg.mkPen(QColor(80, 80, 110, 180), style=Qt.PenStyle.DashLine, width=1),
+            angle=90, pen=pg.mkPen(QColor(80, 80, 110, 180), style=Qt.PenStyle.DashLine, width=1)
         )
         self.hline = pg.InfiniteLine(
-            angle=0,
-            pen=pg.mkPen(QColor(80, 80, 110, 180), style=Qt.PenStyle.DashLine, width=1),
+            angle=0, pen=pg.mkPen(QColor(80, 80, 110, 180), style=Qt.PenStyle.DashLine, width=1)
         )
         self.plot_widget.addItem(self.vline, ignoreBounds=True)  # type: ignore[call-arg]
         self.plot_widget.addItem(self.hline, ignoreBounds=True)  # type: ignore[call-arg]
@@ -283,9 +280,7 @@ class ChartTab(QWidget):
         self.ohlc_label.hide()
 
         self.proxy = pg.SignalProxy(
-            self.plot_widget.scene().sigMouseMoved,
-            rateLimit=40,
-            slot=self._on_mouse_move,
+            self.plot_widget.scene().sigMouseMoved, rateLimit=40, slot=self._on_mouse_move
         )
 
         main_layout.addWidget(self.plot_widget, stretch=1)
@@ -312,6 +307,11 @@ class ChartTab(QWidget):
         self._brush_item = None
         self._is_brushing = False
         self.autofit_y = True
+        self._selection_mode = False
+        self._selection_start = None
+        self._selection_overlay = None
+        self._selection_mask_items = []
+        self._selection_rect_data = None
 
         self._redraw_pending = False
         self._redraw_timer = QTimer()
@@ -414,6 +414,63 @@ class ChartTab(QWidget):
             self.tool_label.setText(f"Drawing: {name}")
             self.cancel_btn.show()
 
+    def _cancel_active_mode(self):
+        if self._selection_mode:
+            self.cancel_area_selection_mode()
+            return
+        self._set_tool("None")
+
+    def enable_area_selection_mode(self):
+        self._selection_mode = True
+        self._selection_start = None
+        self._selection_rect_data = None
+        self.tool_label.setText("AI Selection: drag to select area")
+        self.cancel_btn.show()
+        self.plot_widget.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        self._create_selection_mask()
+
+    def cancel_area_selection_mode(self):
+        self._selection_mode = False
+        self._selection_start = None
+        if self._selection_overlay is not None:
+            self.plot_widget.removeItem(self._selection_overlay)
+            self._selection_overlay = None
+        self._clear_selection_mask()
+        self.tool_label.setText("")
+        self.cancel_btn.hide()
+        self.plot_widget.unsetCursor()
+
+    def _create_selection_mask(self):
+        self._clear_selection_mask()
+        for _ in range(4):
+            item = QGraphicsRectItem()
+            item.setPen(pg.mkPen(None))
+            c = QColor("#050507")
+            c.setAlphaF(0.45)
+            item.setBrush(pg.mkBrush(c))
+            item.setZValue(39)
+            self.plot_widget.addItem(item)
+            self._selection_mask_items.append(item)
+
+    def _clear_selection_mask(self):
+        for item in self._selection_mask_items:
+            self.plot_widget.removeItem(item)
+        self._selection_mask_items.clear()
+
+    def _update_selection_mask(self, x1, y1, x2, y2):
+        if len(self._selection_mask_items) != 4:
+            return
+        vb = self.plot_widget.getViewBox()
+        vr = vb.viewRect()
+        left, right = vr.left(), vr.right()
+        top, bottom = vr.top(), vr.bottom()
+        sx1, sx2 = min(x1, x2), max(x1, x2)
+        sy1, sy2 = min(y1, y2), max(y1, y2)
+        self._selection_mask_items[0].setRect(QRectF(left, top, max(0.0, right - left), max(0.0, sy1 - top)))
+        self._selection_mask_items[1].setRect(QRectF(left, sy2, max(0.0, right - left), max(0.0, bottom - sy2)))
+        self._selection_mask_items[2].setRect(QRectF(left, sy1, max(0.0, sx1 - left), max(0.0, sy2 - sy1)))
+        self._selection_mask_items[3].setRect(QRectF(sx2, sy1, max(0.0, right - sx2), max(0.0, sy2 - sy1)))
+
     # --- Chart scroll via arrow keys ---
     def scroll_chart(self, direction):
         """Scroll chart left/right. direction: -1=left, +1=right."""
@@ -439,11 +496,7 @@ class ChartTab(QWidget):
         vb = self.plot_widget.getViewBox()
         pos = ev.pos()
         center = vb.mapToView(pos)
-        modifiers = (
-            ev.modifiers()
-            if hasattr(ev, "modifiers")
-            else _Qt.KeyboardModifier.NoModifier
-        )
+        modifiers = ev.modifiers() if hasattr(ev, "modifiers") else _Qt.KeyboardModifier.NoModifier
 
         if modifiers & _Qt.KeyboardModifier.ControlModifier:
             # Ctrl+wheel = zoom both axes (proportional zoom)
@@ -508,12 +561,26 @@ class ChartTab(QWidget):
             return self._orig_plot_mousePressEvent(evt)
 
         scene_pos = (
-            evt.scenePos()
-            if hasattr(evt, "scenePos")
-            else self.plot_widget.mapToScene(evt.pos())
+            evt.scenePos() if hasattr(evt, "scenePos") else self.plot_widget.mapToScene(evt.pos())
         )
         pos = self.plot_widget.plotItem.vb.mapSceneToView(scene_pos)
         x, y = pos.x(), pos.y()
+
+        if self._selection_mode and evt.button() == Qt.MouseButton.LeftButton:
+            sx = max(0, min(int(round(x)), max(0, len(self.res_times) - 1)))
+            self._selection_start = (sx, y)
+            if self._selection_overlay is None:
+                self._selection_overlay = QGraphicsRectItem()
+                self._selection_overlay.setPen(pg.mkPen("#7FA2FF", width=2, style=Qt.PenStyle.DashLine))
+                fc = QColor("#2962FF")
+                fc.setAlphaF(0.28)
+                self._selection_overlay.setBrush(pg.mkBrush(fc))
+                self._selection_overlay.setZValue(40)
+                self.plot_widget.addItem(self._selection_overlay)
+            self._selection_overlay.setRect(QRectF(float(sx), float(y), 0.0, 0.0))
+            self._update_selection_mask(float(sx), float(y), float(sx), float(y))
+            evt.accept()
+            return
 
         if evt.button() == Qt.MouseButton.RightButton:
             idx = int(round(x))
@@ -585,15 +652,11 @@ class ChartTab(QWidget):
 
         if self.current_tool == "HLine":
             self._save_drawing_state()
-            self.user_drawings.append(
-                {"type": "hline", "p": sy, "color": color, "width": w}
-            )
+            self.user_drawings.append({"type": "hline", "p": sy, "color": color, "width": w})
             drawings_persist.save(self.user_drawings)
         elif self.current_tool == "Marker":
             self._save_drawing_state()
-            self.user_drawings.append(
-                {"type": "marker", "t": t_str, "p": sy, "color": color}
-            )
+            self.user_drawings.append({"type": "marker", "t": t_str, "p": sy, "color": color})
             drawings_persist.save(self.user_drawings)
         elif self.current_tool == "Text":
             text, ok = QInputDialog.getText(self, "Add Text", "Enter text:")
@@ -619,6 +682,23 @@ class ChartTab(QWidget):
         pass
 
     def _plot_mouseMoveEvent(self, evt):
+        if self._selection_mode and self._selection_start is not None:
+            scene_pos = (
+                evt.scenePos()
+                if hasattr(evt, "scenePos")
+                else self.plot_widget.mapToScene(evt.pos())
+            )
+            pos = self.plot_widget.plotItem.vb.mapSceneToView(scene_pos)
+            sx, sy = self._selection_start
+            ex = max(0, min(int(round(pos.x())), max(0, len(self.res_times) - 1)))
+            ey = pos.y()
+            if self._selection_overlay is not None:
+                self._selection_overlay.setRect(
+                    QRectF(float(min(sx, ex)), float(min(sy, ey)), float(abs(ex - sx)), float(abs(ey - sy)))
+                )
+            self._update_selection_mask(float(sx), float(sy), float(ex), float(ey))
+            evt.accept()
+            return
         if getattr(self, "_drawing_active", None):
             scene_pos = (
                 evt.scenePos()
@@ -633,10 +713,7 @@ class ChartTab(QWidget):
                 sx_curr = max(0, min(int(round(pos.x())), len(self.res_times) - 1))
                 sy_curr = pos.y()
                 self._interactive_item.setLine(
-                    self._drawing_start_pt[0],
-                    self._drawing_start_pt[1],
-                    sx_curr,
-                    sy_curr,
+                    self._drawing_start_pt[0], self._drawing_start_pt[1], sx_curr, sy_curr
                 )
             elif self._drawing_active == "Rect":
                 sx_curr = max(0, min(int(round(pos.x())), len(self.res_times) - 1))
@@ -645,18 +722,40 @@ class ChartTab(QWidget):
 
                 x1, y1 = self._drawing_start_pt
                 self._interactive_item.setRect(
-                    QRectF(
-                        min(x1, sx_curr),
-                        min(y1, sy_curr),
-                        abs(sx_curr - x1),
-                        abs(sy_curr - y1),
-                    )
+                    QRectF(min(x1, sx_curr), min(y1, sy_curr), abs(sx_curr - x1), abs(sy_curr - y1))
                 )
             evt.accept()
             return
         self._orig_plot_mouseMoveEvent(evt)
 
     def _plot_mouseReleaseEvent(self, evt):
+        if self._selection_mode and self._selection_start is not None:
+            scene_pos = (
+                evt.scenePos()
+                if hasattr(evt, "scenePos")
+                else self.plot_widget.mapToScene(evt.pos())
+            )
+            pos = self.plot_widget.plotItem.vb.mapSceneToView(scene_pos)
+            sx, sy = self._selection_start
+            ex = max(0, min(int(round(pos.x())), max(0, len(self.res_times) - 1)))
+            ey = pos.y()
+            rect_data = {
+                "x1": float(min(sx, ex)),
+                "x2": float(max(sx, ex)),
+                "y1": float(min(sy, ey)),
+                "y2": float(max(sy, ey)),
+            }
+            self._selection_rect_data = rect_data
+            payload = self._build_selection_payload(rect_data)
+            self.sigAreaSelected.emit(payload)
+            self._selection_start = None
+            self._selection_mode = False
+            self.tool_label.setText("")
+            self.cancel_btn.hide()
+            self.plot_widget.unsetCursor()
+            self._clear_selection_mask()
+            evt.accept()
+            return
         if getattr(self, "_drawing_active", None):
             tool = self._drawing_active
             self._drawing_active = None
@@ -731,6 +830,69 @@ class ChartTab(QWidget):
             xr = self.plot_widget.getViewBox().viewRange()[0]
             self._tracked_xrange = list(xr)
             self._user_zoom_width = xr[1] - xr[0]
+
+    def _build_selection_payload(self, rect_data):
+        if self.engine.df is None or len(self.res_times) == 0:
+            return {"selection_rect": rect_data}
+        idx1 = int(max(0, min(rect_data["x1"], len(self.res_times) - 1)))
+        idx2 = int(max(0, min(rect_data["x2"], len(self.res_times) - 1)))
+        if idx2 < idx1:
+            idx1, idx2 = idx2, idx1
+        res_df = self._cached_res_df if self._cached_res_df is not None else pd.DataFrame()
+        candles = []
+        if not res_df.empty:
+            for i in range(idx1, min(idx2 + 1, len(res_df))):
+                row = res_df.iloc[i]
+                candles.append(
+                    {
+                        "time": str(pd.to_datetime(row["time"])),
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                    }
+                )
+        t_start = pd.to_datetime(self.res_times[idx1]).to_datetime64()
+        t_end = pd.to_datetime(self.res_times[idx2]).to_datetime64()
+        trades = []
+        for tr in self.engine.trades:
+            try:
+                et = self.engine.df.iloc[tr.entry_index]["time"].to_datetime64()
+                if t_start <= et <= t_end:
+                    trades.append(
+                        {
+                            "entry_index": int(tr.entry_index),
+                            "exit_index": int(getattr(tr, "exit_index", -1)),
+                            "entry_price": float(tr.entry_price),
+                            "exit_price": float(getattr(tr, "exit_price", tr.entry_price)),
+                            "side": str(getattr(tr, "side", "")),
+                            "pnl": float(getattr(tr, "pnl", 0.0)),
+                        }
+                    )
+            except Exception:
+                continue
+        vb = self.plot_widget.getViewBox()
+        view_range = vb.viewRange()
+        visible_layers = [tag for tag, act in self.layer_cbs.items() if act.isChecked()]
+        return {
+            "selection_rect": rect_data,
+            "selection_time": {
+                "from": str(pd.to_datetime(self.res_times[idx1])),
+                "to": str(pd.to_datetime(self.res_times[idx2])),
+            },
+            "candles": candles,
+            "trades": trades,
+            "timeframe": self.visual_tf_cb.currentText(),
+            "visible_indicators": visible_layers,
+            "chart_state": {
+                "chart_mode": self.chart_mode_cb.currentText(),
+                "show_markers": self.show_markers_cb.isChecked(),
+                "show_connections": self.show_connections_cb.isChecked(),
+                "x_range": [float(view_range[0][0]), float(view_range[0][1])],
+                "y_range": [float(view_range[1][0]), float(view_range[1][1])],
+                "render_window": int(RENDER_WINDOW),
+            },
+        }
 
     def _on_roi_changed(self, roi, d):
         """Update persistent drawing dict when ROI is resized/moved."""
@@ -844,9 +1006,7 @@ class ChartTab(QWidget):
                     i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                     i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
                     it = pg.LineSegmentROI(
-                        [[i1, d["p1"]], [i2, d["p2"]]],
-                        pen=pg.mkPen(color, width=w),
-                        movable=True,
+                        [[i1, d["p1"]], [i2, d["p2"]]], pen=pg.mkPen(color, width=w), movable=True
                     )
                     it.sigRegionChangeStarted.connect(
                         lambda r: setattr(self, "_is_roi_dragging", True)
@@ -944,38 +1104,10 @@ class ChartTab(QWidget):
         self._need_autorange = True
         self._cache_key = None
         self._prev_res_times = None
-        # Phase 0.2 (A3) — the engine no longer materialises forming
-        # arrays for every TF on load. Tell it which one the chart is
-        # currently showing so ``ctx.get_view(tf).forming`` works.
-        self._sync_visible_tf_to_engine()
 
     def on_tf_changed(self, tf):
         self._cache_key = None
-        # Phase 0.2 (A3) — update the engine's forming-tracking set so
-        # the new visible TF starts producing in-progress candle data.
-        self._sync_visible_tf_to_engine()
         self.redraw_chart()
-
-    def _sync_visible_tf_to_engine(self) -> None:
-        """Push the currently selected visual TF down to the engine.
-
-        See ``BacktestCore.set_visible_tf``. Tolerates engines that
-        predate the method (older snapshots / partially-mocked tests).
-        """
-        engine = getattr(self, "engine", None)
-        if engine is None:
-            return
-        setter = getattr(engine, "set_visible_tf", None)
-        if setter is None:
-            return
-        try:
-            tf = self.visual_tf_cb.currentText().lower()
-        except Exception:
-            tf = None
-        try:
-            setter(tf)
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.warning("set_visible_tf failed: %s", exc)
 
     def on_step_completed(self, idx, candle):
         if idx < 0:
@@ -991,16 +1123,7 @@ class ChartTab(QWidget):
             self.redraw_chart()
 
     def _get_tf_minutes(self):
-        m = {
-            "1m": 1,
-            "2m": 2,
-            "3m": 3,
-            "5m": 5,
-            "15m": 15,
-            "30m": 30,
-            "1h": 60,
-            "4h": 240,
-        }
+        m = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
         return m.get(self.visual_tf_cb.currentText().lower(), 1)
 
     # ==============================
@@ -1009,7 +1132,6 @@ class ChartTab(QWidget):
     def redraw_chart(self):
         """Redraw the current rendering window of candles."""
         import time as _time
-
         t_total = _time.perf_counter()
 
         if getattr(self, "_is_roi_dragging", False):
@@ -1062,7 +1184,7 @@ class ChartTab(QWidget):
             self._res_ts = pd.DatetimeIndex(rt).view(np.int64) / 10**9
         except Exception:
             self._res_ts = np.array([pd.to_datetime(t).timestamp() for t in rt])
-
+            
         self.time_axis.set_times(rt)
 
         n = len(res_df)
@@ -1110,11 +1232,7 @@ class ChartTab(QWidget):
             self._tracked_xrange = list(vb.viewRange()[0])
         else:
             xmin, xmax = self._tracked_xrange
-            w = (
-                self._user_zoom_width
-                if self._user_zoom_width is not None
-                else (xmax - xmin)
-            )
+            w = self._user_zoom_width if self._user_zoom_width is not None else (xmax - xmin)
 
             xmin -= shift
             xmax -= shift
@@ -1135,13 +1253,13 @@ class ChartTab(QWidget):
         t_all = _time.perf_counter() - t_total
         if t_all > 0.030:  # Only log when redraw takes > 30ms
             logger.info(
-                f"⏱ redraw: data={t_data * 1000:.1f}ms "
-                f"candles={t_candles * 1000:.1f}ms "
-                f"markers={t_markers * 1000:.1f}ms "
-                f"strategy={t_strategy * 1000:.1f}ms "
-                f"user_draw={t_user * 1000:.1f}ms "
-                f"camera={t_camera * 1000:.1f}ms "
-                f"TOTAL={t_all * 1000:.1f}ms "
+                f"⏱ redraw: data={t_data*1000:.1f}ms "
+                f"candles={t_candles*1000:.1f}ms "
+                f"markers={t_markers*1000:.1f}ms "
+                f"strategy={t_strategy*1000:.1f}ms "
+                f"user_draw={t_user*1000:.1f}ms "
+                f"camera={t_camera*1000:.1f}ms "
+                f"TOTAL={t_all*1000:.1f}ms "
                 f"(n={n}, trades={len(self.engine.trades)}, drawings={len(self.engine.drawings)})"
             )
 
@@ -1293,24 +1411,19 @@ class ChartTab(QWidget):
             if dtag and dtag in hidden:
                 continue
             try:
-                # Phase 0.1 (A4) — use only the cached numpy datetime64 set
-                # by engine.add_drawing. No fallback to pd.to_datetime():
-                # the cache is authoritative and avoids per-redraw parsing
-                # cost (target: redraw 500 drawings < 5 ms).
-                t1 = d.get("_t_np")
+                # Use pre-cached numpy datetime64 (set by engine.add_drawing)
+                t1 = d.get("_t_np") or d.get("_t1_np")
                 if t1 is None:
-                    t1 = d.get("_t1_np")
-                if t1 is None:
-                    # Drawing predates the cache (legacy persisted state).
-                    # Backfill once so subsequent redraws are O(1).
                     tk = "t" if "t" in d else "t1"
                     t1 = pd.to_datetime(d[tk]).to_datetime64()
-                    d["_t_np" if tk == "t" else "_t1_np"] = t1
-                t2 = d.get("_t2_np")
-                if t2 is None and "t2" in d:
+                if "_t2_np" in d:
+                    t2 = d["_t2_np"]
+                    if t1 < vmin and t2 < vmin:
+                        continue
+                    if t1 > vmax and t2 > vmax:
+                        continue
+                elif "t2" in d:
                     t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    d["_t2_np"] = t2
-                if t2 is not None:
                     if t1 < vmin and t2 < vmin:
                         continue
                     if t1 > vmax and t2 > vmax:
@@ -1327,9 +1440,7 @@ class ChartTab(QWidget):
                             float(p.strip())
                             for p in rc.replace("rgba(", "").replace(")", "").split(",")
                         ]
-                        color = QColor(
-                            int(pts[0]), int(pts[1]), int(pts[2]), int(pts[3] * 255)
-                        )
+                        color = QColor(int(pts[0]), int(pts[1]), int(pts[2]), int(pts[3] * 255))
                     except (ValueError, IndexError, TypeError):
                         color = QColor("white")
                 else:
@@ -1338,17 +1449,19 @@ class ChartTab(QWidget):
                     color = QColor("white")
 
                 if d["type"] == "line":
-                    # _t2_np is guaranteed populated above for two-point items.
+                    t2 = d.get("_t2_np")
+                    if t2 is None:
+                        t2 = pd.to_datetime(d["t2"]).to_datetime64()
                     i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
                     it = pg.PlotDataItem(
-                        [i1, i2],
-                        [p1, d["p2"]],
-                        pen=pg.mkPen(color, width=d.get("width", 1)),
+                        [i1, i2], [p1, d["p2"]], pen=pg.mkPen(color, width=d.get("width", 1))
                     )
                     self.plot_widget.addItem(it)
                     self.strategy_graphic_items.append(it)
                 elif d["type"] == "rect":
-                    # _t2_np is guaranteed populated above for two-point items.
+                    t2 = d.get("_t2_np")
+                    if t2 is None:
+                        t2 = pd.to_datetime(d["t2"]).to_datetime64()
                     i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
                     p2 = d["p2"]
                     mnx, mxx = min(i1, i2), max(i1, i2)
@@ -1359,10 +1472,7 @@ class ChartTab(QWidget):
                         fc.setAlphaF(d.get("opacity", 0.3))
                         brush = pg.mkBrush(fc)
                     it = QGraphicsRectItem(
-                        float(mnx),
-                        float(mny),
-                        float(mxx - mnx) or 1.0,
-                        float(mxy - mny),
+                        float(mnx), float(mny), float(mxx - mnx) or 1.0, float(mxy - mny)
                     )
                     it.setPen(pg.mkPen(color))
                     if brush:

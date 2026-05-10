@@ -68,9 +68,20 @@ WEB_APP_HTML = r"""
         .btn:hover { background: var(--border); color: #fff; border-color: var(--accent-light); }
         .apply-btn { padding: 4px 10px; font-size: 11px; }
         
-        #input-area { padding: 20px; background: var(--surface); display: flex; flex-direction: column; }
-        .input-wrapper { display: flex; align-items: flex-end; background: var(--elevated); border: 1px solid var(--border); border-radius: 8px; padding: 8px; transition: border-color 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+        #input-area { padding: 20px; background: var(--surface); display: flex; flex-direction: column; gap: 8px; }
+        .input-wrapper { display: flex; align-items: flex-end; background: var(--elevated); border: 1px solid var(--border); border-radius: 8px; padding: 8px; transition: border-color 0.2s; box-shadow: 0 4px 12px rgba(0,0,0,0.2); position: relative; }
         .input-wrapper:focus-within { border-color: var(--accent); }
+        .attach-wrap { position: relative; margin-bottom: 4px; }
+        #attach-btn { background: transparent; color: var(--text2); border: 1px solid var(--border); width: 32px; height: 32px; border-radius: 6px; cursor: pointer; display: flex; justify-content: center; align-items: center; margin-right: 8px; transition: 0.2s; font-size: 18px; line-height: 1; }
+        #attach-btn:hover { color: #fff; border-color: var(--accent-light); background: var(--border); }
+        #attach-menu { position: absolute; left: 0; bottom: 38px; min-width: 180px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.35); padding: 6px; display: none; z-index: 20; }
+        #attach-menu.open { display: block; }
+        .attach-item { width: 100%; background: transparent; color: var(--text); border: none; border-radius: 6px; padding: 8px 10px; text-align: left; cursor: pointer; font-size: 12px; }
+        .attach-item:hover { background: var(--elevated); }
+        #attachments-list { display: flex; flex-wrap: wrap; gap: 6px; }
+        .attachment-chip { border: 1px solid var(--border); background: var(--elevated); color: var(--text2); border-radius: 999px; padding: 4px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 6px; }
+        .attachment-chip button { border: none; background: transparent; color: var(--text2); cursor: pointer; font-size: 11px; }
+        .attachment-chip button:hover { color: var(--red); }
         
         #chat-input { flex: 1; background: transparent; color: var(--text); border: none; padding: 8px; resize: none; font-family: inherit; font-size: 13px; min-height: 24px; max-height: 150px; outline: none; line-height: 1.5; }
         
@@ -115,7 +126,16 @@ WEB_APP_HTML = r"""
     <div id="chat-container">
         <div id="chat-history"></div>
         <div id="input-area">
+            <div id="attachments-list"></div>
             <div class="input-wrapper">
+                <div class="attach-wrap">
+                    <button id="attach-btn" title="Attach">+</button>
+                    <div id="attach-menu">
+                        <button class="attach-item" onclick="requestAttachment('image')">🖼 Photo</button>
+                        <button class="attach-item" onclick="requestAttachment('document')">📄 Document</button>
+                        <button class="attach-item" onclick="requestAttachment('chart')">📐 Choose from chart</button>
+                    </div>
+                </div>
                 <textarea id="chat-input" placeholder="Ask AI to generate or fix a strategy... (Shift+Enter for new line)"></textarea>
                 <button id="action-btn" onclick="handleAction()">
                     <svg id="icon-send" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path></svg>
@@ -139,11 +159,22 @@ WEB_APP_HTML = r"""
         var currentAiMessageDiv = null;
         var currentAiMarkdown = "";
         var isGenerating = false;
+        var chartSelectionContext = null;
+        var selectedAttachments = [];
 
         const inputEl = document.getElementById('chat-input');
+        const attachBtn = document.getElementById('attach-btn');
+        const attachMenu = document.getElementById('attach-menu');
         inputEl.addEventListener('input', function() {
             this.style.height = '24px';
             this.style.height = (this.scrollHeight) + 'px';
+        });
+        attachBtn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            attachMenu.classList.toggle('open');
+        });
+        window.addEventListener('click', function() {
+            attachMenu.classList.remove('open');
         });
 
         marked.setOptions({
@@ -283,7 +314,57 @@ WEB_APP_HTML = r"""
             currentAiMarkdown = "";
             history.scrollTop = history.scrollHeight;
             
-            pyBridge.receive_chat_request(text, editor.getValue());
+            const code = editor ? editor.getValue() : "";
+            const payloadObj = chartSelectionContext ? JSON.parse(JSON.stringify(chartSelectionContext)) : {};
+            if (selectedAttachments.length > 0) {
+                payloadObj.attachments = selectedAttachments;
+            }
+            const selectionPayload = Object.keys(payloadObj).length > 0 ? JSON.stringify(payloadObj) : "";
+            pyBridge.receive_chat_request_ext(text, code, selectionPayload);
+            selectedAttachments = [];
+            renderAttachments();
+        }
+
+        function requestChartSelection() {
+            if (pyBridge) {
+                pyBridge.receive_chart_selection_request();
+                appendSystemMessage("Selection mode enabled. Drag on chart to capture area context.");
+            }
+        }
+
+        function requestAttachment(kind) {
+            attachMenu.classList.remove('open');
+            if (!pyBridge) return;
+            if (kind === 'chart') {
+                requestChartSelection();
+                return;
+            }
+            pyBridge.receive_attachment_request(kind);
+        }
+
+        function renderAttachments() {
+            const host = document.getElementById('attachments-list');
+            if (!host) return;
+            if (!selectedAttachments.length) {
+                host.innerHTML = '';
+                return;
+            }
+            host.innerHTML = selectedAttachments.map((a, idx) => {
+                const label = `${a.kind === 'image' ? '🖼' : '📄'} ${a.name}`;
+                return `<span class="attachment-chip">${label}<button onclick="removeAttachment(${idx})">✕</button></span>`;
+            }).join('');
+        }
+
+        function removeAttachment(idx) {
+            selectedAttachments.splice(idx, 1);
+            renderAttachments();
+        }
+
+        function set_attachment_from_python(payload) {
+            if (!payload || !payload.path) return;
+            selectedAttachments.push(payload);
+            renderAttachments();
+            appendSystemMessage(`Attached: ${payload.name}`);
         }
 
         function stopAI() {
@@ -337,6 +418,37 @@ WEB_APP_HTML = r"""
             history.scrollTop = history.scrollHeight;
         }
 
+        function set_chart_selection_context(payload) {
+            chartSelectionContext = payload;
+            appendSystemMessage("Chart area captured and attached to AI context.");
+        }
+
+        function clear_chart_selection_context() {
+            chartSelectionContext = null;
+            appendSystemMessage("Chart area context cleared.");
+        }
+
+        function set_chat_input_text(text) {
+            inputEl.value = text || "";
+            inputEl.dispatchEvent(new Event('input'));
+            inputEl.focus();
+        }
+
+        function set_chat_only_mode(enabled) {
+            const editorContainer = document.getElementById('editor-container');
+            const resizerEl = document.getElementById('resizer');
+            const chatContainer = document.getElementById('chat-container');
+            if (enabled) {
+                editorContainer.style.display = 'none';
+                resizerEl.style.display = 'none';
+                chatContainer.style.width = '100%';
+            } else {
+                editorContainer.style.display = 'flex';
+                resizerEl.style.display = 'block';
+                chatContainer.style.width = 'auto';
+            }
+        }
+
         function on_ai_error(msg) {
             appendSystemMessage("Error: " + msg, true);
             finish_ai_message();
@@ -368,9 +480,12 @@ WEB_APP_HTML = r"""
 class UnifiedBridge(QObject):
     ready = Signal()
     chat_requested = Signal(str, str) # prompt, code_context
+    chat_requested_ext = Signal(str, str, str) # prompt, code_context, selection_context_json
     run_backtest_requested = Signal(str) # code (unused now)
     stop_ai_requested = Signal()
     save_strategy_requested = Signal(str)
+    chart_selection_requested = Signal()
+    attachment_requested = Signal(str)
 
     @Slot()
     def editor_ready(self):
@@ -379,6 +494,12 @@ class UnifiedBridge(QObject):
     @Slot(str, str)
     def receive_chat_request(self, prompt, code_context):
         self.chat_requested.emit(prompt, code_context)
+        self.chat_requested_ext.emit(prompt, code_context, "")
+
+    @Slot(str, str, str)
+    def receive_chat_request_ext(self, prompt, code_context, selection_context_json):
+        self.chat_requested.emit(prompt, code_context)
+        self.chat_requested_ext.emit(prompt, code_context, selection_context_json)
         
     @Slot(str)
     def receive_run_backtest(self, code):
@@ -391,6 +512,14 @@ class UnifiedBridge(QObject):
     @Slot(str)
     def receive_save_strategy(self, code):
         self.save_strategy_requested.emit(code)
+
+    @Slot()
+    def receive_chart_selection_request(self):
+        self.chart_selection_requested.emit()
+
+    @Slot(str)
+    def receive_attachment_request(self, kind):
+        self.attachment_requested.emit(kind)
 
 
 class AIAssistantEditor(QWebEngineView):
@@ -423,3 +552,22 @@ class AIAssistantEditor(QWebEngineView):
     def ask_ai_to_fix(self, traceback_str):
         escaped = json.dumps(traceback_str)
         self.page().runJavaScript(f"append_ai_error_ask({escaped});")
+
+    def set_chart_selection_context(self, context_payload):
+        escaped = json.dumps(context_payload)
+        self.page().runJavaScript(f"set_chart_selection_context({escaped});")
+
+    def clear_chart_selection_context(self):
+        self.page().runJavaScript("clear_chart_selection_context();")
+
+    def set_chat_input_text(self, text):
+        escaped = json.dumps(text)
+        self.page().runJavaScript(f"set_chat_input_text({escaped});")
+
+    def set_chat_only_mode(self, enabled=True):
+        enabled_str = "true" if enabled else "false"
+        self.page().runJavaScript(f"set_chat_only_mode({enabled_str});")
+
+    def set_attachment(self, payload):
+        escaped = json.dumps(payload)
+        self.page().runJavaScript(f"set_attachment_from_python({escaped});")
