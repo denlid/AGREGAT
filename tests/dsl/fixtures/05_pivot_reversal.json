@@ -1,0 +1,23 @@
+{
+  "strategy": {
+    "name": "PivotReversal",
+    "ltf": "5m",
+    "dsl_version": "1"
+  },
+  "indicators": [
+    {"id": "p", "type": "pivots", "lookback": 2}
+  ],
+  "filters": [
+    {"id": "bounce_high", "type": "cross_below", "lhs": "close", "rhs": "p"}
+  ],
+  "entries": [
+    {"when": "bounce_high", "do": "sell_at_next_open"}
+  ],
+  "exits": [
+    {"type": "pivot_sl", "anchor": "p"},
+    {"type": "fixed_rr_tp", "rr": 1.8}
+  ],
+  "risk": {
+    "risk_pct": 0.5
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "strategy": {
+    "name": "EmaPullback",
+    "htf": "15m",
+    "ltf": "1m",
+    "dsl_version": "1"
+  },
+  "indicators": [
+    {"id": "trend", "type": "ema", "on": "htf", "period": 50},
+    {"id": "fast", "type": "ema", "on": "ltf", "period": 9}
+  ],
+  "filters": [
+    {"id": "uptrend", "type": "cross_above", "lhs": "close", "rhs": "trend"},
+    {"id": "fast_pull", "type": "cross_above", "lhs": "fast", "rhs": "trend"}
+  ],
+  "entries": [
+    {"when": "fast_pull", "do": "buy_at_next_open"}
+  ],
+  "exits": [
+    {"type": "fixed_pts_sl", "pts": 10},
+    {"type": "fixed_rr_tp", "rr": 2.5}
+  ],
+  "risk": {
+    "risk_pct": 1.0
+  }
+}
