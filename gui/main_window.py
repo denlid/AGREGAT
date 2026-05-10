@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QMainWindow,
     QMessageBox,
@@ -47,6 +49,8 @@ from gui.tabs.stats_tab import StatsTab
 from gui.styling.theme import register_theme_listener
 from gui.tabs.trades_tab import TradesTab
 from gui.tabs.strategy_editor_tab import StrategyEditorTab
+from gui.widgets.ai_editor_web import AIAssistantEditor
+from gui.workers.ai_worker import AIAssistantWorker
 
 logger = logging.getLogger("StrategyTester.gui.main_window")
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,6 +84,12 @@ class MainWindow(QMainWindow):
         self.log_console = LogConsole()
         self.settings_tab = SettingsTab(self.engine, parent_window=self)
         self.strategy_editor_tab = StrategyEditorTab(self.engine, self)
+        self.global_ai_panel = AIAssistantEditor(self)
+        self.global_ai_panel.setMinimumWidth(360)
+        self.global_ai_panel.bridge.ready.connect(lambda: self.global_ai_panel.set_chat_only_mode(True))
+        self.global_ai_panel.hide()
+        self._global_ai_worker = None
+        self._chart_selection_context = None
 
         # Asset / session / replay first — toolbar build references them.
         self._asset_ctrl = AssetController(self)
@@ -136,6 +146,8 @@ class MainWindow(QMainWindow):
         cp.addWidget(self._toolbar_ctrl.build_toolbar_widget())
         self.chart_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.chart_splitter.addWidget(self.chart_tab)
+        self.chart_splitter.addWidget(self.global_ai_panel)
+        self.chart_splitter.setSizes([920, 0])
         cp.addWidget(self.chart_splitter, stretch=1)
 
         for w, name in (
@@ -162,6 +174,11 @@ class MainWindow(QMainWindow):
         e.data_loaded.connect(self._replay_ctrl.on_data_loaded)
         e.position_changed.connect(self.chart_tab.on_position_changed)
         e.simulation_finished.connect(self._replay_ctrl.on_simulation_finished)
+        self.global_ai_panel.bridge.chat_requested_ext.connect(self._on_global_ai_chat_requested)
+        self.global_ai_panel.bridge.stop_ai_requested.connect(self._on_global_ai_stop_requested)
+        self.global_ai_panel.bridge.chart_selection_requested.connect(self._on_chart_selection_requested)
+        self.global_ai_panel.bridge.attachment_requested.connect(self._on_ai_attachment_requested)
+        self.chart_tab.sigAreaSelected.connect(self._on_chart_area_selected)
 
     def _wire_shortcuts(self) -> None:
         sc = lambda k, fn: QShortcut(QKeySequence(k), self, fn)  # noqa: E731
@@ -294,3 +311,80 @@ class MainWindow(QMainWindow):
             self.strategy_editor_tab.handle_backtest_error(m)
         else:
             QMessageBox.critical(self, "Error", m)
+
+    def toggle_global_ai_panel(self) -> None:
+        visible = self.global_ai_panel.isVisible()
+        if visible:
+            self.global_ai_panel.hide()
+            self.chart_splitter.setSizes([1, 0])
+            return
+        self.global_ai_panel.show()
+        total_w = max(1, self.chart_splitter.width())
+        ai_w = max(320, min(420, int(total_w * 0.28)))
+        chart_w = max(1, total_w - ai_w)
+        self.chart_splitter.setSizes([chart_w, ai_w])
+
+    def _read_strategy_code_for_ai(self, fallback_code: str) -> str:
+        if fallback_code and fallback_code.strip():
+            return fallback_code
+        temp_path = os.path.join(_APP_DIR, "strategies", "temp_ai_strategy.py")
+        if os.path.exists(temp_path):
+            try:
+                with open(temp_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+        return ""
+
+    def _on_global_ai_chat_requested(self, prompt: str, code_context: str, selection_ctx_json: str) -> None:
+        provider = self.settings_tab.ai_provider_cb.currentText()
+        api_key = self.settings_tab.ai_api_key_le.text().strip()
+        extra_context = self._chart_selection_context or {}
+        if selection_ctx_json:
+            try:
+                extra_context = json.loads(selection_ctx_json)
+            except Exception:
+                pass
+        code = self._read_strategy_code_for_ai(code_context)
+        self._global_ai_worker = AIAssistantWorker(
+            provider, api_key, prompt, code, error_traceback=None, extra_context=extra_context
+        )
+        self._global_ai_worker.chunk_received.connect(self.global_ai_panel.stream_chunk)
+        self._global_ai_worker.error_occurred.connect(self.global_ai_panel.show_error)
+        self._global_ai_worker.finished_generation.connect(
+            lambda _full: self.global_ai_panel.finish_generation()
+        )
+        self._global_ai_worker.start()
+
+    def _on_global_ai_stop_requested(self) -> None:
+        if self._global_ai_worker:
+            self._global_ai_worker.stop()
+
+    def _on_chart_selection_requested(self) -> None:
+        self.tabs.setCurrentIndex(0)
+        if not self.global_ai_panel.isVisible():
+            self.toggle_global_ai_panel()
+        self.chart_tab.enable_area_selection_mode()
+
+    def _on_chart_area_selected(self, payload: dict) -> None:
+        self._chart_selection_context = dict(payload)
+        self._chart_selection_context["strategy_code"] = self._read_strategy_code_for_ai("")
+        self.global_ai_panel.set_chart_selection_context(self._chart_selection_context)
+        self.global_ai_panel.set_chat_input_text("Analyze this selected chart area and suggest strategy improvements.")
+
+    def _on_ai_attachment_requested(self, kind: str) -> None:
+        if kind == "image":
+            flt = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
+            title = "Select image"
+        else:
+            flt = "Documents (*.pdf *.txt *.md *.csv *.json *.doc *.docx);;All files (*.*)"
+            title = "Select document"
+        path, _ = QFileDialog.getOpenFileName(self, title, "", flt)
+        if not path:
+            return
+        payload = {
+            "kind": kind,
+            "name": os.path.basename(path),
+            "path": path,
+        }
+        self.global_ai_panel.set_attachment(payload)

@@ -1,8 +1,9 @@
 import logging
 import os
 import importlib.util
+import json
 from PySide6.QtCore import Slot
-from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QFileDialog
 
 from gui.widgets.ai_editor_web import AIAssistantEditor
 from gui.workers.ai_worker import AIAssistantWorker
@@ -30,21 +31,35 @@ class StrategyEditorTab(QWidget):
         main_layout.addWidget(self.editor)
         
         # Connect signals from JS bridge
-        self.editor.bridge.chat_requested.connect(self.on_chat_requested)
+        self.editor.bridge.chat_requested_ext.connect(self.on_chat_requested_ext)
         self.editor.bridge.run_backtest_requested.connect(self.on_run_backtest)
         self.editor.bridge.stop_ai_requested.connect(self.on_stop_ai)
         self.editor.bridge.save_strategy_requested.connect(self.on_save_strategy)
+        self.editor.bridge.chart_selection_requested.connect(self.on_chart_selection_requested)
+        self.editor.bridge.attachment_requested.connect(self.on_attachment_requested)
 
-    def on_chat_requested(self, prompt, code_context):
+    def on_chat_requested_ext(self, prompt, code_context, selection_context_json):
         # Disable inputs and show loading state is handled by JS
         provider = self.pw.settings_tab.ai_provider_cb.currentText()
         api_key = self.pw.settings_tab.ai_api_key_le.text().strip()
+        extra_context = {}
+        if selection_context_json:
+            try:
+                extra_context = json.loads(selection_context_json)
+            except Exception:
+                extra_context = {}
 
-        self._start_ai_worker(provider, api_key, prompt, code_context, self.latest_error)
+        self._start_ai_worker(
+            provider, api_key, prompt, code_context, self.latest_error, extra_context=extra_context
+        )
 
-    def _start_ai_worker(self, provider, api_key, prompt, code_context, error_traceback):
+    def _start_ai_worker(
+        self, provider, api_key, prompt, code_context, error_traceback, extra_context=None
+    ):
         self.latest_error = None # reset
-        self.ai_worker = AIAssistantWorker(provider, api_key, prompt, code_context, error_traceback)
+        self.ai_worker = AIAssistantWorker(
+            provider, api_key, prompt, code_context, error_traceback, extra_context=extra_context
+        )
         self.ai_worker.chunk_received.connect(self.editor.stream_chunk)
         self.ai_worker.error_occurred.connect(self.editor.show_error)
         self.ai_worker.finished_generation.connect(self._on_ai_finished)
@@ -114,7 +129,9 @@ class StrategyEditorTab(QWidget):
             with open(TEMP_STRAT_PATH, "r", encoding="utf-8") as f:
                 code_context = f.read()
                 
-        self._start_ai_worker(provider, api_key, "Fix this error.", code_context, self.latest_error)
+        self._start_ai_worker(
+            provider, api_key, "Fix this error.", code_context, self.latest_error, extra_context={}
+        )
 
     def on_stop_ai(self):
         if self.ai_worker:
@@ -136,3 +153,20 @@ class StrategyEditorTab(QWidget):
                 self.editor.show_system_message(f"Successfully saved to {os.path.basename(path)}")
             except Exception as e:
                 self.editor.show_system_message(f"Save failed: {e}", True)
+
+    def on_chart_selection_requested(self):
+        if hasattr(self.pw, "_on_chart_selection_requested"):
+            self.pw._on_chart_selection_requested()
+
+    def on_attachment_requested(self, kind):
+        if kind == "image":
+            flt = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
+            title = "Select image"
+        else:
+            flt = "Documents (*.pdf *.txt *.md *.csv *.json *.doc *.docx);;All files (*.*)"
+            title = "Select document"
+        path, _ = QFileDialog.getOpenFileName(self, title, "", flt)
+        if not path:
+            return
+        payload = {"kind": kind, "name": os.path.basename(path), "path": path}
+        self.editor.set_attachment(payload)

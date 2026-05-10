@@ -228,6 +228,13 @@ class ToolbarController:
         )
         tb.addWidget(h.btn_lines)
 
+        h.btn_chart_ai = QToolButton()
+        h.btn_chart_ai.setText("🤖")
+        h.btn_chart_ai.setToolTip("Open global AI panel for chart feedback")
+        h.btn_chart_ai.setFixedSize(28, 28)
+        h.btn_chart_ai.clicked.connect(h.toggle_global_ai_panel)
+        tb.addWidget(h.btn_chart_ai)
+
         tb.addWidget(h.chart_tab.layers_btn)
 
     def _add_drawing_section(self, tb: QHBoxLayout) -> None:
