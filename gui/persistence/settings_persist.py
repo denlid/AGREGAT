@@ -1,5 +1,5 @@
 """
-GUI settings persistence — `~/.agregat/config.json`.
+GUI settings persistence — `saves/settings.json` (project-local).
 
 Stores user preferences that survive across sessions:
     theme, chart_scheme, font_size, initial_equity, risk_pct, max_lots_per_100k,
@@ -22,8 +22,8 @@ logger = logging.getLogger("StrategyTester.settings_persist")
 
 
 def config_path() -> str:
-    home = os.path.expanduser("~")
-    return os.path.join(home, ".agregat", "config.json")
+    app_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(app_dir, "saves", "settings.json")
 
 
 # Defaults are intentionally identical to the Settings UI's reset values so
@@ -73,11 +73,24 @@ def load() -> Dict[str, Any]:
 
 
 def save(settings: Dict[str, Any]) -> None:
-    """Atomically write `settings` to ~/.agregat/config.json."""
+    """Atomically write settings to the project-local saves/settings.json.
+
+    IMPORTANT: preserve unrelated keys in the shared settings file.
+    """
     path = config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    payload = {k: settings.get(k, DEFAULTS[k]) for k in DEFAULTS}
+    existing: Dict[str, Any] = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    payload = dict(existing)
+    payload.update({k: settings.get(k, DEFAULTS[k]) for k in DEFAULTS})
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str)
