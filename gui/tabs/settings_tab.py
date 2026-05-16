@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -27,6 +28,47 @@ logger = logging.getLogger("StrategyTester.gui.settings_tab")
 
 
 class SettingsTab(QWidget):
+    """AI provider keys in the UI (persisted as ``ai_provider``)."""
+
+    AI_PROVIDERS = [
+        "OpenAI",
+        "Anthropic",
+        "Mistral",
+        "Google Gemini",
+        "Custom (OpenAI-compatible)",
+    ]
+    AI_PROVIDER_MODELS = {
+        "OpenAI": [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4-turbo",
+            "o3-mini",
+            "gpt-3.5-turbo",
+        ],
+        "Anthropic": [
+            "claude-3-5-sonnet-20240620",
+            "claude-3-5-haiku-20241022",
+            "claude-3-opus-20240229",
+        ],
+        "Mistral": [
+            "mistral-large-latest",
+            "mistral-small-latest",
+            "open-mistral-nemo",
+        ],
+        "Google Gemini": [
+            "gemini-2.5-flash",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro",
+        ],
+    }
+    _AI_LEGACY_PROVIDER = {
+        "OpenAI (GPT-4o)": ("OpenAI", "gpt-4o"),
+        "Anthropic (Claude 3.5)": ("Anthropic", "claude-3-5-sonnet-20240620"),
+        "Mistral (Large)": ("Mistral", "mistral-large-latest"),
+        "Google Gemini (2.5 → 1.5 → 2.0 Flash)": ("Google Gemini", "gemini-2.5-flash"),
+    }
+
     def __init__(self, engine, parent_window=None):
         super().__init__()
         self.engine = engine
@@ -416,20 +458,52 @@ class SettingsTab(QWidget):
         f7.setSpacing(8)
 
         self.ai_provider_cb = QComboBox()
-        self.ai_provider_cb.addItems(["OpenAI (GPT-4o)", "Anthropic (Claude 3.5)", "Mistral (Large)"])
-        self.ai_provider_cb.setCurrentText("OpenAI (GPT-4o)")
-        self.ai_provider_cb.setToolTip("Select the LLM provider for strategy generation")
+        self.ai_provider_cb.addItems(list(self.AI_PROVIDERS))
+        self.ai_provider_cb.setCurrentText("OpenAI")
+        self.ai_provider_cb.setToolTip("LLM vendor for the strategy editor / global AI chat")
+        self.ai_provider_cb.currentTextChanged.connect(self._on_ai_provider_changed)
         f7.addRow("Provider:", self.ai_provider_cb)
 
-        from PySide6.QtWidgets import QLineEdit
+        self.ai_model_cb = QComboBox()
+        self.ai_model_cb.setMinimumWidth(260)
+        self.ai_model_cb.setToolTip("Model id for the selected provider (free text when Custom)")
+        f7.addRow("Model:", self.ai_model_cb)
+
+        self.ai_custom_wrap = QWidget()
+        custom_form = QFormLayout(self.ai_custom_wrap)
+        custom_form.setSpacing(8)
+        custom_form.setContentsMargins(0, 0, 0, 0)
+        self.ai_custom_base_url_le = QLineEdit()
+        self.ai_custom_base_url_le.setPlaceholderText(
+            "https://integrate.api.nvidia.com/v1  (OpenAI-compatible base URL)"
+        )
+        self.ai_custom_base_url_le.setToolTip(
+            "Base URL for OpenAI-compatible APIs (NIM, vLLM, LiteLLM, etc.). "
+            "Must include /v1 if the server expects it."
+        )
+        custom_form.addRow("Base URL:", self.ai_custom_base_url_le)
+        self.ai_custom_extra_body_le = QLineEdit()
+        self.ai_custom_extra_body_le.setPlaceholderText(
+            'Optional JSON for extra_body, e.g. {"chat_template_kwargs":{"thinking":false}}'
+        )
+        self.ai_custom_extra_body_le.setToolTip(
+            "Optional JSON merged into the chat.completions request as extra_body (custom provider only)."
+        )
+        custom_form.addRow("Extra body (JSON):", self.ai_custom_extra_body_le)
+        f7.addRow(self.ai_custom_wrap)
+
         self.ai_api_key_le = QLineEdit()
         self.ai_api_key_le.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ai_api_key_le.setPlaceholderText("sk-...")
-        self.ai_api_key_le.setToolTip("API Key for the selected provider")
+        self.ai_api_key_le.setPlaceholderText("API key (OpenAI sk-…, Anthropic, Mistral, Gemini, nvapi-…)")
+        self.ai_api_key_le.setToolTip(
+            "API key for the selected provider. Gemini: https://aistudio.google.com/apikey"
+        )
         f7.addRow("API Key:", self.ai_api_key_le)
 
         grp7.setLayout(f7)
         layout.addWidget(grp7)
+        self._repopulate_ai_model_combo(select_model="gpt-4o")
+        self._update_ai_custom_visibility()
         layout.addStretch()
 
         # Assemble sub-tabs
@@ -455,9 +529,11 @@ class SettingsTab(QWidget):
             self.colors_cb,
             self.exec_profile_cb,
             self.log_level_cb,
-            self.ai_provider_cb,
+            self.ai_model_cb,
         ]
         self.ai_api_key_le.textChanged.connect(self._persist)
+        self.ai_custom_base_url_le.textChanged.connect(self._persist)
+        self.ai_custom_extra_body_le.textChanged.connect(self._persist)
         widgets_value = [
             self.font_size_spin,
             self.equity_spin,
@@ -486,6 +562,75 @@ class SettingsTab(QWidget):
         for w in widgets_toggle:
             w.toggled.connect(self._persist)
 
+    def _normalize_loaded_ai_settings(self, settings: dict) -> dict:
+        out = dict(settings)
+        prov = (out.get("ai_provider") or "OpenAI").strip()
+        if prov in self._AI_LEGACY_PROVIDER:
+            np, nm = self._AI_LEGACY_PROVIDER[prov]
+            out["ai_provider"] = np
+            out.setdefault("ai_model", nm)
+        elif prov not in self.AI_PROVIDERS:
+            out["ai_provider"] = "OpenAI"
+            out.setdefault("ai_model", "gpt-4o")
+        return out
+
+    def _on_ai_provider_changed(self, _text: str | None = None) -> None:
+        self._repopulate_ai_model_combo()
+        self._update_ai_custom_visibility()
+        self._persist()
+
+    def _repopulate_ai_model_combo(self, *, select_model: str | None = None) -> None:
+        prov = self.ai_provider_cb.currentText()
+        self.ai_model_cb.blockSignals(True)
+        self.ai_model_cb.clear()
+        if prov == "Custom (OpenAI-compatible)":
+            self.ai_model_cb.setEditable(True)
+            le = self.ai_model_cb.lineEdit()
+            le.setPlaceholderText("e.g. deepseek-ai/deepseek-v4-pro")
+            want = (select_model or "").strip()
+            self.ai_model_cb.setEditText(want)
+        else:
+            self.ai_model_cb.setEditable(False)
+            models = self.AI_PROVIDER_MODELS.get(prov, [])
+            for m in models:
+                self.ai_model_cb.addItem(m)
+            want = (select_model or "").strip()
+            if want and self.ai_model_cb.findText(want) >= 0:
+                self.ai_model_cb.setCurrentText(want)
+            elif models:
+                self.ai_model_cb.setCurrentIndex(0)
+        self.ai_model_cb.blockSignals(False)
+
+    def _update_ai_custom_visibility(self) -> None:
+        c = self.ai_provider_cb.currentText() == "Custom (OpenAI-compatible)"
+        self.ai_custom_wrap.setVisible(c)
+
+    def get_ai_worker_kwargs(self) -> dict:
+        """Arguments for :class:`gui.workers.ai_worker.AIAssistantWorker` (minus prompt/context)."""
+        import json as _json
+
+        prov = self.ai_provider_cb.currentText()
+        base_url = ""
+        extra_raw = ""
+        if prov == "Custom (OpenAI-compatible)":
+            base_url = self.ai_custom_base_url_le.text().strip()
+            extra_raw = self.ai_custom_extra_body_le.text().strip()
+        extra_body = None
+        if extra_raw:
+            try:
+                parsed = _json.loads(extra_raw)
+                if isinstance(parsed, dict):
+                    extra_body = parsed
+            except Exception:
+                extra_body = None
+        return {
+            "provider": prov,
+            "api_key": self.ai_api_key_le.text().strip(),
+            "model": self.ai_model_cb.currentText().strip(),
+            "openai_base_url": base_url,
+            "openai_extra_body": extra_body,
+        }
+
     # ---- Persistence (Phase 2) ----
     def _capture_settings(self) -> dict:
         """Return current widget state as a settings dict."""
@@ -503,7 +648,10 @@ class SettingsTab(QWidget):
             "batch_size": self.batch_size_spin.value(),
             "log_level": self.log_level_cb.currentText(),
             "ai_provider": self.ai_provider_cb.currentText(),
+            "ai_model": self.ai_model_cb.currentText().strip(),
             "ai_api_key": self.ai_api_key_le.text(),
+            "ai_custom_base_url": self.ai_custom_base_url_le.text(),
+            "ai_custom_extra_body": self.ai_custom_extra_body_le.text(),
             "fast_mode": self.fast_mode_cb.isChecked(),
             "auto_save_logs": self.auto_save_logs_cb.isChecked(),
             "max_log_lines": self.max_log_lines_spin.value(),
@@ -537,7 +685,26 @@ class SettingsTab(QWidget):
 
     def apply_persisted(self, settings: dict) -> None:
         """Apply a settings dict to the UI (call after `__init__`)."""
+        # Block all signals to avoid triggering _persist() with a partially-applied
+        # snapshot (which would overwrite later keys with default/stale values).
+        widgets_to_block = [
+            self.theme_cb, self.colors_cb, self.font_size_spin, self.equity_spin,
+            self.risk_pct_spin, self.max_lots_spin, self.tz_spin, self.render_win,
+            self.cache_size_spin, self.batch_size_spin, self.log_level_cb,
+            self.ai_provider_cb,
+            self.ai_model_cb,
+            self.ai_custom_base_url_le,
+            self.ai_custom_extra_body_le,
+            self.ai_api_key_le,
+            self.fast_mode_cb,
+            self.auto_save_logs_cb, self.max_log_lines_spin, self.show_grid_cb,
+            self.crosshair_cb, self.autofit_y_cb, self.exec_profile_cb,
+            self.spread_spin, self.commission_spin, self.slippage_spin,
+        ]
+        for w in widgets_to_block:
+            w.blockSignals(True)
         try:
+            settings = self._normalize_loaded_ai_settings(dict(settings))
             self.theme_cb.setCurrentText(settings.get("theme", "dark"))
             self.colors_cb.setCurrentText(settings.get("chart_scheme", "Classic"))
             self.font_size_spin.setValue(int(settings.get("font_size", 11)))
@@ -549,7 +716,13 @@ class SettingsTab(QWidget):
             self.cache_size_spin.setValue(int(settings.get("cache_size", 1000)))
             self.batch_size_spin.setValue(int(settings.get("batch_size", 5000)))
             self.log_level_cb.setCurrentText(settings.get("log_level", "INFO"))
-            self.ai_provider_cb.setCurrentText(settings.get("ai_provider", "OpenAI (GPT-4o)"))
+            self.ai_provider_cb.setCurrentText(settings.get("ai_provider", "OpenAI"))
+            self._repopulate_ai_model_combo(
+                select_model=settings.get("ai_model") or "gpt-4o"
+            )
+            self.ai_custom_base_url_le.setText(settings.get("ai_custom_base_url", ""))
+            self.ai_custom_extra_body_le.setText(settings.get("ai_custom_extra_body", ""))
+            self._update_ai_custom_visibility()
             self.ai_api_key_le.setText(settings.get("ai_api_key", ""))
             self.fast_mode_cb.setChecked(bool(settings.get("fast_mode", False)))
             self.auto_save_logs_cb.setChecked(bool(settings.get("auto_save_logs", True)))
@@ -565,6 +738,11 @@ class SettingsTab(QWidget):
                 em.slippage_points = settings.get("exec_slippage_points")
         except Exception as e:
             logger.debug(f"Could not fully apply persisted settings: {e!r}")
+        finally:
+            for w in widgets_to_block:
+                w.blockSignals(False)
+            # One single save after all values are applied.
+            self._persist()
 
     # ------------------------------------------------------------------
     # Strategy → PARAMS auto-form (Etap 4 of LINEAR LOGIC CORE plan)
@@ -991,4 +1169,12 @@ class SettingsTab(QWidget):
         self.spread_spin.setValue(0.0)
         self.commission_spin.setValue(0.0)
         self.slippage_spin.setValue(0.0)
+        self.ai_provider_cb.blockSignals(True)
+        self.ai_provider_cb.setCurrentText("OpenAI")
+        self.ai_provider_cb.blockSignals(False)
+        self._repopulate_ai_model_combo(select_model="gpt-4o")
+        self.ai_custom_base_url_le.clear()
+        self.ai_custom_extra_body_le.clear()
+        self._update_ai_custom_visibility()
+        self.ai_api_key_le.clear()
         logger.info("🔄 Settings reset to defaults")

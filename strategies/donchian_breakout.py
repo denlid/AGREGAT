@@ -1,145 +1,58 @@
-"""Donchian Channel Breakout — example strategy bundled with AGREGAT.
+from engine.strategy.context import Strategy, Param
+import random
 
-A second reference strategy showing how to write a breakout system that
-implements both APIs:
+class RandomStrategy(Strategy):
+    name = "Pure Random"
 
-* :pymeth:`DonchianBreakout.on_candle` — the visual path (one bar at a
-  time) for use with the standard backtest engine, BarReplay, and the
-  upcoming live broker gateway.
-* :pymeth:`DonchianBreakout.vectorized_signals` — NumPy-friendly path
-  for the fast-quant engine.
+    PARAMS = [
+        Param("entry_prob",   "Ймовірність входу", "float", 0.05, min=0.001, max=0.5, step=0.005),
+        Param("min_sl_pts",   "Мін SL (пунктів)",  "float", 20,   min=5,    max=200, step=5),
+        Param("max_sl_pts",   "Макс SL (пунктів)",  "float", 100,  min=10,   max=500, step=5),
+        Param("min_rr",       "Мін RR (TP/SL)",     "float", 1.0,  min=1.0,  max=5.0, step=0.1),
+        Param("max_rr",       "Макс RR (TP/SL)",    "float", 5.0,  min=1.0,  max=10.0, step=0.1),
+        Param("min_risk_pct", "Мін ризик %",         "float", 0.5,  min=0.1,  max=3.0,  step=0.1),
+        Param("max_risk_pct", "Макс ризик %",        "float", 2.0,  min=0.5,  max=5.0,  step=0.1),
+    ]
 
-Trading idea
-============
-20-bar Donchian breakout (Turtle-style). When the close prints above the
-prior 20-bar high we go long; when it prints below the prior 20-bar low
-we go short. The position is closed on the *opposite* breakout via
-hard SL — there is no separate exit signal in this version. This keeps
-the example small yet exercises:
-
-* Both long and short directions (so you can see Phase 1's Ask-side
-  SL/TP fix on shorts).
-* Long-running trades (because Donchian channels expand slowly), making
-  for an easy visual debug experience.
-
-Risk per trade: 1.5 % of equity. Stop-loss is the *opposite* channel
-edge at the time of entry (i.e. the recent low for longs, the recent
-high for shorts). Take-profit is fixed at 2× the SL distance.
-"""
-
-from __future__ import annotations
-
-import numpy as np
-import pandas as pd
-
-from engine.core.indicators import donchian_channel
-
-LOOKBACK = 20
-RR_MULT = 2.0  # take-profit = RR_MULT * sl_distance
-RISK_PCT = 1.5
-
-
-class DonchianBreakout:
-    """20-bar Donchian breakout with 2:1 reward/risk."""
-
-    name = "Donchian Breakout"
-
-    # ------------------------------------------------------------------
-    # Visual / live-ready path
-    # ------------------------------------------------------------------
-    def on_candle(self, ctx) -> None:
-        # ``ctx.data`` is the modern Zero-Future-safe data window; the
-        # NumPy slices it returns are read-only views on the engine's
-        # storage so a strategy cannot peek at future bars.
-        if len(ctx.data) < LOOKBACK + 1:
+    def on_candle(self, ctx):
+        # Випадковий вхід з заданою ймовірністю
+        prob = self.params["entry_prob"]
+        if random.random() > prob:
             return
 
-        highs = ctx.data.high
-        lows = ctx.data.low
-        # Lookback window — exclude the current bar so the breakout is
-        # on truly new territory.
-        recent_high = float(highs[-LOOKBACK - 1 : -1].max())
-        recent_low = float(lows[-LOOKBACK - 1 : -1].min())
+        # Випадковий напрямок
+        direction = random.choice(["long", "short"])
 
-        if ctx.position is not None or ctx._engine.pending_order is not None:
+        # Випадковий SL (пунктів)
+        min_sl = float(self.params["min_sl_pts"])
+        max_sl = float(self.params["max_sl_pts"])
+        sl_points = random.uniform(min_sl, max_sl)
+
+        # Випадкове RR (TP = SL * RR)
+        min_rr = float(self.params["min_rr"])
+        max_rr = float(self.params["max_rr"])
+        rr = random.uniform(min_rr, max_rr)
+        tp_points = sl_points * rr
+
+        # Випадковий відсоток ризику
+        min_risk = float(self.params["min_risk_pct"])
+        max_risk = float(self.params["max_risk_pct"])
+        risk_pct = random.uniform(min_risk, max_risk)
+
+        # Розрахунок об'єму (строгий режим)
+        volume = ctx.calculate_lot(sl_points, risk_pct=risk_pct, strict=True)
+
+        # Якщо розрахунок невалідний — пропускаємо угоду
+        if volume is None or volume <= 0:
+            ctx.log(f"Skipping entry – invalid lot (vol={volume}, sl={sl_points:.1f}, risk={risk_pct:.1f}%)")
             return
 
-        close = float(ctx.data.close[-1])
-        if close > recent_high:
-            sl_price = recent_low
-            sl_price_dist = close - sl_price
-            if sl_price_dist <= 0:
-                return
-            tp_price_dist = sl_price_dist * RR_MULT
-            tp_price = close + tp_price_dist
-            sl_pts = sl_price_dist / ctx.asset.tick_size
-            lot = ctx.calculate_lot(sl_points=sl_pts, risk_pct=RISK_PCT)
-            if lot:
-                ctx.buy_at_open(
-                    volume=lot,
-                    sl=sl_price,
-                    tp=tp_price,
-                    reason="Donchian high break",
-                    tag="don_long",
-                )
-        elif close < recent_low:
-            sl_price = recent_high
-            sl_price_dist = sl_price - close
-            if sl_price_dist <= 0:
-                return
-            tp_price_dist = sl_price_dist * RR_MULT
-            tp_price = close - tp_price_dist
-            sl_pts = sl_price_dist / ctx.asset.tick_size
-            lot = ctx.calculate_lot(sl_points=sl_pts, risk_pct=RISK_PCT)
-            if lot:
-                ctx.sell_at_open(
-                    volume=lot,
-                    sl=sl_price,
-                    tp=tp_price,
-                    reason="Donchian low break",
-                    tag="don_short",
-                )
+        # Відкриття позиції
+        if direction == "long":
+            ctx.buy_at_open(volume=volume, sl=sl_points, tp=tp_points,
+                            reason=f"Random long | RR={rr:.1f} risk={risk_pct:.1f}%")
+        else:
+            ctx.sell_at_open(volume=volume, sl=sl_points, tp=tp_points,
+                             reason=f"Random short | RR={rr:.1f} risk={risk_pct:.1f}%")
 
-    # ------------------------------------------------------------------
-    # Fast Quant / vectorized path
-    # ------------------------------------------------------------------
-    def vectorized_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        def col(name: str) -> str:
-            return name if name in df.columns else name.capitalize()
-
-        close = df[col("close")].to_numpy(dtype=np.float64)
-        high = df[col("high")].to_numpy(dtype=np.float64)
-        low = df[col("low")].to_numpy(dtype=np.float64)
-        n = len(df)
-
-        upper, lower = donchian_channel(high, low, LOOKBACK, exclude_current=True)
-
-        signal = np.zeros(n, dtype=np.int8)
-        sl_pts = np.zeros(n, dtype=np.float64)
-        tp_pts = np.zeros(n, dtype=np.float64)
-
-        for i in range(LOOKBACK, n):
-            if not (np.isfinite(upper[i]) and np.isfinite(lower[i])):
-                continue
-            if close[i] > upper[i]:
-                dist = close[i] - lower[i]
-                if dist > 0:
-                    signal[i] = 1
-                    sl_pts[i] = dist
-                    tp_pts[i] = dist * RR_MULT
-            elif close[i] < lower[i]:
-                dist = upper[i] - close[i]
-                if dist > 0:
-                    signal[i] = -1
-                    sl_pts[i] = dist
-                    tp_pts[i] = dist * RR_MULT
-
-        return pd.DataFrame(
-            {
-                "signal": signal,
-                "sl_points": sl_pts,
-                "tp_points": tp_pts,
-                "risk_pct": np.full(n, RISK_PCT, dtype=np.float64),
-            },
-            index=df.index,
-        )
+        ctx.log(f"Entered {direction} | SL={sl_points:.1f} TP={tp_points:.1f} risk={risk_pct:.1f}% lot={volume:.4f}")

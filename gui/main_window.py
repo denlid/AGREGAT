@@ -87,14 +87,23 @@ class MainWindow(QMainWindow):
         self.analytics_tab = AnalyticsTab(self.engine)
         self.quant_tab = QuantTab(self.engine)
         self.log_console = LogConsole()
-        self.settings_tab = SettingsTab(self.engine, parent_window=self)
         self.strategy_editor_tab = StrategyEditorTab(self.engine, self)
+        self.settings_tab = SettingsTab(self.engine, parent_window=self)
         self.global_ai_panel = AIAssistantEditor(self)
         self.global_ai_panel.setMinimumWidth(360)
-        self.global_ai_panel.bridge.ready.connect(lambda: self.global_ai_panel.set_chat_only_mode(True))
+        self.global_ai_panel.bridge.ready.connect(self._on_global_ai_panel_ready)
         self.global_ai_panel.hide()
         self._global_ai_worker = None
+        
+        # Wire mirror panels for shared chat history
+        self.global_ai_panel.set_mirror_panel(self.strategy_editor_tab.editor)
+        self.strategy_editor_tab.editor.set_mirror_panel(self.global_ai_panel)
+        # Cross-panel chat tabs sync
+        self.global_ai_panel.bridge.chat_tabs_state_changed.connect(self._on_chart_ai_tabs_changed)
+        self.strategy_editor_tab.editor.bridge.chat_tabs_state_changed.connect(self._on_editor_tabs_changed)
         self._chart_selection_context = None
+        self._chat_tabs_state: str = ""  # last known full state JSON for disk persistence
+        self._chat_tabs_file = os.path.join(_APP_DIR, "saves", "chat_tabs.json")
 
         # Asset / session / replay first — toolbar build references them.
         self._asset_ctrl = AssetController(self)
@@ -162,12 +171,15 @@ class MainWindow(QMainWindow):
             (self.analytics_tab, "Analytics"),
             (self.quant_tab, "Quant"),
             (self.log_console, "Logs"),
-            (self.settings_tab, "Settings"),
             (self.strategy_editor_tab, "Editor"),
+            (self.settings_tab, "Settings"),
         ):
             self.tabs.addTab(w, name)
         self.tabs.currentChanged.connect(self._on_tab)
         root.addWidget(self.tabs)
+
+        self._strategy_editor_tab_index = self.tabs.indexOf(self.strategy_editor_tab)
+        self._prev_tab_idx = self.tabs.currentIndex()
 
         self.setStatusBar(self._status_bar_ctrl.status_bar)
         self._advanced_resizer = AdvancedResizer(self, margin=6)
@@ -185,25 +197,50 @@ class MainWindow(QMainWindow):
         self.global_ai_panel.bridge.attachment_requested.connect(self._on_ai_attachment_requested)
         self.chart_tab.sigAreaSelected.connect(self._on_chart_area_selected)
 
+    def _is_editor_tab_active(self) -> bool:
+        """Check if the Editor tab or AI panel has focus, blocking chart shortcuts."""
+        current_idx = self.tabs.currentIndex()
+        # 6 = Editor tab
+        if current_idx == 6:
+            return True
+        # Also check if AI panel is visible and might have focus
+        if self.global_ai_panel.isVisible():
+            return True
+        return False
+
+    def _on_save_ctrl_s(self) -> None:
+        """Context-aware Ctrl+S: save strategy if in Editor, otherwise save session."""
+        if self._is_editor_tab_active():
+            # Trigger save via the strategy editor using existing saveStrategy() function
+            self.strategy_editor_tab.editor.page().runJavaScript("saveStrategy();")
+        else:
+            # Save session as usual
+            self._session_ctrl.save_session()
+
     def _wire_shortcuts(self) -> None:
         sc = lambda k, fn: QShortcut(QKeySequence(k), self, fn)  # noqa: E731
         rc, mc = self._replay_ctrl, self._menu_ctrl
-        sc(Qt.Key.Key_Right, lambda: self.chart_tab.scroll_chart(1))
-        sc(Qt.Key.Key_Left, lambda: self.chart_tab.scroll_chart(-1))
-        sc("Shift+Right", rc.step_visual_candle)
-        sc("Shift+Left", rc.step_back_visual_candle)
-        sc(Qt.Key.Key_Space, self.bar_replay.toggle_play)
-        sc(Qt.Key.Key_Home, self.chart_tab._fit_all)
-        sc(Qt.Key.Key_Escape, lambda: self.chart_tab._set_tool("None"))
-        sc("Ctrl+=", lambda: self.chart_tab.zoom_chart(1.15))
-        sc("Ctrl+-", lambda: self.chart_tab.zoom_chart(1 / 1.15))
-        sc("Ctrl+Shift+=", lambda: self._zoom_y(1.15))
-        sc("Ctrl+Shift+-", lambda: self._zoom_y(1 / 1.15))
-        sc("Ctrl+Z", rc.undo_drawing)
-        sc("Ctrl+Shift+Z", rc.redo_drawing)
-        sc("Ctrl+Alt+R", self.bar_replay.run_to_end)
+        
+        # Wrap chart-related shortcuts to check if editor is active
+        sc(Qt.Key.Key_Right, lambda: not self._is_editor_tab_active() and self.chart_tab.scroll_chart(1))
+        sc(Qt.Key.Key_Left, lambda: not self._is_editor_tab_active() and self.chart_tab.scroll_chart(-1))
+        sc("Shift+Right", lambda: not self._is_editor_tab_active() and rc.step_visual_candle())
+        sc("Shift+Left", lambda: not self._is_editor_tab_active() and rc.step_back_visual_candle())
+        sc(Qt.Key.Key_Space, lambda: not self._is_editor_tab_active() and self.bar_replay.toggle_play())
+        sc(Qt.Key.Key_Home, lambda: not self._is_editor_tab_active() and self.chart_tab._fit_all())
+        sc(Qt.Key.Key_Escape, lambda: not self._is_editor_tab_active() and self.chart_tab._set_tool("None"))
+        sc("Ctrl+=", lambda: not self._is_editor_tab_active() and self.chart_tab.zoom_chart(1.15))
+        sc("Ctrl+-", lambda: not self._is_editor_tab_active() and self.chart_tab.zoom_chart(1 / 1.15))
+        sc("Ctrl+Shift+=", lambda: not self._is_editor_tab_active() and self._zoom_y(1.15))
+        sc("Ctrl+Shift+-", lambda: not self._is_editor_tab_active() and self._zoom_y(1 / 1.15))
+        sc("Ctrl+Z", lambda: not self._is_editor_tab_active() and rc.undo_drawing())
+        sc("Ctrl+Shift+Z", lambda: not self._is_editor_tab_active() and rc.redo_drawing())
+        sc("Ctrl+Alt+R", lambda: not self._is_editor_tab_active() and self.bar_replay.run_to_end())
+        # These can be used in editor too, but still check
         sc("Ctrl+/", mc.show_cheat_sheet)
         sc("Ctrl+Shift+P", mc.show_command_palette)
+        # Ctrl+S: Save Strategy (Editor) OR Save Session (Chart)
+        sc("Ctrl+S", self._on_save_ctrl_s)
 
     def _restore_persisted_settings_tab(self) -> None:
         try:
@@ -257,8 +294,22 @@ class MainWindow(QMainWindow):
         vb = self.chart_tab.plot_widget.getViewBox()
         vb.scaleBy((1.0, 1.0 / factor))
 
+    def _on_global_ai_panel_ready(self) -> None:
+        self.global_ai_panel.set_chat_only_mode(True)
+        self.global_ai_panel.set_strategy_header_title("AI assistant")
+        # Push persisted chat tabs to the chart AI panel
+        saved = self._load_chat_tabs_from_disk()
+        if saved:
+            self.global_ai_panel.apply_chat_tabs_state(saved)
+
     def _on_tab(self, idx: int) -> None:
-        # 0=Chart, 1=Stats, 2=Trades, 3=Analytics, 4=Quant, 5=Logs, 6=Settings
+        prev = self._prev_tab_idx
+        self._prev_tab_idx = idx
+        # Leaving Editor → Chart: push Monaco code into engine (see StrategyEditorTab.sync_engine_from_editor).
+        if idx == 0 and prev == self._strategy_editor_tab_index and self.strategy_editor_tab.should_sync_editor_to_engine():
+            self.strategy_editor_tab.sync_engine_from_editor()
+
+        # 0=Chart, 1=Stats, 2=Trades, 3=Analytics, 4=Quant, 5=Logs, 6=Editor, 7=Settings
         if idx == 1:
             self.stats_tab._recalc()
         elif idx == 2:
@@ -296,17 +347,21 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:  # type: ignore[no-untyped-def]
         self.bar_replay.stop_playback()
-        self.save_settings()
 
         # Sprint 3.5 — Fast startup cache
-        # Save a snapshot of the current engine state to avoid re-simulating on boot
-        if self.engine.current_idx >= 0:
-            try:
-                from engine import save_session
-                cache_path = os.path.join(os.path.dirname(self.settings_file), ".auto_save.agbk")
-                save_session(self.engine, cache_path)
-            except Exception as exc:
-                logger.debug(f"Failed to save startup cache: {exc}")
+        # Save engine state FIRST so current_idx is captured before save_settings
+        try:
+            from engine import save_session
+            cache_path = os.path.join(os.path.dirname(self.settings_file), ".auto_save.agbk")
+            save_session(self.engine, cache_path)
+        except Exception as exc:
+            logger.debug(f"Failed to save startup cache: {exc}")
+
+        # Persist chat tabs
+        if self._chat_tabs_state:
+            self._save_chat_tabs_to_disk(self._chat_tabs_state)
+
+        self.save_settings()
 
         super().closeEvent(e)
 
@@ -314,8 +369,35 @@ class MainWindow(QMainWindow):
         # Auto-fix loop interception
         if hasattr(self, "strategy_editor_tab") and self.tabs.currentWidget() == self.strategy_editor_tab:
             self.strategy_editor_tab.handle_backtest_error(m)
-        else:
-            QMessageBox.critical(self, "Error", m)
+            return
+
+        # Show non-blocking toast notification on chart instead of modal dialog
+        try:
+            from PySide6.QtCore import QTimer
+            from PySide6.QtWidgets import QLabel
+            from PySide6.QtGui import QColor
+
+            # Remove old toast if exists
+            if hasattr(self, "_error_toast") and self._error_toast is not None:
+                self._error_toast.deleteLater()
+                self._error_toast = None
+
+            toast = QLabel(self.chart_tab)
+            toast.setText(f"⚠️ Strategy error — check Logs tab")
+            toast.setToolTip(m)
+            toast.setStyleSheet(
+                "background: rgba(200, 50, 50, 180); color: white; "
+                "padding: 8px 16px; border-radius: 6px; font-weight: bold; font-size: 13px;"
+            )
+            toast.adjustSize()
+            toast.move(10, 10)
+            toast.show()
+            self._error_toast = toast
+
+            # Auto-hide after 5 seconds
+            QTimer.singleShot(5000, lambda: (toast.deleteLater(), setattr(self, '_error_toast', None) if hasattr(self, '_error_toast') else None))
+        except Exception:
+            pass
 
     def toggle_global_ai_panel(self) -> None:
         visible = self.global_ai_panel.isVisible()
@@ -342,8 +424,6 @@ class MainWindow(QMainWindow):
         return ""
 
     def _on_global_ai_chat_requested(self, prompt: str, code_context: str, selection_ctx_json: str) -> None:
-        provider = self.settings_tab.ai_provider_cb.currentText()
-        api_key = self.settings_tab.ai_api_key_le.text().strip()
         extra_context = self._chart_selection_context or {}
         if selection_ctx_json:
             try:
@@ -351,13 +431,23 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         code = self._read_strategy_code_for_ai(code_context)
+        kw = self.settings_tab.get_ai_worker_kwargs()
+        
+        # Forward user message to mirror panel (Editor)
+        self.global_ai_panel.forward_user_message_to_mirror(prompt)
+        
         self._global_ai_worker = AIAssistantWorker(
-            provider, api_key, prompt, code, error_traceback=None, extra_context=extra_context
+            prompt=prompt,
+            code_context=code,
+            error_traceback=None,
+            extra_context=extra_context,
+            **kw,
         )
         self._global_ai_worker.chunk_received.connect(self.global_ai_panel.stream_chunk)
+        self._global_ai_worker.phase_changed.connect(self.global_ai_panel.set_ai_phase)
         self._global_ai_worker.error_occurred.connect(self.global_ai_panel.show_error)
         self._global_ai_worker.finished_generation.connect(
-            lambda _full: self.global_ai_panel.finish_generation()
+            lambda _full: self.global_ai_panel.finish_generation(_full or "")
         )
         self._global_ai_worker.start()
 
@@ -376,6 +466,43 @@ class MainWindow(QMainWindow):
         self._chart_selection_context["strategy_code"] = self._read_strategy_code_for_ai("")
         self.global_ai_panel.set_chart_selection_context(self._chart_selection_context)
         self.global_ai_panel.set_chat_input_text("Analyze this selected chart area and suggest strategy improvements.")
+
+    def _restore_chat_tabs_to_editor(self) -> None:
+        """Called by StrategyEditorTab when editor web is ready."""
+        saved = self._load_chat_tabs_from_disk()
+        if saved:
+            self.strategy_editor_tab.editor.apply_chat_tabs_state(saved)
+
+    def _on_chart_ai_tabs_changed(self, state_json: str) -> None:
+        """Chat tabs changed in global AI panel → push to Editor panel + persist."""
+        self._chat_tabs_state = state_json
+        self._save_chat_tabs_to_disk(state_json)
+        self.strategy_editor_tab.editor.apply_chat_tabs_state(state_json)
+
+    def _on_editor_tabs_changed(self, state_json: str) -> None:
+        """Chat tabs changed in Editor panel → push to global AI panel + persist."""
+        self._chat_tabs_state = state_json
+        self._save_chat_tabs_to_disk(state_json)
+        self.global_ai_panel.apply_chat_tabs_state(state_json)
+
+    def _save_chat_tabs_to_disk(self, state_json: str) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._chat_tabs_file), exist_ok=True)
+            with open(self._chat_tabs_file, "w", encoding="utf-8") as f:
+                f.write(state_json)
+        except Exception:
+            pass
+
+    def _load_chat_tabs_from_disk(self) -> str | None:
+        try:
+            if os.path.exists(self._chat_tabs_file):
+                with open(self._chat_tabs_file, "r", encoding="utf-8") as f:
+                    raw = f.read()
+                    if raw.strip():
+                        return raw
+        except Exception:
+            pass
+        return None
 
     def _on_ai_attachment_requested(self, kind: str) -> None:
         if kind == "image":

@@ -710,6 +710,7 @@ class BacktestCore:
                 self.strategy.on_candle(self.ctx)
             except Exception as e:
                 logger.error(f"Strategy Error at step {next_idx}: {e!r}", exc_info=True)
+                self._fire(self.on_error, f"Strategy error at candle #{next_idx}: {e}")
                 return False
 
         # 7. Phase 1.1 — record realised + unrealised equity at bar close.

@@ -51,8 +51,11 @@ DEFAULTS: Dict[str, Any] = {
     "exec_spread_points": None,
     "exec_commission_per_lot": None,
     "exec_slippage_points": None,
-    "ai_provider": "OpenAI (GPT-4o)",
+    "ai_provider": "OpenAI",
+    "ai_model": "gpt-4o",
     "ai_api_key": "",
+    "ai_custom_base_url": "",
+    "ai_custom_extra_body": "",
 }
 
 

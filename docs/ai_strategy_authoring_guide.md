@@ -1,61 +1,119 @@
 # AGREGAT Strategy Authoring Guide for AI
 
 ## Goal
-Generate valid AGREGAT strategies that run without API misuse.
+Generate **valid AGREGAT strategies** that run without API misuse, respect the **Zero‑Future Rule**, and integrate cleanly with the GUI (params form + persistence).
 
-## Required Structure
-- Prefer `from app import Strategy` and subclass `Strategy`.
-- Strategy class should define `name = "..."`.
-- Implement `on_candle(self, ctx)` for visual/live path.
-- Optional: implement `vectorized_signals(self, df)` for quant path.
+## Canonical imports
+Use the real engine API surface:
 
-## Parameters
-- Tunables must be declared in class-level `PARAMS` as `Param(...)`.
-- Runtime values are in `self.params`.
-- Do not invent custom parameter plumbing outside `PARAMS`/`self.params` unless explicitly requested.
+- `from engine.strategy.context import Strategy, Param`
+
+Avoid legacy/incorrect imports like `from core.strategy import Strategy`.
+
+## Required structure (minimal)
+- One public strategy class that **inherits `Strategy`**
+- Class attribute: `name = "..."` (short human readable name)
+- Implement at least one execution API:
+  - **Visual (step-by-step)**: `on_candle(self, ctx)`
+  - **Quant (vectorized)**: `vectorized_signals(self, df)`
+
+### Optional hooks (higher timeframe close)
+Strategies may implement methods like:
+- `on_15m_close(self, ctx)`
+- `on_1h_close(self, ctx)`
+
+These are called right when the HTF bucket completes (before the 1m `on_candle` on the same bar).
+
+## Parameters (GUI + persistence contract)
+- Tunables MUST be declared in class-level `PARAMS: list[Param]`
+- Runtime values MUST be read from `self.params[name]`
+- The GUI builds the Settings → Strategy form from `PARAMS`
+- Persisted values are applied via `Strategy.apply_params(overrides)` before backtests
+
+Example:
+
+```python
+from engine.strategy.context import Strategy, Param
+
+
+class MyStrategy(Strategy):
+    name = "My Strategy"
+    PARAMS = [
+        Param("fast", "Fast MA", "int", 20, min=2, max=400, step=1),
+        Param("slow", "Slow MA", "int", 50, min=2, max=800, step=1),
+        Param("risk_pct", "Risk %", "float", 1.0, min=0.01, max=10.0, step=0.1),
+        Param("use_sessions", "Use sessions", "bool", True),
+    ]
+
+    def on_candle(self, ctx):
+        fast = int(self.params["fast"])
+        slow = int(self.params["slow"])
+        # ...
+```
 
 ## Context API (on_candle)
-- Market data:
-  - `ctx.candle` current candle dict.
-  - `ctx.data` zero-future-safe data view (`open/high/low/close/...` arrays).
-  - `ctx.get_tf(tf)` higher timeframe completed bars view.
-- Position/account:
-  - `ctx.position`, `ctx.equity`, `ctx.initial_equity`, `ctx.asset`.
-- Entries:
-  - `ctx.buy_at_open(volume, sl=None, tp=None, reason="", tag="")`
-  - `ctx.sell_at_open(volume, sl=None, tp=None, reason="", tag="")`
-  - `ctx.cancel_pending()`
-- Position management:
-  - `ctx.close(price=None, reason="MANUAL")`
-  - `ctx.update_sl(new_sl)`, `ctx.update_tp(new_tp)`
-  - `ctx.move_sl_to_be(offset_points=0.0)`
-- Risk:
-  - `ctx.calculate_lot(sl_points, risk_pct=None, strict=False)`
-- Utility:
-  - `ctx.log(message)`, `ctx.get_session()`, `ctx.is_trading_hours()`
-- Drawings/layers:
-  - `ctx.register_layer(tag, label, default_on=True)`
-  - `ctx.draw_line(...)`, `ctx.draw_rect(...)`, `ctx.draw_text(...)`
-  - `ctx.remove_drawing(id)`, `ctx.update_drawing(id, updates)`
+### Data access (Zero‑Future safe)
+- `ctx.candle`: current 1m candle dict (`time/open/high/low/close/volume/...`)
+- `ctx.data`: read-only NumPy-backed slices respecting the Zero‑Future Rule
+- `ctx.get_tf(tf)`: HTF view (also Zero‑Future safe)
 
-## Hard Rules
-- No future leak: do not read future bars or use unsafe indexing tricks.
-- Do not use unsupported APIs or external broker SDKs.
-- Do not rely on private engine internals (`ctx._engine`) unless user explicitly asks.
+### Position / equity
+- `ctx.position`
+- `ctx.equity`, `ctx.initial_equity`
+- `ctx.asset`
+
+### Entries (queued at next candle open)
+- `ctx.buy_at_open(volume=1.0, sl=None, tp=None, reason="", tag="")`
+- `ctx.sell_at_open(volume=1.0, sl=None, tp=None, reason="", tag="")`
+- `ctx.cancel_pending()`
+
+### Position management
+- `ctx.close(price=None, reason="MANUAL")`
+- `ctx.update_sl(new_sl)`
+- `ctx.update_tp(new_tp)`
+- `ctx.move_sl_to_be(offset_points=0.0)`
+
+### Risk sizing
+- `ctx.calculate_lot(sl_points, risk_pct=None, strict=False)`
+
+### Utility
+- `ctx.log(message)`
+- `ctx.get_session(time=None)`
+- `ctx.is_trading_hours()`
+
+### Drawings / layers
+- `ctx.register_layer(tag, label, default_on=True)`
+- `ctx.draw_line(...)`, `ctx.draw_rect(...)`, `ctx.draw_text(...)`
+- `ctx.remove_drawing(id)`, `ctx.update_drawing(id, updates)`
+
+## Hard rules (do not break)
+- **No future leak**: never read bars ahead of current index; no unsafe indexing tricks.
 - Keep logic deterministic and backtest-safe.
-- Always validate SL/TP distance before sending orders.
-- Avoid opening new position if `ctx.position` exists.
+- Do not call private internals (`ctx._engine`) unless user explicitly asks.
+- Validate SL/TP sanity and don’t open a new position if `ctx.position` exists (unless user explicitly wants pyramiding).
 
-## Vectorized Signals Contract
+## Vectorized signals contract
 - Return a `pandas.DataFrame` aligned to input index.
 - Include at least:
-  - `signal` (`-1`, `0`, `1`)
+  - `signal` in `{-1, 0, 1}`
   - `sl_points` (float, points distance)
   - `tp_points` (float, points distance)
   - optional `risk_pct`
-- Do not mutate source dataframe.
+- Do not mutate the source dataframe.
 
-## Output Quality
-- Return complete runnable code.
-- Keep imports minimal and valid.
-- Preserve requested behavior exactly.
+## Editing mode (patches)
+When modifying existing strategy code, prefer **patches** instead of rewriting the whole file.
+Output a single fenced block in Cursor-like diff style:
+
+```agregat_patch
+-from core.strategy import Strategy  # Updated import for AGREGAT platform
++from engine.strategy.context import Strategy, Param
+@@@
+-x = 1
++x = 2
+```
+
+Rules:
+- Use `-` for removed lines and `+` for added lines.
+- Separate independent patch chunks with a line containing exactly `@@@`.
+- Removed (`-`) lines must match exact existing code fragments (including indentation).

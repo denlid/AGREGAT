@@ -100,6 +100,8 @@ class SessionLifecycleController:
                     h.settings_tab.rebuild_strategy_form(strategy)
                 except Exception as e:
                     logger.debug(f"rebuild_strategy_form failed: {e!r}")
+            if hasattr(h, "strategy_editor_tab"):
+                h.strategy_editor_tab.bind_strategy_file(fp)
         except Exception as e:
             logger.error(f"❌ Strategy load failed: {e!r}", exc_info=True)
             h.show_error(str(e))

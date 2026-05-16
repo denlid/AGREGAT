@@ -39,7 +39,7 @@ class MenuController:
         self._recent_menu = fm.addMenu("Open Recent")
         self._recent_menu.aboutToShow.connect(self._populate_recent_menu)
         fm.addSeparator()
-        fm.addAction("Save Session...", h._session_ctrl.save_session, "Ctrl+S")
+        fm.addAction("Save Session...", h._session_ctrl.save_session)
         fm.addAction("Load Session...", h._session_ctrl.load_session, "Ctrl+Shift+O")
         fm.addSeparator()
         fm.addAction(
