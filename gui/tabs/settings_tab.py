@@ -1027,12 +1027,12 @@ class SettingsTab(QWidget):
         logger.info(f"📝 Log level changed to: {level}")
 
     def _on_render_win_changed(self, v):
-        """Update chart render window size."""
-        # The runtime constant lives in gui/chart_tab/tab.py — patch it there so
-        # ChartTab.redraw_chart picks up the new window size.
-        import gui.chart_tab.tab as tab_module
+        """Update chart render window size.
 
-        tab_module.RENDER_WINDOW = v
+        Note: Since the infinite-scroll optimization, the chart always
+        shows full history. This setting is kept for backward compat
+        but just triggers a chart redraw.
+        """
         if self.pw:
             self.pw.chart_tab._cache_key = None
             self.pw.chart_tab.redraw_chart()

@@ -42,6 +42,21 @@ def main() -> int:
 
     app = QApplication(sys.argv)
 
+    # --- Chart GPU acceleration (Phase 1 of chart_gpu_optimization_plan.md) ---
+    # Flips pyqtgraph's experimental OpenGL backend on so every chart
+    # widget instantiated below renders through a ``QOpenGLWidget``
+    # viewport instead of the software ``QPainter`` path. The call
+    # auto-detects OpenGL availability and gracefully falls back to the
+    # software backend on headless / GPU-less boxes; ``AGREGAT_USE_GPU``
+    # (1/0) lets ops force-enable / disable without code changes.
+    try:
+        from gui.chart_tab.gpu_config import configure_gpu_acceleration
+
+        configure_gpu_acceleration()
+    except Exception:
+        # Never block app startup on a chart-only optimisation.
+        logger.exception("configure_gpu_acceleration failed")
+
     # --- License Verification ---
     from engine.security.license_manager import verify_license, get_hwid, save_license_key
     from PySide6.QtWidgets import (

@@ -1,6 +1,7 @@
 """Chart Tab — candlestick chart, drawing menu, time axis, trade arrows."""
 
 import logging
+import time
 
 import numpy as np
 import pandas as pd
@@ -25,11 +26,11 @@ from PySide6.QtWidgets import (
 from gui.persistence import drawings_persist
 from gui.styling import style_helpers as sh
 from gui.chart_tab.axis import TimeAxisItem
-from gui.chart_tab.items import CandlestickItem, FilledRectROI
+from gui.chart_tab.gl_candle import make_candlestick_item
+from gui.chart_tab.items import CandlestickItem, FilledRectROI  # noqa: F401 — re-export for callers
 from gui.styling.theme import CHART_SCHEMES, get_theme, register_theme_listener
 
 logger = logging.getLogger("StrategyTester.gui.chart_tab")
-RENDER_WINDOW = 300
 
 
 class ChartTab(QWidget):
@@ -212,7 +213,13 @@ class ChartTab(QWidget):
         self.plot_widget.addItem(self.price_hline)
         self.price_hline.hide()
 
-        self.candlestick_item = CandlestickItem()
+        # Phase 3 (GPU plan) — the factory returns ``GLCandlestickItem``
+        # when ``AGREGAT_GL_CANDLES`` is truthy *and* PySide6's GL
+        # bindings import cleanly; otherwise the legacy QPainter-based
+        # :class:`CandlestickItem` is used. The two share the same
+        # public surface (set_data / set_view / set_pyramid / …) so the
+        # rest of ChartTab is backend-agnostic.
+        self.candlestick_item = make_candlestick_item()
         self.candlestick_item.bull_color = "#26A69A"
         self.candlestick_item.bear_color = "#EF5350"
         self.plot_widget.addItem(self.candlestick_item)
@@ -326,11 +333,13 @@ class ChartTab(QWidget):
 
     def _fit_all(self):
         """Reset zoom and fit all data."""
-        self._user_zoom_width = None
-        self._tracked_xrange = None
         self.plot_widget.autoRange()
         vb = self.plot_widget.getViewBox()
         vb.enableAutoRange(x=False, y=False)
+        xr = vb.viewRange()[0]
+        self._tracked_xrange = list(xr)
+        self._user_zoom_width = xr[1] - xr[0]
+        self._need_autorange = False
 
     def _pick_draw_color(self):
         c = QColorDialog.getColor(self._draw_color, self, "Drawing Color")
@@ -890,7 +899,7 @@ class ChartTab(QWidget):
                 "show_connections": self.show_connections_cb.isChecked(),
                 "x_range": [float(view_range[0][0]), float(view_range[0][1])],
                 "y_range": [float(view_range[1][0]), float(view_range[1][1])],
-                "render_window": int(RENDER_WINDOW),
+                "render_window": -1,  # unlimited — full history available
             },
         }
 
@@ -1097,6 +1106,12 @@ class ChartTab(QWidget):
         ]:
             p.setData([], [])
         self.candlestick_item.set_data([])
+        # Phase 2 (GPU plan) — rebuild the LOD pyramid from the engine's
+        # base-TF frame so subsequent zoom-outs hit the M5/M15/H1/D1
+        # buckets instead of redrawing millions of M1 bars. Skipped
+        # silently when no data is loaded (cold start) and on any
+        # construction failure — chart still renders, just without LOD.
+        self._attach_pyramid()
         self.price_hline.hide()
         self.ohlc_label.hide()
         self._clear_trade_lines()
@@ -1104,6 +1119,35 @@ class ChartTab(QWidget):
         self._need_autorange = True
         self._cache_key = None
         self._prev_res_times = None
+
+    def _attach_pyramid(self) -> None:
+        """Build (or rebuild) the LOD pyramid from ``engine.df`` and
+        hand it to :attr:`candlestick_item`. Called from
+        :py:meth:`on_data_loaded` so a fresh CSV / .agbk load picks
+        up the pyramid; safe to call repeatedly — the candle item's
+        ``set_pyramid`` swaps in the new pyramid and resets the active
+        TF to base on each call.
+        """
+        try:
+            df = getattr(self.engine, "df", None)
+            if df is None or len(df) == 0:
+                self.candlestick_item.set_pyramid(None)
+                return
+            from engine.data.lod_pyramid import LodPyramid
+
+            pyramid = LodPyramid.from_base(df, base_tf="1m")
+            self.candlestick_item.set_pyramid(pyramid)
+            logger.info(
+                "LOD pyramid attached (levels=%s, base=%d bars)",
+                pyramid.list_levels(),
+                len(df),
+            )
+        except Exception:
+            logger.exception("LOD pyramid construction failed; chart still renders")
+            try:
+                self.candlestick_item.set_pyramid(None)
+            except Exception:
+                pass
 
     def on_tf_changed(self, tf):
         self._cache_key = None
@@ -1149,7 +1193,8 @@ class ChartTab(QWidget):
             res_df = self._cached_res_df
         else:
             if tf != "1m" and hasattr(self.engine, "tf_aggregator"):
-                comp = self.engine.tf_aggregator.get_completed_tail(tf, RENDER_WINDOW)
+                # Get ALL completed candles for the requested timeframe up to current_idx
+                comp = self.engine.tf_aggregator.get_completed_tail(tf, 9999999)
                 form = self.engine.tf_aggregator.get_forming(tf)
                 agg = comp + ([form] if form else [])
                 if agg:
@@ -1157,9 +1202,9 @@ class ChartTab(QWidget):
                 else:
                     res_df = pd.DataFrame()
             else:
-                w = RENDER_WINDOW * tf_min
-                s = max(0, idx + 1 - w)
-                res_df = self.engine.df.iloc[s : idx + 1].copy()
+                # Pass the ENTIRE history up to the current index. 
+                # OpenGL + LodPyramid will handle the performance automatically.
+                res_df = self.engine.df.iloc[0 : idx + 1].copy()
 
             if len(res_df) == 0:
                 return
@@ -1223,13 +1268,23 @@ class ChartTab(QWidget):
         t0 = _time.perf_counter()
         # ── Camera control ──
         cur_x = n - 1
+        default_window = 150.0  # Sensible default zoom (number of bars)
+        
         if self._need_autorange or self._tracked_xrange is None:
             self._need_autorange = False
-            self._user_zoom_width = None
-            vb.enableAutoRange(x=True, y=True)
-            vb.autoRange()
-            vb.enableAutoRange(x=False, y=False)
-            self._tracked_xrange = list(vb.viewRange()[0])
+            
+            # Instead of auto-ranging everything, set a sensible default window
+            # focused on the current (latest) candle.
+            new_right = cur_x + 5.0
+            new_left = max(-0.5, new_right - default_window)
+            new_xrange = [new_left, new_right]
+            
+            vb.setRange(xRange=new_xrange, padding=0)
+            self._tracked_xrange = new_xrange
+            self._user_zoom_width = default_window
+            
+            if self.autofit_y:
+                self._autofit_y(vb, res_df, n)
         else:
             xmin, xmax = self._tracked_xrange
             w = self._user_zoom_width if self._user_zoom_width is not None else (xmax - xmin)
@@ -1237,13 +1292,17 @@ class ChartTab(QWidget):
             xmin -= shift
             xmax -= shift
 
-            if cur_x > xmax - 3.0 and cur_x < xmax + 5.0 + max(0, shift):
-                new_right = cur_x + 3.0
+            # If current index is near or past the right edge, or if we were already "following",
+            # stick to the latest candle.
+            # "Near edge" = within 10% of window width from the right.
+            follow_threshold = xmax - (w * 0.1)
+            
+            if cur_x >= follow_threshold:
+                new_right = cur_x + 5.0
                 new_xrange = [new_right - w, new_right]
-            elif cur_x < xmin and cur_x > xmin - 5.0 - max(0, shift):
-                new_xrange = [cur_x - 3.0, cur_x - 3.0 + w]
             else:
                 new_xrange = [xmin, xmax]
+                
             vb.setRange(xRange=new_xrange, padding=0)
             self._tracked_xrange = new_xrange
             if self.autofit_y:
@@ -1316,6 +1375,109 @@ class ChartTab(QWidget):
         t2 = self._get_time_at_idx(xr[1])
         if t2 > t1:
             self.sigTimeRangeChanged.emit(t1, t2)
+            # Phase 4 (GPU plan) — when an async data pager is attached,
+            # ping it with the new viewport time bounds so any tiles
+            # we're scrolling toward can warm in the background. The
+            # call is cheap (one lock acquisition + a dict scan) and
+            # internally deduplicated, so wiring it into the rate-
+            # limited range signal doesn't pile up worker submissions.
+            pager = getattr(self, "_data_pager", None)
+            if pager is not None:
+                try:
+                    pager.ensure_visible(
+                        pd.Timestamp(t1, unit="s"),
+                        pd.Timestamp(t2, unit="s"),
+                    )
+                except Exception:
+                    logger.exception("DataPager.ensure_visible failed")
+
+    # ------------------------------------------------------------------
+    # Phase 4 (GPU plan) — optional async data pager
+    # ------------------------------------------------------------------
+
+    def attach_data_pager(self, pager) -> None:
+        """Bind a :class:`engine.data.data_pager.DataPager` to the chart.
+
+        Once attached, the chart re-pings the pager whenever the user
+        scrolls / zooms (via :py:meth:`_on_my_range_changed`) so any
+        tiles overlapping the new viewport are warmed in the
+        background. When the pager emits ``chunks_changed`` the chart
+        re-feeds the engine with the freshly-stitched frame via
+        :py:meth:`engine.load_data`, which fires ``data_loaded`` and
+        funnels through the existing :py:meth:`on_data_loaded` →
+        :py:meth:`_attach_pyramid` rebuild path.
+
+        Idempotent: calling twice with the same pager is safe; calling
+        with a different pager swaps the binding and disconnects the
+        previous one's signals. Pass ``None`` to detach entirely.
+        """
+        previous = getattr(self, "_data_pager", None)
+        if previous is pager:
+            return
+        if previous is not None:
+            try:
+                previous.chunks_changed.disconnect(self._on_pager_chunks_changed)
+            except (RuntimeError, TypeError):
+                # Already disconnected or signal slot mismatch — both
+                # are fine, we're just trying to clean up.
+                pass
+            try:
+                previous.pager_error.disconnect(self._on_pager_error)
+            except (RuntimeError, TypeError):
+                pass
+        self._data_pager = pager
+        if pager is not None:
+            pager.chunks_changed.connect(self._on_pager_chunks_changed)
+            pager.pager_error.connect(self._on_pager_error)
+            logger.info(
+                "DataPager attached (max_resident=%d, tiles=%d)",
+                pager.max_resident,
+                len(pager.list_tiles()),
+            )
+
+    def _on_pager_chunks_changed(self, total_rows: int) -> None:
+        """Slot for :py:attr:`DataPager.chunks_changed`.
+
+        Pulls the stitched frame from the pager and feeds it into the
+        engine. Zero-row events (empty cache after ``set_tiles``) are
+        ignored so a teardown doesn't blow away the current dataset.
+        """
+        if total_rows <= 0:
+            return
+        
+        timer = getattr(self, "_pager_debounce_timer", None)
+        if timer is None:
+            from PySide6.QtCore import QTimer
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(200) # 200ms debounce
+            timer.timeout.connect(self._do_pager_chunks_changed)
+            self._pager_debounce_timer = timer
+        
+        timer.start()
+
+    def _do_pager_chunks_changed(self) -> None:
+        pager = getattr(self, "_data_pager", None)
+        if pager is None:
+            return
+        try:
+            df = pager.get_dataframe()
+        except Exception:
+            logger.exception("DataPager.get_dataframe failed")
+            return
+        if df is None or len(df) == 0:
+            return
+        try:
+            self.engine.load_data(df)
+        except Exception:
+            logger.exception(
+                "engine.load_data failed for paged frame (rows=%d)", len(df)
+            )
+
+    def _on_pager_error(self, tile_id: str, msg: str) -> None:
+        """Slot for :py:attr:`DataPager.pager_error`. We only log —
+        the chart keeps rendering whatever data is already resident."""
+        logger.warning("DataPager error: tile=%s msg=%s", tile_id, msg)
 
     def sync_to_time_range(self, t1, t2):
         if len(self.res_times) == 0:

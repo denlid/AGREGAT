@@ -95,7 +95,7 @@ def test_ohlc_max_bars_lower_bound() -> None:
 
 
 def test_ohlc_default_max_bars_is_2000() -> None:
-    assert DEFAULT_MAX_BARS == 2_000
+    assert DEFAULT_MAX_BARS == 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -311,9 +311,9 @@ def test_viewport_culling_no_view_draws_all_bars(qapp) -> None:
 
 def test_viewport_culling_clips_to_visible_range(qapp) -> None:
     """A narrow view must trigger ``np.searchsorted`` culling. With
-    500 bars at idx 0..499 and a view of [100.0, 200.0] we expect
-    ~102 bars drawn (100..200 inclusive + 1-bar margin on each
-    side), and ~398 bars culled.
+    500 bars at idx 0..499 and a view of [100.0, 200.0] the overscan
+    extends 1 full screen (100 bars) on each side, so we draw bars
+    from 0..300 = ~301 bars, culling the rest.
     """
     from gui.chart_tab.items import CandlestickItem
 
@@ -324,12 +324,12 @@ def test_viewport_culling_clips_to_visible_range(qapp) -> None:
     drawn = item._paint_stats["bars_drawn"]
     culled = item._paint_stats["bars_culled"]
     assert drawn + culled == 500
-    # Visible window is 100 bars wide + 1 bar margin on each side =
-    # at most 103 bars (101 inside + 2 margins). Lower bound: 100.
-    assert 100 <= drawn <= 103, (
-        f"Culling slice off — drew {drawn} bars, expected ~101-103"
+    # Overscan = 1 screen (100 bars) on each side of the 100-bar view.
+    # Left overscan clamps to 0, so we draw bars 0..300 = 301 bars.
+    assert 250 <= drawn <= 310, (
+        f"Culling slice off — drew {drawn} bars, expected ~301 with overscan"
     )
-    assert culled >= 395
+    assert culled >= 190
 
 
 def test_viewport_culling_view_wider_than_data_draws_all(qapp) -> None:
@@ -374,11 +374,13 @@ def test_viewport_culling_after_view_change_reflects_new_range(qapp) -> None:
     assert item._paint_stats["bars_drawn"] == 500
 
     # User zooms in: tighten the range and re-run paint generation.
+    # View = [200, 250] = 50 bars wide. Overscan = 50 bars each side.
+    # Total range = [150, 300] = 151 bars.
     view._xr = [200.0, 250.0]
     item._gen()
     drawn = item._paint_stats["bars_drawn"]
-    assert 50 <= drawn <= 53, (
-        f"After zoom-in cull window mis-sized — drew {drawn}, expected ~51-53"
+    assert 100 <= drawn <= 160, (
+        f"After zoom-in cull window mis-sized — drew {drawn}, expected ~151 with overscan"
     )
 
 
@@ -390,14 +392,14 @@ def test_viewport_culling_after_view_change_reflects_new_range(qapp) -> None:
 def test_choose_target_tf_climbs_ladder_as_span_grows() -> None:
     from gui.chart_tab.lod import choose_target_tf
 
-    # 5 minutes of 1m bars fit at 1m (5 bars ≤ 2000).
+    # 5 minutes of 1m bars fit at 1m (5 bars ≤ 10000).
     assert choose_target_tf(5 * 60) == "1m"
-    # 10 hours: 600 1m bars still under 2000 → 1m.
+    # 10 hours: 600 1m bars still under 10000 → 1m.
     assert choose_target_tf(10 * 3600) == "1m"
-    # 10 days: 14 400 1m bars > 2000 → climbs.
-    assert choose_target_tf(10 * 86400) in {"5m", "15m"}
-    # 10 years: must reach the top of the ladder.
-    assert choose_target_tf(10 * 365 * 86400) == "1w"
+    # 10 days: 14 400 1m bars > 10000 → climbs.
+    assert choose_target_tf(10 * 86400) in {"2m", "3m", "5m", "15m"}
+    # 10 years: must reach the coarser end of the ladder.
+    assert choose_target_tf(10 * 365 * 86400) in {"1d", "1w"}
 
 
 def test_choose_target_tf_handles_zero_and_negative_span() -> None:

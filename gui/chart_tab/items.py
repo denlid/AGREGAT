@@ -26,7 +26,8 @@ implements the three rendering optimisations the roadmap calls for:
 
 from __future__ import annotations
 
-from typing import List, Tuple
+import time
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -35,10 +36,9 @@ from PySide6.QtGui import QColor, QPainter, QPicture
 
 from gui.chart_tab.lod import DEFAULT_MAX_BARS, downsample_ohlc
 
-# Phase 2.3 — repaint debounce. Pyqtgraph emits ``sigRangeChanged``
-# multiple times during a single drag; coalescing into one repaint per
-# 50 ms keeps the UI thread idle between user gestures.
-_RANGE_DEBOUNCE_MS = 50
+# Phase 2.3 — repaint debounce. Set to 0 to process on the next event
+# loop tick, providing TradingView-like fluidity without duplicating work.
+_RANGE_DEBOUNCE_MS = 0
 
 # Phase 2.1 — viewport cull margin (in data-x units). Extended by one
 # full bar on each side so a wick that crosses the viewport edge still
@@ -83,12 +83,30 @@ class CandlestickItem(pg.GraphicsObject):
         # Phase 2.3 — telemetry counters consumed by the headless
         # tests. The production paint path doesn't read these; they
         # only exist so batching guarantees can be asserted in CI.
+        # Phase 1 (GPU plan) — ``paint_time_ms`` records the last
+        # :py:meth:`_gen` wall-clock cost so FPS regressions can be
+        # caught in CI / surfaced in the debug overlay.
         self._paint_stats = {
             "draw_lines_calls": 0,
             "draw_rects_calls": 0,
             "bars_drawn": 0,
             "bars_culled": 0,
+            "paint_time_ms": 0.0,
+            "gen_time_ms": 0.0,
         }
+        # Phase 2 (GPU plan) — optional LOD pyramid + active-level
+        # state. When ``_pyramid`` is set, :py:meth:`_on_range_changed`
+        # auto-swaps the rendered TF based on how many base-TF (M1)
+        # bars currently sit inside the view. ``_active_tf_ratio`` is
+        # the ratio of the active TF's minutes to the base TF's
+        # minutes — the width heuristic in :py:meth:`_update_width`
+        # multiplies its base width by this so candles widen
+        # proportionally on coarser levels (M5 candles 5× wider than
+        # M1 etc.).
+        self._pyramid = None
+        self._active_tf: Optional[str] = None
+        self._active_tf_ratio: float = 1.0
+        self._pyramid_max_bars: int = self._max_bars
 
     # ------------------------------------------------------------------
     # ViewBox wiring (Phase 2.1)
@@ -104,7 +122,15 @@ class CandlestickItem(pg.GraphicsObject):
         vb.sigRangeChanged.connect(self._on_range_changed)
 
     def _on_range_changed(self, vb, ranges) -> None:  # type: ignore[no-untyped-def]
-        if not self.data:
+        if self._arr.shape[0] == 0 and self._pyramid is None:
+            return
+        # Phase 2 (GPU plan) — LOD pyramid sensor. Runs *before* the
+        # debounced repaint so a swap rebuilds geometry once instead
+        # of paying for a repaint at the old level followed by
+        # another at the new one. The swap itself ends in
+        # :py:meth:`set_data`, which triggers its own ``_gen``; we
+        # skip the debounced repaint in that case.
+        if self._pyramid is not None and self._maybe_swap_pyramid_tf():
             return
         # Coalesce bursts of range changes into a single repaint.
         if self._range_timer is not None:
@@ -113,28 +139,135 @@ class CandlestickItem(pg.GraphicsObject):
             self._do_range_repaint()
 
     def _do_range_repaint(self) -> None:
-        if not self.data:
+        if self._arr.shape[0] == 0:
             return
         self._update_width()
         self._gen()
         self.update()
 
-    def _update_width(self) -> None:
-        """Compute candle half-width as ~40% of the per-candle pixel slot."""
-        if self._view is None or not self.data:
-            self._last_w = 0.35
-            return
+    # ------------------------------------------------------------------
+    # Phase 2 (GPU plan) — LOD pyramid sensor
+    # ------------------------------------------------------------------
+    def set_pyramid(self, pyramid, max_bars: Optional[int] = None) -> None:  # type: ignore[no-untyped-def]
+        """Attach a :class:`engine.data.lod_pyramid.LodPyramid` so the
+        candle item auto-swaps timeframes when the user zooms out.
+
+        Pass ``pyramid=None`` to detach and revert to plain
+        single-level rendering. ``max_bars`` overrides the swap
+        threshold (default: :attr:`_max_bars`).
+
+        Calling ``set_pyramid(pyramid)`` does *not* immediately swap
+        the rendered data — the caller is expected to follow up with
+        :py:meth:`set_data` to seed the initial view. Once seeded,
+        subsequent ``sigRangeChanged`` events run the sensor and swap
+        levels as needed.
+        """
+        self._pyramid = pyramid
+        self._active_tf = pyramid.base_tf if pyramid is not None else None
+        self._active_tf_ratio = 1.0
+        self._geom_rects = None
+        if max_bars is not None:
+            self._pyramid_max_bars = int(max_bars)
+
+    @property
+    def active_tf(self) -> Optional[str]:
+        """The TF currently being rendered, or ``None`` when the
+        pyramid is unattached. Exposed for tests / debug overlay."""
+        return self._active_tf
+
+    def _maybe_swap_pyramid_tf(self) -> bool:
+        """Pick a pyramid level for the current view range and swap if
+        it differs from the active level. Returns ``True`` if a swap
+        happened (so the caller knows the repaint is already in
+        flight and can skip its own).
+
+        Safe to call without a linked view: returns ``False``
+        immediately. Safe to call when the chosen level is the same
+        as the active one: also returns ``False``.
+        """
+        if self._pyramid is None or self._view is None:
+            return False
+        # Visible width in base-TF units. ``viewRange`` returns
+        # ``[[x0, x1], [y0, y1]]``; the candlestick item uses x in
+        # base-TF (M1) indices throughout, so ``x1 - x0`` is the
+        # base-bar count we'd be drawing on the finest level.
         xr = self._view.viewRange()[0]
-        visible = max(1, xr[1] - xr[0])
-        new_w = max(0.05, min(0.45, 0.40))
-        if visible < 20:
-            new_w = 0.42
-        elif visible < 60:
-            new_w = 0.40
-        elif visible < 150:
-            new_w = 0.38
+        visible_base = max(0, int(round(xr[1] - xr[0])))
+        try:
+            new_tf = self._pyramid.for_visible_bars(
+                visible_base, self._pyramid_max_bars
+            )
+        except Exception:
+            return False
+        if new_tf == self._active_tf:
+            return False
+
+        # Phase 2 - Hysteresis to prevent flapping on the threshold
+        budget = self._pyramid_max_bars
+        if self._active_tf is not None:
+            if budget * 0.9 <= visible_base <= budget * 1.1:
+                return False
+
+        try:
+            new_data = self._pyramid.to_chart_arrays(new_tf)
+        except Exception:
+            return False
+        # Look up the new ratio so :py:meth:`_update_width` widens
+        # candles to fill their bucket on the zoomed-out view.
+        try:
+            from engine.data.lod_pyramid import tf_minutes
+
+            base_min = tf_minutes(self._pyramid.base_tf)
+            new_min = tf_minutes(new_tf)
+            ratio = max(1.0, float(new_min) / float(base_min))
+        except Exception:
+            ratio = 1.0
+        self._active_tf = new_tf
+        self._active_tf_ratio = ratio
+        # Force the width cache to invalidate so the new ratio takes
+        # effect on the next ``_gen``.
+        self._geom_rects = None
+        self.set_data(new_data)
+        return True
+
+    def _update_width(self) -> None:
+        """Compute candle half-width as ~40% of the per-candle pixel slot.
+
+        Always re-materialises ``_geom_rects`` / ``_geom_doji_flats`` when
+        they are unset so a subsequent :py:meth:`_gen` never observes a
+        ``None`` cache. Without a linked ViewBox we use the default
+        half-width — ``_gen`` is still expected to run (e.g. in headless
+        tests that call ``set_data`` without attaching a view).
+
+        Phase 2 (GPU plan) — when an LOD pyramid level coarser than the
+        base TF is active, the heuristic operates on the *candle-count*
+        view (``visible / tf_ratio``) and then multiplies the chosen
+        base width by the same ratio. The result: M5 candles 5× wider
+        than M1, H1 candles 60× wider, etc. — each candle visually
+        fills its bucket on the zoomed-out view.
+        """
+        if self._arr.shape[0] == 0:
+            self._last_w = 0.35
+            self._geom_rects = []
+            self._geom_doji_flats = []
+            return
+
+        ratio = max(1.0, float(self._active_tf_ratio))
+        if self._view is None:
+            base_w = (self._last_w / ratio) if self._last_w else 0.35
+            new_w = base_w * ratio
         else:
-            new_w = 0.35
+            xr = self._view.viewRange()[0]
+            visible = max(1, xr[1] - xr[0]) / ratio
+            if visible < 20:
+                base_w = 0.42
+            elif visible < 60:
+                base_w = 0.40
+            elif visible < 150:
+                base_w = 0.38
+            else:
+                base_w = 0.35
+            new_w = base_w * ratio
 
         if abs(self._last_w - new_w) > 1e-5 or getattr(self, "_geom_rects", None) is None:
             self._last_w = new_w
@@ -155,24 +288,23 @@ class CandlestickItem(pg.GraphicsObject):
     # Data ingest
     # ------------------------------------------------------------------
     def set_data(self, data) -> None:  # type: ignore[no-untyped-def]
-        # Keep the full-resolution data for OHLC tooltip lookups; the
-        # downsampled ``self.data`` is what the QPainter loop iterates.
-        self._raw_data = list(data) if not isinstance(data, list) else data
-        if len(self._raw_data) > self._max_bars:
-            self.data = downsample_ohlc(self._raw_data, self._max_bars)
+        # Phase 2: Accept np.ndarray directly to bypass slow tuple lists.
+        if isinstance(data, np.ndarray):
+            self._arr = data
+            self.data = []  # No longer needed when _arr is populated
+            self._raw_data = []
         else:
-            self.data = self._raw_data
-        # Tooltip / hover lookups still resolve to the original
-        # full-resolution OHLC values.
-        self._ohlc_map = {
-            int(round(t)): (o, hi, lo, c) for (t, o, c, lo, hi) in self._raw_data
-        }
-        # Phase 2.1 — parallel NumPy view of ``self.data`` for fast
-        # viewport culling. One ``np.asarray`` per set_data is cheap
-        # (~2 ms / 10K bars) and amortises across every subsequent
-        # range-change repaint.
-        if self.data:
-            self._arr = np.asarray(self.data, dtype=np.float64)
+            self._raw_data = list(data) if not isinstance(data, list) else data
+            if len(self._raw_data) > self._max_bars:
+                self.data = downsample_ohlc(self._raw_data, self._max_bars)
+            else:
+                self.data = self._raw_data
+            if self.data:
+                self._arr = np.asarray(self.data, dtype=np.float64)
+            else:
+                self._arr = np.empty((0, 5), dtype=np.float64)
+
+        if self._arr.shape[0] > 0:
             # Cache immutable geometry (wicks) and boolean masks
             self._all_wicks = [QLineF(float(t), float(l), float(t), float(h)) for t, l, h in zip(self._arr[:, 0], self._arr[:, 3], self._arr[:, 4])]
             cl = self._arr[:, 2]
@@ -182,11 +314,11 @@ class CandlestickItem(pg.GraphicsObject):
             self._mask_bull = (cl >= op) & ~self._mask_doji
             self._mask_bear = (cl < op) & ~self._mask_doji
         else:
-            self._arr = np.empty((0, 5), dtype=np.float64)
             self._all_wicks = []
             self._mask_bull = np.empty(0, dtype=bool)
             self._mask_bear = np.empty(0, dtype=bool)
             self._mask_doji = np.empty(0, dtype=bool)
+
         self._geom_rects = None
         self._update_width()
         self._gen()
@@ -201,7 +333,18 @@ class CandlestickItem(pg.GraphicsObject):
             self.set_data(self._raw_data)
 
     def get_ohlc_at(self, idx):  # type: ignore[no-untyped-def]
-        return self._ohlc_map.get(int(idx))
+        if getattr(self, "_arr", None) is None or self._arr.shape[0] == 0:
+            return None
+        i = np.searchsorted(self._arr[:, 0], idx)
+        if i < self._arr.shape[0] and self._arr[i, 0] == int(idx):
+            return (self._arr[i, 1], self._arr[i, 4], self._arr[i, 3], self._arr[i, 2])
+        # Fallback: search the full-resolution raw data (before LOD downsampling)
+        # so tooltips still resolve when zoomed out.
+        if self._raw_data:
+            for t in self._raw_data:
+                if int(t[0]) == int(idx):
+                    return (t[1], t[4], t[3], t[2])
+        return None
 
     # ------------------------------------------------------------------
     # Phase 2.1 — viewport culling
@@ -228,8 +371,10 @@ class CandlestickItem(pg.GraphicsObject):
         # (chart_tab always feeds a monotonic ``range(n)`` — same
         # contract pyqtgraph's PlotCurveItem assumes for setData(x=)).
         xs = self._arr[:, 0]
-        x_min = float(xr[0]) - _CULL_MARGIN_BARS
-        x_max = float(xr[1]) + _CULL_MARGIN_BARS
+        w = float(xr[1]) - float(xr[0])
+        # Overscan by 1 full screen on each side for TradingView-like smooth panning
+        x_min = float(xr[0]) - w
+        x_max = float(xr[1]) + w
         lo = int(np.searchsorted(xs, x_min, side="left"))
         hi = int(np.searchsorted(xs, x_max, side="right"))
         return lo, hi
@@ -238,19 +383,28 @@ class CandlestickItem(pg.GraphicsObject):
     # Phase 2.3 — batched painter
     # ------------------------------------------------------------------
     def _gen(self) -> None:
+        # Phase 1 (GPU plan) — track ``_gen`` wall-clock cost so the
+        # plan's "<2 ms paint time" target is measurable in CI / the
+        # debug overlay. ``time.perf_counter`` is monotonic and cheap
+        # enough (~100 ns) to be safe on the hot paint path.
+        t0 = time.perf_counter()
         self.picture = QPicture()
         self._paint_stats["draw_lines_calls"] = 0
         self._paint_stats["draw_rects_calls"] = 0
         self._paint_stats["bars_drawn"] = 0
         self._paint_stats["bars_culled"] = 0
+        self._paint_stats["gen_time_ms"] = 0.0
+        self._paint_stats["paint_time_ms"] = 0.0
         n_total = self._arr.shape[0]
         if n_total == 0:
+            self._paint_stats["gen_time_ms"] = (time.perf_counter() - t0) * 1000.0
             return
 
         # Phase 2.1 — clip to visible window once per repaint.
         lo, hi = self._visible_slice()
         self._paint_stats["bars_culled"] = n_total - (hi - lo)
         if hi <= lo:
+            self._paint_stats["gen_time_ms"] = (time.perf_counter() - t0) * 1000.0
             return
         visible = self._arr[lo:hi]
         self._paint_stats["bars_drawn"] = visible.shape[0]
@@ -317,6 +471,7 @@ class CandlestickItem(pg.GraphicsObject):
             self._paint_stats["draw_lines_calls"] += 1
 
         p.end()
+        self._paint_stats["gen_time_ms"] = (time.perf_counter() - t0) * 1000.0
 
     def _paint_batch(
         self,
@@ -353,7 +508,11 @@ class CandlestickItem(pg.GraphicsObject):
             self.update()
 
     def paint(self, p, *args) -> None:  # type: ignore[no-untyped-def]
-        p.drawPicture(0, 0, self.picture)
+        t0 = time.perf_counter()
+        try:
+            p.drawPicture(0, 0, self.picture)
+        finally:
+            self._paint_stats["paint_time_ms"] = (time.perf_counter() - t0) * 1000.0
 
     def boundingRect(self):  # type: ignore[no-untyped-def]
         return QRectF(self.picture.boundingRect())

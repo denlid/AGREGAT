@@ -473,9 +473,8 @@ class QuantTab(QWidget):
             return
 
         prev = getattr(self, "_heatmap_worker", None)
-        if prev is not None and prev.isRunning():
+        if prev is not None:
             prev.cancel()
-            prev.wait(50)
 
         # Lazily build a spinner that covers the whole heatmap sub-tab.
         if not hasattr(self, "_heatmap_spinner"):

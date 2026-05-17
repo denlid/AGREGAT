@@ -555,6 +555,73 @@ class DataLoader:
         return _validate_ohlc(df, source="Parquet")
 
     @staticmethod
+    def load_with_pyramid(
+        filepath: str,
+        *,
+        date_range: DateRange = None,
+        use_cache: bool = True,
+        pyramid_levels: Optional[Tuple[str, ...]] = None,
+    ):  # type: ignore[no-untyped-def]
+        """Phase 2 (GPU plan) — load OHLCV and build an LOD pyramid in one call.
+
+        Convenience wrapper around the per-format loaders that also
+        constructs a :class:`engine.data.lod_pyramid.LodPyramid` from
+        the base (1m) frame. The chart's
+        :class:`gui.chart_tab.items.CandlestickItem` then attaches the
+        pyramid via :py:meth:`set_pyramid` and auto-swaps to a coarser
+        TF when the user zooms out beyond the
+        :data:`DEFAULT_MAX_BARS` budget.
+
+        The pyramid is built lazily: if the caller never reads a
+        coarser level, the polars resample never runs (see
+        :py:meth:`engine.data.lod_pyramid.LodPyramid.from_base`).
+
+        Parameters
+        ----------
+        filepath:
+            Path to a CSV / Parquet / Feather file. The format is
+            picked from the extension — same behaviour as the
+            per-format static methods.
+        date_range, use_cache:
+            Forwarded to :py:meth:`load_csv`. Ignored by the parquet /
+            feather paths (those don't cache or push-down filter).
+        pyramid_levels:
+            Optional override for the TF set. Defaults to
+            :data:`engine.data.lod_pyramid.DEFAULT_PYRAMID_LEVELS`
+            (M1 + M5 + M15 + H1 + D1).
+
+        Returns
+        -------
+        (pandas.DataFrame, LodPyramid)
+            The base-TF frame and the pyramid wrapping every requested
+            level. The base frame is also indexed into the pyramid
+            under ``"1m"`` so callers that only want the pyramid can
+            ignore the first element.
+        """
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in (".parquet", ".pq"):
+            df = DataLoader.load_parquet(filepath)
+        elif ext in (".feather", ".ipc"):
+            df = DataLoader.load_feather(filepath)
+        else:
+            df = DataLoader.load_csv(
+                filepath, date_range=date_range, use_cache=use_cache
+            )
+
+        # Import locally so the heavy ``lod_pyramid`` module (which in
+        # turn imports polars / pyqtgraph helpers) only loads when a
+        # caller actually asks for the pyramid path.
+        from engine.data.lod_pyramid import DEFAULT_PYRAMID_LEVELS, LodPyramid
+
+        levels = (
+            tuple(pyramid_levels)
+            if pyramid_levels is not None
+            else DEFAULT_PYRAMID_LEVELS
+        )
+        pyramid = LodPyramid.from_base(df, levels=levels, base_tf="1m")
+        return df, pyramid
+
+    @staticmethod
     def load_feather(filepath: str) -> pd.DataFrame:
         """Load OHLC data from a Feather (IPC) file.
 

@@ -32,7 +32,7 @@ import numpy as np
 # to roughly 2 000 vertical lines per ViewBox; we hold that as the
 # "max visible candles" upper bound. The chart tab passes its own
 # value via ``max_bars`` if a different cap is wanted.
-DEFAULT_MAX_BARS = 2_000
+DEFAULT_MAX_BARS = 10_000
 
 OhlcTuple = Tuple[float, float, float, float, float]
 """``(idx, open, close, low, high)`` as accepted by :class:`gui.chart_tab.items.CandlestickItem`."""

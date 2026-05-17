@@ -2,11 +2,10 @@
 
 from gui.chart_tab.axis import TimeAxisItem
 from gui.chart_tab.items import CandlestickItem, FilledRectROI
-from gui.chart_tab.tab import RENDER_WINDOW, ChartTab
+from gui.chart_tab.tab import ChartTab
 
 __all__ = [
     "ChartTab",
-    "RENDER_WINDOW",
     "TimeAxisItem",
     "CandlestickItem",
     "FilledRectROI",

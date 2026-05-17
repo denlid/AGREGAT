@@ -111,10 +111,31 @@ class SessionLifecycleController:
     # ------------------------------------------------------------------
     def load_data(self) -> None:
         h = self._host
-        fp, _ = QFileDialog.getOpenFileName(h, "Load CSV", "", "CSV (*.csv)")
-        if not fp:
+        fps, _ = QFileDialog.getOpenFileNames(h, "Load Data", "", "Data Files (*.csv *.parquet *.pq *.feather *.ipc)")
+        if not fps:
             return
-        self.start_async_csv_load(fp, save_last=True)
+        
+        # Phase 4 DataPager autowire:
+        try:
+            from engine.data.data_pager import make_pager
+            pager = make_pager(fps)
+            if pager is not None:
+                h.chart_tab.attach_data_pager(pager)
+                # The DataPager handles async loading on demand.
+                # We can just request the first tile's bounds.
+                tiles = pager.list_tiles()
+                if tiles:
+                    # Let's ensure the first tile is loaded right away
+                    # We can't know bounds if bounds_from_disk=False, so just request it.
+                    # Pager handles it.
+                    import pandas as pd
+                    pager.ensure_visible(pd.Timestamp("1900-01-01"), pd.Timestamp("2100-01-01"))
+                return
+        except Exception as e:
+            logger.debug(f"DataPager creation skipped or failed: {e}")
+
+        # Fallback to legacy single file
+        self.start_async_csv_load(fps[0], save_last=True)
 
     def start_async_csv_load(self, fp: str, save_last: bool) -> None:
         """Run ``DataLoader.load_csv`` on a background ``QThread`` so the
