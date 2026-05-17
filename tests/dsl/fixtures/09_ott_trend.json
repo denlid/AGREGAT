@@ -1,0 +1,26 @@
+{
+  "strategy": {
+    "name": "OttTrendFollower",
+    "ltf": "5m",
+    "dsl_version": "1"
+  },
+  "indicators": [
+    {"id": "trend", "type": "ott", "period": 14, "factor": 0.4}
+  ],
+  "filters": [
+    {"id": "bull_break", "type": "break_above", "lhs": "close", "rhs": "trend"},
+    {"id": "bear_break", "type": "break_below", "lhs": "close", "rhs": "trend"},
+    {"id": "weekday_ok", "type": "weekday", "days": ["mon", "tue", "wed", "thu"]}
+  ],
+  "entries": [
+    {"when": "bull_break", "do": "buy_at_next_open"},
+    {"when": "bear_break", "do": "sell_at_next_open"}
+  ],
+  "exits": [
+    {"type": "atr_mult_sl", "mult": 2.5},
+    {"type": "fixed_rr_tp", "rr": 2}
+  ],
+  "risk": {
+    "risk_pct": 0.5
+  }
+}
