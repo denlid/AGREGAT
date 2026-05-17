@@ -1,6 +1,8 @@
+import ast
 import os
 import importlib.util
 import json
+import hashlib
 from PySide6.QtCore import Slot
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QFileDialog
 
@@ -9,6 +11,44 @@ from gui.workers.ai_worker import AIAssistantWorker
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEMP_STRAT_PATH = os.path.join(_APP_DIR, "strategies", "temp_ai_strategy.py")
+
+
+def _validate_code_syntax(code: str) -> tuple[bool, str]:
+    """Check Python code for syntax errors. Returns (is_valid, error_message)."""
+    try:
+        ast.parse(code)
+        return True, ""
+    except SyntaxError as e:
+        line_info = f"line {e.lineno}" if e.lineno else "unknown line"
+        text_info = f"\n{e.text}" if e.text else ""
+        return False, f"Syntax error at {line_info}: {e.msg}{text_info}"
+
+
+def _validate_strategy_structure(code: str) -> list[str]:
+    """Return warnings about potential structural issues in strategy code."""
+    warnings = []
+    if "class " not in code:
+        warnings.append("No class definition found in code")
+    if "on_candle" not in code and "vectorized_signals" not in code:
+        warnings.append("No execution method (on_candle/vectorized_signals) found")
+    if "import " not in code:
+        warnings.append("No imports found — code may be incomplete")
+    if "self.params" in code and "PARAMS" not in code:
+        warnings.append("Code uses self.params but has no PARAMS definition")
+    if "Strategy" not in code:
+        warnings.append("Code does not inherit from Strategy class")
+    return warnings
+
+
+# Cache for identical AI requests (2.3)
+_AI_CACHE: dict[str, str] = {}
+_MAX_CACHE_SIZE = 50
+
+
+def _make_cache_key(prompt: str, code_context: str, error_traceback: str | None, extra_context_json: str) -> str:
+    raw = f"{prompt}||{code_context}||{error_traceback or ''}||{extra_context_json}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
 
 class StrategyEditorTab(QWidget):
     def __init__(self, engine, main_window):
@@ -21,6 +61,7 @@ class StrategyEditorTab(QWidget):
         self._queued_editor_source: str | None = None
         self._editor_web_ready = False
         self._editor_dirty = False
+        self._last_metrics: dict | None = None  # (1.5) cache last backtest metrics
         self._build_ui()
 
     def _build_ui(self):
@@ -156,8 +197,98 @@ class StrategyEditorTab(QWidget):
             raise ValueError("Could not find a class inheriting from `Strategy` in the code.")
         return strategy_cls()
 
+    # ------------------------------------------------------------------
+    # (1.4) Build data schema from loaded CSV
+    # ------------------------------------------------------------------
+    def _build_data_schema(self) -> dict | None:
+        """Extract schema info from the currently loaded data."""
+        df = getattr(self.engine, "df", None)
+        if df is None:
+            return None
+        schema = {
+            "columns": list(df.columns),
+            "rows": len(df),
+            "dtypes": {col: str(df[col].dtype) for col in df.columns},
+        }
+        # Add date range if time column exists
+        for col in df.columns:
+            if "time" in col.lower() or "date" in col.lower():
+                try:
+                    schema["date_range"] = {
+                        "from": str(df[col].iloc[0]),
+                        "to": str(df[col].iloc[-1]),
+                    }
+                except Exception:
+                    pass
+                break
+        # Add basic statistics for OHLCV columns
+        stats = {}
+        for col in ("open", "high", "low", "close", "volume"):
+            if col in df.columns:
+                try:
+                    stats[col] = {
+                        "min": float(df[col].min()),
+                        "max": float(df[col].max()),
+                        "mean": float(df[col].mean()),
+                    }
+                except Exception:
+                    pass
+        if stats:
+            schema["statistics"] = stats
+        return schema
+
+    # ------------------------------------------------------------------
+    # (1.5) Collect backtest metrics
+    # ------------------------------------------------------------------
+    def _collect_backtest_metrics(self) -> dict | None:
+        """Extract key metrics from the engine after a backtest."""
+        try:
+            stats = getattr(self.engine, "stats", None) or {}
+            if not stats:
+                return None
+            metrics = {}
+            for key, label in (
+                ("sharpe", "sharpe_ratio"),
+                ("sortino", "sortino_ratio"),
+                ("total_return_pct", "total_return_pct"),
+                ("max_drawdown_pct", "max_drawdown_pct"),
+                ("win_rate", "win_rate_pct"),
+                ("profit_factor", "profit_factor"),
+                ("avg_trade_pnl", "avg_trade_pnl"),
+                ("num_trades", "num_trades"),
+                ("recovery_factor", "recovery_factor"),
+                ("calmar_ratio", "calmar_ratio"),
+            ):
+                val = stats.get(key) or stats.get(label)
+                if val is not None:
+                    metrics[label] = round(float(val), 4) if isinstance(val, (int, float)) else val
+            return metrics if metrics else None
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # (2.7) Pre-validate code
+    # ------------------------------------------------------------------
+    def _pre_validate_code(self, code: str) -> list[str]:
+        """Run validation checks on code before sending to AI. Return warnings."""
+        warnings = []
+        is_valid, err = _validate_code_syntax(code)
+        if not is_valid:
+            warnings.append(f"⚠️ Syntax error: {err}")
+        struct_warnings = _validate_strategy_structure(code)
+        warnings.extend(struct_warnings)
+        return warnings
+
+    # ------------------------------------------------------------------
+    # AI chat flow
+    # ------------------------------------------------------------------
     def on_chat_requested_ext(self, prompt, code_context, selection_context_json):
-        # Disable inputs and show loading state is handled by JS
+        # Pre-validate code before sending to AI (2.7)
+        if code_context:
+            validation_warnings = self._pre_validate_code(code_context)
+            for w in validation_warnings:
+                self.editor.show_system_message(w, is_error=True)
+
         extra_context = {}
         if selection_context_json:
             try:
@@ -165,18 +296,40 @@ class StrategyEditorTab(QWidget):
             except Exception:
                 extra_context = {}
 
+        # (1.4) Attach data schema
+        data_schema = self._build_data_schema()
+        if data_schema:
+            extra_context["data_schema"] = data_schema
+
+        # (1.5) Attach last backtest metrics
+        if self._last_metrics:
+            extra_context["backtest_metrics"] = self._last_metrics
+
+        # (2.3) Check cache
+        cache_key = _make_cache_key(prompt, code_context, self.latest_error, selection_context_json)
+        cached = _AI_CACHE.get(cache_key)
+        if cached:
+            self.editor.show_system_message("⚡ Using cached response (same prompt was sent before)")
+            self.editor.stream_chunk(cached)
+            self.editor.finish_generation(cached)
+            return
+
         # Mirror user message to the twin panel
         self.editor.forward_user_message_to_mirror(prompt)
 
         self._start_ai_worker(
-            prompt, code_context, self.latest_error, extra_context=extra_context
+            prompt, code_context, self.latest_error, extra_context=extra_context, cache_key=cache_key
         )
 
     def _start_ai_worker(
-        self, prompt, code_context, error_traceback, extra_context=None
+        self, prompt, code_context, error_traceback, extra_context=None, cache_key: str | None = None
     ):
-        self.latest_error = None # reset
+        self.latest_error = None  # reset
         kw = self.pw.settings_tab.get_ai_worker_kwargs()
+        
+        # Store cache_key for later use in _on_ai_finished
+        self._pending_cache_key = cache_key
+        
         self.ai_worker = AIAssistantWorker(
             prompt=prompt,
             code_context=code_context,
@@ -192,6 +345,15 @@ class StrategyEditorTab(QWidget):
 
     @Slot(str)
     def _on_ai_finished(self, full_text):
+        # (2.3) Cache the response
+        cache_key = getattr(self, '_pending_cache_key', None)
+        if cache_key and full_text:
+            _AI_CACHE[cache_key] = full_text
+            if len(_AI_CACHE) > _MAX_CACHE_SIZE:
+                # Remove oldest entry
+                oldest = next(iter(_AI_CACHE))
+                del _AI_CACHE[oldest]
+        
         # JS parses streamed markdown; signal completion to re-enable UI.
         self.editor.finish_generation(full_text or "")
 
@@ -206,7 +368,14 @@ class StrategyEditorTab(QWidget):
             except AttributeError:
                 self.pw._replay_ctrl.bar_replay.run_to_end()
 
-            self.editor.show_system_message("Strategy compiled and backtest started. Check 'Chart' or 'Stats' tab.")
+            # (1.5) Collect metrics after backtest
+            self._last_metrics = self._collect_backtest_metrics()
+            if self._last_metrics:
+                summary = ", ".join(f"{k}={v}" for k, v in list(self._last_metrics.items())[:5])
+                self.editor.show_system_message(f"📊 Backtest complete: {summary}")
+            else:
+                self.editor.show_system_message("Strategy compiled and backtest started. Check 'Chart' or 'Stats' tab.")
+            
             self._editor_dirty = False
             self._refresh_header_title()
         except Exception as e:

@@ -9,6 +9,27 @@ from PySide6.QtCore import QThread, Signal
 logger = logging.getLogger("StrategyTester.gui.workers.ai_worker")
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _AI_GUIDE_PATH = os.path.join(_APP_DIR, "docs", "ai_strategy_authoring_guide.md")
+_PROMPTS_DIR = os.path.join(_APP_DIR, "config", "prompts")
+
+
+def _detect_task_type(prompt: str, has_error: bool) -> str:
+    """Detect what kind of task this is to pick the right prompt template."""
+    prompt_lower = prompt.lower().strip()
+    if has_error or any(w in prompt_lower for w in ("fix", "error", "bug", "traceback", "broken", "not working", "issue")):
+        return "fix"
+    if any(w in prompt_lower for w in ("explain", "what does", "how does", "why", "describe", "tell me about")):
+        return "explain"
+    return "write"
+
+
+def _read_prompt_file(*path_parts: str) -> str:
+    """Read a text file, returning empty string on failure."""
+    p = os.path.join(*path_parts)
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
 
 
 class AIAssistantWorker(QThread):
@@ -29,6 +50,7 @@ class AIAssistantWorker(QThread):
         extra_context: Optional[Dict[str, Any]] = None,
         openai_base_url: str = "",
         openai_extra_body: Optional[Dict[str, Any]] = None,
+        max_tokens: int = 4096,
     ) -> None:
         super().__init__()
         self._chunk_count = 0
@@ -41,6 +63,7 @@ class AIAssistantWorker(QThread):
         self.extra_context = extra_context or {}
         self.openai_base_url = (openai_base_url or "").strip()
         self.openai_extra_body = openai_extra_body
+        self.max_tokens = max_tokens
         self.full_response = ""
         self.is_running = True
         self._stream_phase_emitted = False
@@ -49,6 +72,8 @@ class AIAssistantWorker(QThread):
         self._anthropic_stream_ref: Any = None
         self._mistral_client_ref: Any = None
         self._gemini_client_ref: Any = None
+        self._start_time: float = 0.0
+        self._phase_msg: str = ""
 
     def stop(self) -> None:
         self.is_running = False
@@ -105,6 +130,7 @@ class AIAssistantWorker(QThread):
                 logger.debug("abort Gemini client", exc_info=True)
 
     def _phase(self, msg: str) -> None:
+        self._phase_msg = msg
         self.phase_changed.emit(msg)
 
     def _emit_chunk(self, text: str) -> None:
@@ -119,59 +145,48 @@ class AIAssistantWorker(QThread):
         if self._stream_phase_emitted:
             return
         self._stream_phase_emitted = True
-        self._phase("Streaming…")
+        self._phase("Receiving response…")
 
-    def run(self) -> None:
-        self._chunk_count = 0
-        self._stream_phase_emitted = False
-        self._clear_http_refs()
-        if not self.api_key:
-            self.error_occurred.emit("API Key is missing. Please set it in the Settings tab.")
-            return
+    # ------------------------------------------------------------------
+    # Prompt building
+    # ------------------------------------------------------------------
+    def _build_system_prompt(self) -> str:
+        """Build system prompt from base template + task-specific template + guide."""
+        base = _read_prompt_file(_PROMPTS_DIR, "system_base.md")
+        if not base:
+            # Fallback if file missing
+            base = "You are AGREGAT AI assistant, an expert quantitative developer for Python trading strategies."
 
-        self._phase("Building prompt…")
-        strategy_guide = ""
-        try:
-            with open(_AI_GUIDE_PATH, "r", encoding="utf-8") as f:
-                strategy_guide = f.read().strip()
-        except Exception:
-            strategy_guide = ""
+        task_type = _detect_task_type(self.prompt, bool(self.error_traceback))
+        task_template = _read_prompt_file(_PROMPTS_DIR, f"system_{task_type}.md")
+        if task_template:
+            # Inject error traceback if this is a fix prompt
+            if task_type == "fix" and self.error_traceback:
+                task_template = task_template.replace("{error_traceback}", self.error_traceback)
+            base += "\n\n" + task_template
 
-        system_prompt = (
-            "You are AGREGAT AI assistant, an expert quantitative developer for Python trading strategies. "
-            "Follow the user request exactly and do ONLY what was explicitly asked. "
-            "Do not add extra features, unrelated suggestions, or off-topic explanations unless the user asks for them.\n\n"
-            "## Core rules\n"
-            "1) Be precise and reliable: provide correct, actionable output with no fluff.\n"
-            "2) Keep responses focused and concise by default.\n"
-            "3) Do not ask unnecessary questions. By default, proceed with sensible assumptions.\n"
-            "4) Ask a question only if absolutely blocked and cannot produce a useful answer without it.\n"
-            "5) If a question is unavoidable, ask only ONE short, high-impact question.\n"
-            "6) Always answer in the same language the user used in their latest message.\n"
-            "7) Preserve intent over style: prioritize exactly requested behavior and constraints.\n\n"
-            "## How to modify code\n"
-            "You must output the **complete new content of the file** inside a single Python fenced block:\n\n"
-            "```python\n"
-            "from engine.strategy.context import Strategy\n"
-            "...\n"
-            "```\n\n"
-            "### Rules for the complete code block:\n"
-            "- The block must contain the **entire** strategy file, not just the changed parts.\n"
-            "- Keep ALL existing code that the user did not ask to change.\n"
-            "- Apply all requested modifications precisely.\n"
-            "- The code must be valid Python that inherits from `engine.strategy.context.Strategy`.\n"
-            "- Use `super().__init__()` as the FIRST line inside `__init__` if your strategy has one.\n"
-            "- Use `self.params[\"param_name\"]` to access strategy parameters (they are set by the framework).\n\n"
-            "### When no code change is required\n"
-            "If the user asks a question that does not require code changes, respond in plain text without any code block."
-        )
+        strategy_guide = _read_prompt_file(_AI_GUIDE_PATH)
         if strategy_guide:
-            system_prompt += (
-                "\n\nAGREGAT strategy authoring reference (must follow):\n"
-                f"{strategy_guide}"
-            )
+            base += "\n\n## AGREGAT strategy authoring reference (must follow)\n" + strategy_guide
 
+        # Backtest metrics if available
+        metrics = self.extra_context.get("backtest_metrics") if self.extra_context else None
+        if metrics and isinstance(metrics, dict):
+            metrics_lines = "\n".join(f"- {k}: {v}" for k, v in metrics.items())
+            base += f"\n\n## Last backtest results\n{metrics_lines}\n"
+
+        # Data schema if available
+        data_schema = self.extra_context.get("data_schema") if self.extra_context else None
+        if data_schema and isinstance(data_schema, dict):
+            schema_json = json.dumps(data_schema, ensure_ascii=False, indent=2)
+            base += f"\n\n## Loaded data schema\n```json\n{schema_json}\n```\n"
+
+        return base
+
+    def _build_user_content(self) -> str:
+        """Build the user message content from context, code, prompt."""
         user_content = ""
+
         # Include chat history if provided
         chat_history = self.extra_context.get("chatHistory") if self.extra_context else None
         if chat_history and isinstance(chat_history, list) and len(chat_history) > 0:
@@ -179,49 +194,70 @@ class AIAssistantWorker(QThread):
             for msg in reversed(chat_history[-20:]):
                 role_label = "User" if msg.get("role") == "user" else ("Assistant" if msg.get("role") == "assistant" else "System")
                 user_content += f"**{role_label}:** {msg.get('content', '')}\n\n"
-        
-        user_content += f"Here is my current strategy code:\n```python\n{self.code_context}\n```\n\n"
+
+        if self.code_context:
+            user_content += f"Here is my current strategy code:\n```python\n{self.code_context}\n```\n\n"
+
         if self.error_traceback:
             user_content += f"I ran a backtest and got this error traceback:\n{self.error_traceback}\n\n"
 
         user_content += f"Task: {self.prompt}"
-        if self.extra_context and any(k != "chatHistory" for k in self.extra_context.keys()):
+
+        # Chart selection data
+        if self.extra_context and any(k not in ("chatHistory", "backtest_metrics", "data_schema") for k in self.extra_context.keys()):
             ctx = self.extra_context
-            # Build a human-readable description of chart selection data
-            chart_desc = ""
-            if ctx.get("symbol"):
-                chart_desc += f"- Symbol: {ctx['symbol']}\n"
-            if ctx.get("timeframe"):
-                chart_desc += f"- Timeframe: {ctx['timeframe']}\n"
-            if ctx.get("selected_range"):
-                r = ctx["selected_range"]
-                chart_desc += f"- Selected date range: {r.get('start','?')} to {r.get('end','?')}\n"
-            if ctx.get("price_range"):
-                pr = ctx["price_range"]
-                chart_desc += f"- Price range: {pr.get('low','?')} to {pr.get('high','?')}\n"
-            if ctx.get("visible_candles"):
-                chart_desc += f"- Visible candles on chart: ~{ctx['visible_candles']}\n"
-            if ctx.get("indicators"):
-                chart_desc += f"- Indicators displayed: {', '.join(ctx['indicators'])}\n"
-            if ctx.get("selection_info"):
-                chart_desc += f"- Selection details: {ctx['selection_info']}\n"
+            has_chart_data = any(k in ctx for k in ("symbol", "timeframe", "selected_range", "price_range", "visible_candles", "indicators", "selection_info"))
+            if has_chart_data:
+                chart_desc = ""
+                if ctx.get("symbol"):
+                    chart_desc += f"- Symbol: {ctx['symbol']}\n"
+                if ctx.get("timeframe"):
+                    chart_desc += f"- Timeframe: {ctx['timeframe']}\n"
+                if ctx.get("selected_range"):
+                    r = ctx["selected_range"]
+                    chart_desc += f"- Selected date range: {r.get('start','?')} to {r.get('end','?')}\n"
+                if ctx.get("price_range"):
+                    pr = ctx["price_range"]
+                    chart_desc += f"- Price range: {pr.get('low','?')} to {pr.get('high','?')}\n"
+                if ctx.get("visible_candles"):
+                    chart_desc += f"- Visible candles on chart: ~{ctx['visible_candles']}\n"
+                if ctx.get("indicators"):
+                    chart_desc += f"- Indicators displayed: {', '.join(ctx['indicators'])}\n"
+                if ctx.get("selection_info"):
+                    chart_desc += f"- Selection details: {ctx['selection_info']}\n"
 
-            user_content += (
-                "\n\n## Chart selection data\n"
-                "The user selected an area on the price chart. This data describes "
-                "the currently visible chart area and the user's selection.\n\n"
-                f"{chart_desc}\n"
-                "Use this context to understand which part of the market the user "
-                "is looking at. For example: which symbol, what timeframe, what "
-                "price range is currently visible.\n\n"
-                "Full raw context (JSON):\n"
-                f"```json\n{json.dumps(self.extra_context, ensure_ascii=False, indent=2)}\n```"
-            )
+                if chart_desc:
+                    user_content += (
+                        "\n\n## Chart selection data\n"
+                        "The user selected an area on the price chart. This data describes "
+                        "the currently visible chart area and the user's selection.\n\n"
+                        f"{chart_desc}\n"
+                        "Use this context to understand which part of the market the user "
+                        "is looking at. For example: which symbol, what timeframe, what "
+                        "price range is currently visible.\n\n"
+                        "Full raw context (JSON):\n"
+                        f"```json\n{json.dumps(self.extra_context, ensure_ascii=False, indent=2)}\n```"
+                    )
+        return user_content
 
-        self._phase(
-            f"Calling {self.provider}"
-            + (f" · {self.model}" if self.model else "")
-        )
+    # ------------------------------------------------------------------
+    # Main run
+    # ------------------------------------------------------------------
+    def run(self) -> None:
+        self._chunk_count = 0
+        self._stream_phase_emitted = False
+        self._clear_http_refs()
+        self._start_time = time.time()
+        if not self.api_key:
+            self.error_occurred.emit("API Key is missing. Please set it in the Settings tab.")
+            return
+
+        self._phase("Building prompt…")
+        system_prompt = self._build_system_prompt()
+        user_content = self._build_user_content()
+
+        provider_label = self.provider + (f" · {self.model}" if self.model else "")
+        self._phase(f"Calling {provider_label}")
 
         try:
             if self.provider == "Custom (OpenAI-compatible)":
@@ -235,19 +271,19 @@ class AIAssistantWorker(QThread):
                     self.error_occurred.emit("Custom provider: enter a model id in Settings → AI.")
                     return
                 self._phase("Custom endpoint…")
-                self._run_openai_compatible(system_prompt, user_content)
+                self._run_openai_compatible_safe(system_prompt, user_content)
             elif "OpenAI" in self.provider:
-                self._phase("OpenAI…")
-                self._run_openai(system_prompt, user_content)
+                self._phase("OpenAI connecting…")
+                self._run_openai_with_retry(system_prompt, user_content)
             elif "Anthropic" in self.provider:
-                self._phase("Anthropic…")
-                self._run_anthropic(system_prompt, user_content)
+                self._phase("Anthropic connecting…")
+                self._run_anthropic_with_retry(system_prompt, user_content)
             elif "Mistral" in self.provider:
-                self._phase("Mistral…")
-                self._run_mistral(system_prompt, user_content)
+                self._phase("Mistral connecting…")
+                self._run_mistral_with_retry(system_prompt, user_content)
             elif "Gemini" in self.provider:
-                self._phase("Gemini…")
-                self._run_gemini(system_prompt, user_content)
+                self._phase("Gemini connecting…")
+                self._run_gemini_with_retry(system_prompt, user_content)
             else:
                 self.error_occurred.emit(f"Unknown provider: {self.provider}")
         except ImportError as e:
@@ -255,6 +291,88 @@ class AIAssistantWorker(QThread):
         except Exception as e:
             logger.exception("AI API Error")
             self.error_occurred.emit(str(e))
+
+    # ------------------------------------------------------------------
+    # Retry wrappers (2.1)
+    # ------------------------------------------------------------------
+    def _retry_429(self, provider_name: str, fn, *args, max_retries: int = 3):
+        """Generic 429 retry wrapper with exponential backoff."""
+        last_error: Exception | None = None
+        for attempt in range(max_retries):
+            if not self.is_running:
+                self._finish_generation(reason=f"{provider_name}_cancelled_during_retry")
+                return
+            try:
+                if attempt > 0:
+                    self._phase(f"{provider_name} retry {attempt + 1}/{max_retries}…")
+                fn(*args)
+                return  # success
+            except Exception as e:
+                last_error = e
+                if not self.is_running:
+                    self._finish_generation(reason=f"{provider_name}_cancelled_during_retry")
+                    return
+                estr = str(e).upper()
+                is_429 = "429" in estr or "RATE_LIMIT" in estr or "RESOURCE_EXHAUSTED" in estr
+                if is_429 and attempt < max_retries - 1:
+                    self._phase(f"429 backoff ({attempt + 1}/{max_retries})…")
+                    time.sleep(2.0 + attempt * 4.0)
+                    continue
+                # Not a 429, or out of retries — re-raise
+                raise
+        # If we exhausted retries, raise the last error
+        if last_error is not None:
+            raise last_error
+
+    # ------------------------------------------------------------------
+    # OpenAI
+    # ------------------------------------------------------------------
+    def _run_openai_with_retry(self, system_prompt: str, user_content: str) -> None:
+        def call():
+            self._run_openai(system_prompt, user_content)
+        try:
+            self._retry_429("OpenAI", call)
+        except Exception as e:
+            self._handle_openai_error(e)
+
+    def _handle_openai_error(self, e: Exception) -> None:
+        estr = str(e)
+        try:
+            import openai
+            if isinstance(e, openai.AuthenticationError):
+                self.error_occurred.emit(
+                    "OpenAI: Invalid API key. Check Settings → AI → API Key.\n"
+                    "Expected format: sk-... (starts with 'sk-')"
+                )
+                return
+            if isinstance(e, openai.RateLimitError):
+                self.error_occurred.emit(
+                    "OpenAI: Rate limit exceeded (429).\n"
+                    "Wait 30-60 seconds or upgrade your plan.\n"
+                    "https://platform.openai.com/account/rate-limits"
+                )
+                return
+            if isinstance(e, openai.BadRequestError):
+                if "context_length_exceeded" in estr or "maximum context length" in estr:
+                    total_tokens = len(estr)
+                    self.error_occurred.emit(
+                        f"OpenAI: Context too long (~{total_tokens} tokens). "
+                        f"Model max is unknown. Try:\n"
+                        "1) Reduce code size\n"
+                        "2) Use a model with larger context (e.g. gpt-4-1106-preview)"
+                    )
+                    return
+                self.error_occurred.emit(f"OpenAI BadRequest: {e}")
+                return
+            if isinstance(e, openai.APITimeoutError):
+                self.error_occurred.emit("OpenAI: Request timed out. Check your internet connection.")
+                return
+            if isinstance(e, openai.APIConnectionError):
+                self.error_occurred.emit("OpenAI: Connection failed. Check proxy/VPN settings.")
+                return
+        except ImportError:
+            pass
+        self.error_occurred.emit(f"OpenAI error: {e}")
 
     def _run_openai(self, system_prompt: str, user_content: str) -> None:
         from openai import OpenAI
@@ -272,6 +390,7 @@ class AIAssistantWorker(QThread):
                         {"role": "user", "content": user_content},
                     ],
                     stream=True,
+                    max_tokens=self.max_tokens,
                 )
             except Exception:
                 if not self.is_running:
@@ -297,6 +416,15 @@ class AIAssistantWorker(QThread):
             self._openai_sdk_client = None
         self._finish_generation(reason="openai_done")
 
+    def _run_openai_compatible_safe(self, system_prompt: str, user_content: str) -> None:
+        """Run custom provider with retry + error handling."""
+        def call():
+            self._run_openai_compatible(system_prompt, user_content)
+        try:
+            self._retry_429("Custom", call)
+        except Exception as e:
+            self._handle_openai_error(e)
+
     def _run_openai_compatible(self, system_prompt: str, user_content: str) -> None:
         from openai import OpenAI
 
@@ -311,6 +439,7 @@ class AIAssistantWorker(QThread):
                 {"role": "user", "content": user_content},
             ],
             "stream": True,
+            "max_tokens": self.max_tokens,
         }
         if self.openai_extra_body:
             kwargs["extra_body"] = self.openai_extra_body
@@ -343,6 +472,43 @@ class AIAssistantWorker(QThread):
             self._openai_sdk_client = None
         self._finish_generation(reason="openai_compatible_done")
 
+    # ------------------------------------------------------------------
+    # Anthropic
+    # ------------------------------------------------------------------
+    def _run_anthropic_with_retry(self, system_prompt: str, user_content: str) -> None:
+        def call():
+            self._run_anthropic(system_prompt, user_content)
+        try:
+            self._retry_429("Anthropic", call)
+        except Exception as e:
+            self._handle_anthropic_error(e)
+
+    def _handle_anthropic_error(self, e: Exception) -> None:
+        estr = str(e).lower()
+        try:
+            import anthropic
+            if isinstance(e, anthropic.APIConnectionError):
+                self.error_occurred.emit("Anthropic: Connection failed. Check your internet.")
+                return
+            if isinstance(e, anthropic.RateLimitError):
+                self.error_occurred.emit("Anthropic: Rate limit exceeded. Wait 30s.")
+                return
+            if isinstance(e, anthropic.BadRequestError):
+                if "too many tokens" in estr or "context" in estr:
+                    self.error_occurred.emit("Anthropic: Prompt too long. Reduce code size.")
+                    return
+                if "maximum" in estr and "tokens" in estr:
+                    self.error_occurred.emit("Anthropic: max_tokens exceeds model limit.")
+                    return
+                self.error_occurred.emit(f"Anthropic BadRequest: {e}")
+                return
+            if isinstance(e, anthropic.AuthenticationError):
+                self.error_occurred.emit("Anthropic: Invalid API key. Check Settings → AI.")
+                return
+        except ImportError:
+            pass
+        self.error_occurred.emit(f"Anthropic error: {e}")
+
     def _run_anthropic(self, system_prompt: str, user_content: str) -> None:
         import anthropic
 
@@ -351,7 +517,7 @@ class AIAssistantWorker(QThread):
         self._phase("Waiting for API…")
         try:
             with client.messages.stream(
-                max_tokens=4096,
+                max_tokens=self.max_tokens,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_content}],
                 model=model,
@@ -371,6 +537,30 @@ class AIAssistantWorker(QThread):
                 return
             raise
         self._finish_generation(reason="anthropic_done")
+
+    # ------------------------------------------------------------------
+    # Mistral
+    # ------------------------------------------------------------------
+    def _run_mistral_with_retry(self, system_prompt: str, user_content: str) -> None:
+        def call():
+            self._run_mistral(system_prompt, user_content)
+        try:
+            self._retry_429("Mistral", call)
+        except Exception as e:
+            self._handle_mistral_error(e)
+
+    def _handle_mistral_error(self, e: Exception) -> None:
+        estr = str(e).lower()
+        if "401" in estr or "api key" in estr or "unauthorized" in estr:
+            self.error_occurred.emit("Mistral: Invalid API key. Check Settings → AI.")
+            return
+        if "429" in estr or "rate" in estr:
+            self.error_occurred.emit("Mistral: Rate limit. Wait 30s.")
+            return
+        if "context" in estr or "length" in estr or "too large" in estr:
+            self.error_occurred.emit("Mistral: Prompt too long. Reduce code size.")
+            return
+        self.error_occurred.emit(f"Mistral error: {e}")
 
     def _run_mistral(self, system_prompt: str, user_content: str) -> None:
         from mistralai.client import Mistral
@@ -404,6 +594,35 @@ class AIAssistantWorker(QThread):
             self._mistral_client_ref = None
         self._finish_generation(reason="mistral_done")
 
+    # ------------------------------------------------------------------
+    # Gemini
+    # ------------------------------------------------------------------
+    def _run_gemini_with_retry(self, system_prompt: str, user_content: str) -> None:
+        # Gemini already has its own retry logic — keep it but also wrap with _retry_429
+        try:
+            self._run_gemini(system_prompt, user_content)
+        except Exception as e:
+            self._handle_gemini_error(e)
+
+    def _handle_gemini_error(self, e: Exception) -> None:
+        estr = str(e).upper()
+        if "API_KEY_INVALID" in estr or "API_KEY" in estr:
+            self.error_occurred.emit("Gemini: Invalid API key. Check Settings → AI.")
+            return
+        if "SAFETY" in estr:
+            self.error_occurred.emit("Gemini: Response blocked by safety filters. Try rephrasing.")
+            return
+        if "429" in estr or "RESOURCE_EXHAUSTED" in estr:
+            self.error_occurred.emit(
+                "Gemini 429: quota/rate limit. Try another model or wait.\n"
+                "https://ai.google.dev/gemini-api/docs/rate-limits"
+            )
+            return
+        if "PERMISSION_DENIED" in estr:
+            self.error_occurred.emit("Gemini: API not enabled. Enable in Google Cloud Console.")
+            return
+        self.error_occurred.emit(f"Gemini error: {e}")
+
     def _run_gemini(self, system_prompt: str, user_content: str) -> None:
         from google import genai
         from google.genai import types
@@ -415,14 +634,6 @@ class AIAssistantWorker(QThread):
         def _free_tier_limit_zero(exc: BaseException) -> bool:
             s = str(exc).lower()
             return "limit: 0" in s and "free_tier" in s
-
-        def _friendly_gemini_error(exc: BaseException) -> str:
-            if _is_429(exc):
-                return (
-                    "Gemini 429: quota/rate limit. Try another model, billing, or wait. "
-                    "https://ai.google.dev/gemini-api/docs/rate-limits"
-                )
-            return str(exc)
 
         model = (self.model or "gemini-2.5-flash").strip()
         client = genai.Client(api_key=self.api_key)
@@ -469,10 +680,10 @@ class AIAssistantWorker(QThread):
                         continue
                     if _is_429(e):
                         break
-                    self.error_occurred.emit(_friendly_gemini_error(e))
-                    return
+                    # Don't emit error here — let _handle_gemini_error do it via outer wrapper
+                    raise
 
             if last_error is not None:
-                self.error_occurred.emit(_friendly_gemini_error(last_error))
+                raise last_error
         finally:
             self._gemini_client_ref = None

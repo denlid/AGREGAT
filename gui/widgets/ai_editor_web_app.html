@@ -481,25 +481,33 @@
             box-sizing: border-box;
             background: rgba(239, 83, 80, 0.12);
             border-left: 3px solid var(--red);
-            overflow-y: auto;
+            overflow: hidden;
             display: flex;
-            align-items: flex-start;
-            padding: 2px 0;
+            align-items: stretch;
         }
 
         .ai-deleted-zone pre {
             width: 100%;
             margin: 0;
-            padding: 4px 8px;
+            padding: 0;
+            font-family: 'Roboto Mono', Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #d4d4d4;
+            background: transparent;
+            white-space: pre;
+            overflow: hidden;
+            border: none;
+            box-shadow: none;
         }
 
-        .ai-deleted-zone::-webkit-scrollbar {
-            width: 4px;
-        }
-
-        .ai-deleted-zone::-webkit-scrollbar-thumb {
-            background: rgba(239, 83, 80, 0.3);
-            border-radius: 2px;
+        .ai-deleted-zone code {
+            display: block;
+            font-family: 'Roboto Mono', Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #d4d4d4;
+            background: transparent;
         }
 
         #chat-input {
@@ -756,6 +764,14 @@
                 const EDITOR_MIN = 200;
                 const CHAT_MIN = 250;
                 const SNAP_THRESHOLD = 60; // extra pixels past min to trigger collapse/restore
+                let canUseVision = true; // (4.6) whether current model supports images
+                
+                // ============= AI EDIT HISTORY (3.2) =============
+                const aiEditHistory = [];
+                const MAX_AI_HISTORY = 50;
+                let aiHistoryIndex = -1;
+                let _diffToggleOn = false; // (3.1) side-by-side diff toggle
+                let _accumulatedPatchRaw = ''; // (2.8) incremental patch builder
 
                 // ============= CHAT TABS STATE =============
                 let chatTabs = [];            // { id, label, messages: [{role, content}] }
@@ -1181,33 +1197,22 @@
                     root.className = 'ai-deleted-zone';
                     root.setAttribute('aria-hidden', 'true');
 
-                    // Показуємо видалений код
+                    // Показуємо видалений код — такий же розмір/шрифт як в звичайному коді
                     if (lines && lines.length > 0) {
-                        const maxLines = 15; // Максимум рядків для показу
+                        const pre = document.createElement('pre');
+                        const code = document.createElement('code');
+
+                        const maxLines = 15;
                         let displayLines = lines.slice(0, maxLines);
                         let truncated = lines.length > maxLines;
-
-                        const codeContent = document.createElement('pre');
-                        codeContent.style.cssText = `
-                    margin: 4px 8px;
-                    font-family: 'Roboto Mono', Consolas, monospace;
-                    font-size: 11px;
-                    color: rgba(255, 255, 255, 0.65);
-                    white-space: pre-wrap;
-                    word-break: break-all;
-                    user-select: text;
-                    pointer-events: auto;
-                    line-height: 1.4;
-                    overflow: hidden;
-                    max-height: 100%;
-                `;
 
                         let text = displayLines.join('\n');
                         if (truncated) {
                             text += '\n... (' + (lines.length - maxLines) + ' more lines)';
                         }
-                        codeContent.textContent = text;
-                        root.appendChild(codeContent);
+                        code.textContent = text;
+                        pre.appendChild(code);
+                        root.appendChild(pre);
                     }
 
                     return root;
@@ -1602,16 +1607,61 @@
                     highlightPatchPreviewDiff(previewBaselineCode || before, next);
                 }
 
+                // ============= AI EDIT HISTORY (3.2) =============
+                function saveEditSnapshot(prompt) {
+                    const code = previewBaselineCode || getEditorValue();
+                    if (!code) return;
+                    
+                    // Discard future entries if we undid
+                    if (aiHistoryIndex < aiEditHistory.length - 1) {
+                        aiEditHistory.splice(aiHistoryIndex + 1);
+                    }
+                    
+                    aiEditHistory.push({
+                        timestamp: Date.now(),
+                        code: code,
+                        prompt: (prompt || '').slice(0, 80)
+                    });
+                    
+                    if (aiEditHistory.length > MAX_AI_HISTORY) {
+                        aiEditHistory.shift();
+                    }
+                    aiHistoryIndex = aiEditHistory.length - 1;
+                }
+                
+                function undoAIAction() {
+                    if (aiHistoryIndex <= 0) return;
+                    aiHistoryIndex--;
+                    const snapshot = aiEditHistory[aiHistoryIndex];
+                    safeEditorSetValue(snapshot.code);
+                    previewBaselineCode = snapshot.code;
+                    clearPreviewViewZones();
+                    appendSystemMessage('↩ Undo to: ' + snapshot.prompt);
+                }
+                
+                function redoAIAction() {
+                    if (aiHistoryIndex >= aiEditHistory.length - 1) return;
+                    aiHistoryIndex++;
+                    const snapshot = aiEditHistory[aiHistoryIndex];
+                    safeEditorSetValue(snapshot.code);
+                    previewBaselineCode = snapshot.code;
+                    clearPreviewViewZones();
+                    appendSystemMessage('↪ Redo to: ' + snapshot.prompt);
+                }
+
                 function applyPendingChanges() {
                     if (!isEditorReady()) {
                         appendSystemMessage('Editor not ready. Wait and try again.', true);
                         return;
                     }
 
+                    var applied = false;
+
                     if (pendingPatchChunks && pendingPatchChunks.length && pendingPatchPreviewResult != null) {
                         const body = resolveApplyBody(pendingPatchPreviewResult);
 
                         if (safeEditorSetValue(body)) {
+                            saveEditSnapshot('Patch applied');
                             previewBaselineCode = body;
                             clearPreviewViewZones();
                             previewDecorations = editor.deltaDecorations(previewDecorations, []);
@@ -1620,28 +1670,32 @@
                             pendingCodeCandidate = '';
                             appendSystemMessage('Patch applied.');
                             updatePendingActionsBar();
+                            applied = true;
                         } else {
                             appendSystemMessage('Failed to apply patch. Editor error.', true);
                         }
-                        return;
-                    }
+                    } else if (pendingCodeCandidate) {
+                        const body = resolveApplyBody(pendingCodeCandidate);
 
-                    if (!pendingCodeCandidate) {
-                        appendSystemMessage('Nothing to apply.', true);
-                        return;
-                    }
-
-                    const body = resolveApplyBody(pendingCodeCandidate);
-
-                    if (safeEditorSetValue(body)) {
-                        previewBaselineCode = body;
-                        clearPreviewViewZones();
-                        previewDecorations = editor.deltaDecorations(previewDecorations, []);
-                        pendingCodeCandidate = '';
-                        appendSystemMessage('Saved to editor.');
-                        updatePendingActionsBar();
+                        if (safeEditorSetValue(body)) {
+                            saveEditSnapshot('Code applied from AI');
+                            previewBaselineCode = body;
+                            clearPreviewViewZones();
+                            previewDecorations = editor.deltaDecorations(previewDecorations, []);
+                            pendingCodeCandidate = '';
+                            appendSystemMessage('Saved to editor.');
+                            updatePendingActionsBar();
+                            applied = true;
+                        } else {
+                            appendSystemMessage('Failed to save to editor.', true);
+                        }
                     } else {
-                        appendSystemMessage('Failed to save to editor.', true);
+                        appendSystemMessage('Nothing to apply.', true);
+                    }
+
+                    // Auto-save to disk via Python bridge
+                    if (applied) {
+                        safeBridgeCall('receive_save_strategy', getEditorValue());
                     }
                 }
 
@@ -1942,6 +1996,25 @@
                 }
 
                 // ============= PUBLIC API (called from Python) =============
+                
+                // (4.6) Enable/disable vision-dependent UI
+                window.setVisionCapability = function(enabled) {
+                    canUseVision = !!enabled;
+                    if (attachBtn) {
+                        if (canUseVision) {
+                            attachBtn.disabled = false;
+                            attachBtn.title = 'Attach image or document';
+                            document.getElementById('attach-item-image').style.display = 'block';
+                        } else {
+                            attachBtn.disabled = false; // still allow docs, just block image
+                            document.getElementById('attach-item-image').style.display = 'none';
+                            // Remove any image attachments already selected
+                            selectedAttachments = selectedAttachments.filter(a => a.kind !== 'image');
+                            renderAttachments();
+                        }
+                    }
+                };
+                
                 window.setAiPhaseMessage = setAiPhaseMessage;
 
                 window.stream_ai_chunk = function (chunk) {
