@@ -207,6 +207,22 @@ def main() -> int:
 
     # Create Main Window
     window = MainWindow()
+
+    # --- Background License Validation ---
+    from PySide6.QtCore import QTimer
+    def _bg_check():
+        # Deferred import to avoid circular dependency
+        from engine.security.license_manager import verify_license
+        ok, _ = verify_license()
+        if not ok:
+            import os
+            os._exit(1) # Silent hard exit if license fails at runtime
+            
+    _timer = QTimer(window)
+    _timer.timeout.connect(_bg_check)
+    _timer.start(300000) # Every 5 minutes
+    # -------------------------------------
+
     window.show()
     splash.finish(window)
     return int(app.exec())

@@ -9,3 +9,4 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 saves/
+/dist/setup/AGREGAT_Beta_Installer.exe
