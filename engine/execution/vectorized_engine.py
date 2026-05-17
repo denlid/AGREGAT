@@ -185,9 +185,43 @@ def run_vectorized(
     if df is None or len(df) == 0:
         return VectorizedResult([], np.array([initial_equity]), 0.0, 0.0, {})
 
-    n = len(df)
+    import time
+    t0 = time.perf_counter()
+    
     signals = strategy.vectorized_signals(df)
+    
+    t_elapsed = time.perf_counter() - t0
+    if t_elapsed > 1.0:
+        logger.warning(
+            f"⚠️ Ваша стратегія (vectorized_signals) виконувалась {t_elapsed:.2f} сек. "
+            "Ймовірно, ви використовуєте повільні цикли (for/iterrows) замість NumPy/Pandas векторизації. "
+            "Оптимізуйте генерацію сигналів для забезпечення HFT продуктивності."
+        )
+
+    n = len(df)
     _validate_signals(signals, n)
+
+    # --- Phase 4 Fix: Look-ahead Bias Sandbox Check ---
+    if n > 50:
+        try:
+            # We take a small slice to keep the check ultra-fast (e.g. max 1000 bars)
+            test_size = min(1000, n)
+            test_df = df.iloc[:test_size].copy()
+            sig_full = strategy.vectorized_signals(test_df)["signal"].to_numpy()
+            
+            # Truncate 10 bars from the future and recalculate
+            test_df_trunc = test_df.iloc[:-10].copy()
+            sig_trunc = strategy.vectorized_signals(test_df_trunc)["signal"].to_numpy()
+            
+            # If past signals change because future data is missing -> Look-ahead bias!
+            if not np.array_equal(sig_full[:len(sig_trunc)], sig_trunc):
+                logger.error(
+                    "🚨 CRITICAL WARNING: Look-ahead bias detected in vectorized_signals! "
+                    "Past signals changed when future bars were removed. "
+                    "Ensure you are not using .shift(-1) or non-causal indicators."
+                )
+        except Exception:
+            pass # Ignore heuristic failures (e.g., if strategy requires min 2000 bars to warmup)
 
     em = execution_model or ExecutionModel()
     spread = em.spread_price(asset)

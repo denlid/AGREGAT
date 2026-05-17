@@ -27,7 +27,7 @@ import logging
 import threading
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, Qt, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import QLabel, QWidget
 
 from gui.styling import style_helpers as _sh
@@ -38,8 +38,8 @@ from engine.logging_config import TraceContextAdapter, new_trace_id
 logger = logging.getLogger("StrategyTester.gui.workers")
 
 
-class ComputeWorker(QThread):
-    """Run a Callable on a background QThread and surface the result via signals.
+class ComputeWorker(QObject):
+    """Run a Callable on a background thread from QThreadPool and surface the result via signals.
 
     Signals:
         finished(object): emitted on success; the payload is the callable's
@@ -48,10 +48,8 @@ class ComputeWorker(QThread):
         error(Exception): emitted if the callable raised. The exception is
             forwarded as-is so the GUI slot can decide how to surface it.
 
-    The worker captures a thread-safe ``cancel_event`` that the callable can
-    poll via :pymeth:`is_cancelled`. AGREGAT analytics functions are
-    long-running NumPy work — they typically check the flag between chunk
-    boundaries.
+    The worker uses a QRunnable submitted to QThreadPool to avoid the OS-level
+    overhead of creating a new QThread for every task.
     """
 
     finished = Signal(object)
@@ -87,7 +85,18 @@ class ComputeWorker(QThread):
     def is_cancelled(self) -> bool:
         return self._cancel.is_set()
 
-    def run(self) -> None:
+    def start(self) -> None:
+        class _Task(QRunnable):
+            def __init__(self, worker: "ComputeWorker") -> None:
+                super().__init__()
+                self.worker = worker
+
+            def run(self) -> None:
+                self.worker._do_run()
+
+        QThreadPool.globalInstance().start(_Task(self))
+
+    def _do_run(self) -> None:
         # Pass the cancel flag to the callable iff it accepts a `cancel_token`
         # kwarg; otherwise call as-is.
         kwargs = dict(self._kwargs)

@@ -126,15 +126,30 @@ class CandlestickItem(pg.GraphicsObject):
             return
         xr = self._view.viewRange()[0]
         visible = max(1, xr[1] - xr[0])
-        self._last_w = max(0.05, min(0.45, 0.40))
+        new_w = max(0.05, min(0.45, 0.40))
         if visible < 20:
-            self._last_w = 0.42
+            new_w = 0.42
         elif visible < 60:
-            self._last_w = 0.40
+            new_w = 0.40
         elif visible < 150:
-            self._last_w = 0.38
+            new_w = 0.38
         else:
-            self._last_w = 0.35
+            new_w = 0.35
+
+        if abs(self._last_w - new_w) > 1e-5 or getattr(self, "_geom_rects", None) is None:
+            self._last_w = new_w
+            w = float(new_w)
+            if self._arr.shape[0] > 0:
+                idx = self._arr[:, 0]
+                op = self._arr[:, 1]
+                cl = self._arr[:, 2]
+                by = np.minimum(op, cl)
+                bh = np.abs(cl - op)
+                self._geom_rects = [QRectF(float(t) - w, float(y), w * 2.0, float(h)) for t, y, h in zip(idx, by, bh)]
+                self._geom_doji_flats = [QLineF(float(t) - w, float(o), float(t) + w, float(o)) for t, o in zip(idx, op)]
+            else:
+                self._geom_rects = []
+                self._geom_doji_flats = []
 
     # ------------------------------------------------------------------
     # Data ingest
@@ -158,8 +173,21 @@ class CandlestickItem(pg.GraphicsObject):
         # range-change repaint.
         if self.data:
             self._arr = np.asarray(self.data, dtype=np.float64)
+            # Cache immutable geometry (wicks) and boolean masks
+            self._all_wicks = [QLineF(float(t), float(l), float(t), float(h)) for t, l, h in zip(self._arr[:, 0], self._arr[:, 3], self._arr[:, 4])]
+            cl = self._arr[:, 2]
+            op = self._arr[:, 1]
+            bh = np.abs(cl - op)
+            self._mask_doji = bh < 1e-9
+            self._mask_bull = (cl >= op) & ~self._mask_doji
+            self._mask_bear = (cl < op) & ~self._mask_doji
         else:
             self._arr = np.empty((0, 5), dtype=np.float64)
+            self._all_wicks = []
+            self._mask_bull = np.empty(0, dtype=bool)
+            self._mask_bear = np.empty(0, dtype=bool)
+            self._mask_doji = np.empty(0, dtype=bool)
+        self._geom_rects = None
         self._update_width()
         self._gen()
         self.informViewBoundsChanged()
@@ -227,19 +255,25 @@ class CandlestickItem(pg.GraphicsObject):
         visible = self._arr[lo:hi]
         self._paint_stats["bars_drawn"] = visible.shape[0]
 
-        # Columns: 0=idx, 1=open, 2=close, 3=low, 4=high.
-        idx = visible[:, 0]
-        op = visible[:, 1]
-        cl = visible[:, 2]
-        low = visible[:, 3]
-        high = visible[:, 4]
+        # Get precomputed geometry slices
+        wicks_slice = self._all_wicks[lo:hi]
+        rects_slice = self._geom_rects[lo:hi]
+        doji_flats_slice = self._geom_doji_flats[lo:hi]
 
-        # Classify each bar — strictly disjoint masks so every bar
-        # lands in exactly one batch.
-        body_h = np.abs(cl - op)
-        is_doji = body_h < 1e-9
-        is_bull = (cl >= op) & ~is_doji
-        is_bear = (cl < op) & ~is_doji
+        is_bull = self._mask_bull[lo:hi]
+        is_bear = self._mask_bear[lo:hi]
+        is_doji = self._mask_doji[lo:hi]
+
+        from itertools import compress
+
+        bull_wicks = list(compress(wicks_slice, is_bull))
+        bull_rects = list(compress(rects_slice, is_bull))
+
+        bear_wicks = list(compress(wicks_slice, is_bear))
+        bear_rects = list(compress(rects_slice, is_bear))
+
+        doji_wicks = list(compress(wicks_slice, is_doji))
+        doji_flats = list(compress(doji_flats_slice, is_doji))
 
         w = float(self._last_w)
         bull = QColor(self.bull_color)
@@ -258,64 +292,37 @@ class CandlestickItem(pg.GraphicsObject):
         # --- Bull bars -------------------------------------------------
         self._paint_batch(
             p,
-            idx[is_bull],
-            op[is_bull],
-            cl[is_bull],
-            low[is_bull],
-            high[is_bull],
-            w,
+            bull_wicks,
+            bull_rects,
             bull_pen,
             bull_brush,
         )
         # --- Bear bars -------------------------------------------------
         self._paint_batch(
             p,
-            idx[is_bear],
-            op[is_bear],
-            cl[is_bear],
-            low[is_bear],
-            high[is_bear],
-            w,
+            bear_wicks,
+            bear_rects,
             bear_pen,
             bear_brush,
         )
         # --- Doji ------------------------------------------------------
-        # Doji bars have no body to fill — emit one drawLines for the
-        # wicks and one for the flat "body" line at the open price.
-        if bool(is_doji.any()):
-            d_idx = idx[is_doji]
-            d_op = op[is_doji]
-            d_low = low[is_doji]
-            d_high = high[is_doji]
-            wicks = [
-                QLineF(float(t), float(lo_v), float(t), float(hi_v))
-                for t, lo_v, hi_v in zip(d_idx, d_low, d_high)
-            ]
-            if wicks:
-                p.setPen(doji_pen)
-                p.setBrush(null_brush)
-                p.drawLines(wicks)
-                self._paint_stats["draw_lines_calls"] += 1
-            flats = [
-                QLineF(float(t) - w, float(o), float(t) + w, float(o))
-                for t, o in zip(d_idx, d_op)
-            ]
-            if flats:
-                p.setPen(doji_pen)
-                p.drawLines(flats)
-                self._paint_stats["draw_lines_calls"] += 1
+        if doji_wicks:
+            p.setPen(doji_pen)
+            p.setBrush(null_brush)
+            p.drawLines(doji_wicks)
+            self._paint_stats["draw_lines_calls"] += 1
+        if doji_flats:
+            p.setPen(doji_pen)
+            p.drawLines(doji_flats)
+            self._paint_stats["draw_lines_calls"] += 1
 
         p.end()
 
     def _paint_batch(
         self,
         p: QPainter,
-        idx_arr: np.ndarray,
-        op_arr: np.ndarray,
-        cl_arr: np.ndarray,
-        low_arr: np.ndarray,
-        high_arr: np.ndarray,
-        w: float,
+        wicks: list,
+        rects: list,
         pen,  # type: ignore[no-untyped-def]
         brush,  # type: ignore[no-untyped-def]
     ) -> None:
@@ -323,32 +330,17 @@ class CandlestickItem(pg.GraphicsObject):
         :py:meth:`QPainter.drawRects` call for the given side (bull or
         bear). No-op when the side has zero bars.
         """
-        n = idx_arr.size
-        if n == 0:
+        if not wicks and not rects:
             return
-
-        # Wicks — one QLineF per bar, single drawLines call. List
-        # comprehension is the fastest pure-Python construction here.
-        wicks = [
-            QLineF(float(t), float(lo_v), float(t), float(hi_v))
-            for t, lo_v, hi_v in zip(idx_arr, low_arr, high_arr)
-        ]
-        # Bodies — one QRectF per bar. ``min(o, c)`` puts the rect top
-        # at the lower of open/close so positive/negative bodies render
-        # the same way.
-        by = np.minimum(op_arr, cl_arr)
-        bh = np.abs(cl_arr - op_arr)
-        rects = [
-            QRectF(float(t) - w, float(y), w * 2.0, float(h))
-            for t, y, h in zip(idx_arr, by, bh)
-        ]
 
         p.setPen(pen)
         p.setBrush(brush)
-        p.drawLines(wicks)
-        self._paint_stats["draw_lines_calls"] += 1
-        p.drawRects(rects)
-        self._paint_stats["draw_rects_calls"] += 1
+        if wicks:
+            p.drawLines(wicks)
+            self._paint_stats["draw_lines_calls"] += 1
+        if rects:
+            p.drawRects(rects)
+            self._paint_stats["draw_rects_calls"] += 1
 
     # ------------------------------------------------------------------
     # Public hooks unchanged from pre-Phase-2 implementation

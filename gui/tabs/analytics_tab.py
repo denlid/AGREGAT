@@ -922,7 +922,7 @@ class AnalyticsTab(QWidget):
         prob_profit = mc["prob_profit"]
 
         kelly = 0.0
-        if avg_l > 0:
+        if avg_w > 0 and avg_l > 0:
             kelly = wr - ((1 - wr) / (avg_w / avg_l))
 
         mo = (wr * avg_w) - ((1 - wr) * avg_l)

@@ -46,15 +46,12 @@ logger = logging.getLogger("StrategyTester.data_loader")
 # is float32 (24-bit mantissa — well above the ~7 sig-fig accuracy
 # typical brokers quote at). Volume is int32 (range up to ~2.1 B is more
 # than enough for any 1m tick volume).
-OHLC_DTYPE = np.float32
+OHLC_DTYPE = np.float64  # Changed to float64 to avoid precision loss on Crypto / high-precision instruments
 VOLUME_DTYPE = np.int32
 SPREAD_DTYPE = np.float32
 
-# Phase 1.3 — how many distinct (file, mtime, size, date_range)
-# combinations to keep memoised in the in-process RAM pool. 4 covers the
-# common "compare two symbols + their resampled siblings" workflow
-# without exploding memory on a 30-year dataset.
-_LRU_CACHE_MAXSIZE = 4
+# Phase 1.3 — dynamically sized LRU cache
+_LRU_CACHE_MAXSIZE = int(os.getenv("AGREGAT_CSV_CACHE_SIZE", "16"))
 
 DateLike = Union[str, datetime, pd.Timestamp, np.datetime64, None]
 DateRange = Optional[Tuple[DateLike, DateLike]]
