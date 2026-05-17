@@ -274,10 +274,21 @@ def apply_theme(app: QApplication, name: str = "dark"):
     app.setFont(font)
 
     # Antialias for everything pyqtgraph paints (charts, axes, drawings).
+    # Phase 2.3 — ``AGREGAT_GL=1`` opts the user into pyqtgraph's OpenGL
+    # backend for the candlestick / line painter. The flag is off by
+    # default because the GL path is known to mis-render axis labels
+    # and antialias on a non-trivial fraction of GPU drivers; users
+    # who *do* see a render slowdown on very large datasets can flip
+    # the env var to trade some compatibility for hardware acceleration.
     try:
+        import os as _os
+
         import pyqtgraph as pg
 
-        pg.setConfigOptions(antialias=True, useOpenGL=False)
+        use_gl = _os.environ.get("AGREGAT_GL", "0") == "1"
+        pg.setConfigOptions(antialias=True, useOpenGL=use_gl)
+        if use_gl:
+            logger.info("Phase 2.3: pyqtgraph OpenGL backend enabled (AGREGAT_GL=1)")
     except Exception:
         # pyqtgraph is a hard dep of the app, but in test environments it
         # might be importable but minimal — never break theme apply on it.

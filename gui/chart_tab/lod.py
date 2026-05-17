@@ -152,4 +152,161 @@ def downsample_xy(
     return x_out, y_out
 
 
-__all__ = ["downsample_ohlc", "downsample_xy", "DEFAULT_MAX_BARS"]
+# ---------------------------------------------------------------------------
+# Phase 2.2 — time-aware resampler (LOD pyramid)
+# ---------------------------------------------------------------------------
+
+# Mapping of human-readable target timeframes to polars duration strings.
+# Mirrors ``TimeframeAggregator.TF_MINUTES`` plus daily / weekly which the
+# engine aggregator doesn't model but the chart's "show full history"
+# mode would want.
+_TF_TO_POLARS_DURATION = {
+    "1m": "1m",
+    "2m": "2m",
+    "3m": "3m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1d",
+    "1w": "1w",
+}
+
+
+def downsample_ohlc_polars(df, target_tf: str):  # type: ignore[no-untyped-def]
+    """Resample a 1m OHLC(V) ``polars.DataFrame`` to a higher timeframe.
+
+    Phase 2.2 (`optimization_roadmap.md`) — provides the time-aware LOD
+    pyramid the roadmap calls for. Where :func:`downsample_ohlc` collapses
+    by *count* (``N → max_bars``), this collapses by *time* (``M1 → H1 /
+    D1 / W1``) using polars' :py:meth:`group_by_dynamic`.
+
+    Returned aggregates follow standard OHLC semantics:
+
+    * ``open``  — first 1m open in the bucket
+    * ``high``  — max 1m high
+    * ``low``   — min 1m low
+    * ``close`` — last 1m close
+    * ``volume`` — sum (if present)
+    * ``spread`` — mean (if present, matches the engine aggregator)
+
+    Parameters
+    ----------
+    df
+        ``polars.DataFrame`` with a ``time`` column (``Datetime``) and
+        ``open``/``high``/``low``/``close`` columns. ``volume`` and
+        ``spread`` are aggregated if present.
+    target_tf
+        One of ``"1m"``, ``"2m"``, ``"3m"``, ``"5m"``, ``"15m"``,
+        ``"30m"``, ``"1h"``, ``"4h"``, ``"1d"``, ``"1w"``. Anything
+        else raises ``ValueError`` — the caller is expected to pick
+        a TF from the supported ladder.
+
+    Returns
+    -------
+    polars.DataFrame
+        Same column layout as the input, but each row is one
+        higher-TF bar. Empty input returns an empty frame with the
+        same schema.
+
+    Notes
+    -----
+    This helper is intentionally *not* wired into ``ChartTab`` yet —
+    the chart currently only feeds a 300-bar rolling window
+    (``RENDER_WINDOW`` in :mod:`gui.chart_tab.tab`) and so doesn't
+    benefit from time-aware LOD today. The function is here ready
+    for the planned "show full history" viewer mode where the user
+    zooms out across the entire dataset and the visible span dictates
+    the target TF.
+
+    The dependency on polars is local (import at call time) so unit
+    tests for the rest of :mod:`gui.chart_tab.lod` keep running even
+    on environments without polars installed.
+    """
+    if target_tf not in _TF_TO_POLARS_DURATION:
+        raise ValueError(
+            f"downsample_ohlc_polars: unsupported target_tf={target_tf!r}. "
+            f"Allowed: {sorted(_TF_TO_POLARS_DURATION)}"
+        )
+
+    import polars as pl  # local import — keeps polars optional for the rest of the module
+
+    if df.height == 0:
+        return df
+
+    if "time" not in df.columns:
+        raise ValueError("downsample_ohlc_polars: input frame must have a 'time' column")
+
+    duration = _TF_TO_POLARS_DURATION[target_tf]
+    aggs = [
+        pl.col("open").first().alias("open"),
+        pl.col("high").max().alias("high"),
+        pl.col("low").min().alias("low"),
+        pl.col("close").last().alias("close"),
+    ]
+    if "volume" in df.columns:
+        aggs.append(pl.col("volume").sum().alias("volume"))
+    if "spread" in df.columns:
+        # Mean spread per bucket — matches the engine TimeframeAggregator
+        # behaviour at ``engine/data/tf_aggregator.py:262``.
+        aggs.append(pl.col("spread").mean().alias("spread"))
+
+    # ``group_by_dynamic`` requires the index column to be sorted; the
+    # 1m loader guarantees this but be defensive — a hidden out-of-
+    # order timestamp would silently produce wrong aggregates.
+    sorted_df = df.sort("time") if not df["time"].is_sorted() else df
+
+    return sorted_df.group_by_dynamic(
+        index_column="time",
+        every=duration,
+        period=duration,
+        closed="left",
+        label="left",
+    ).agg(aggs)
+
+
+def choose_target_tf(visible_seconds: float, max_bars: int = DEFAULT_MAX_BARS) -> str:
+    """Pick a target timeframe for the LOD pyramid given a visible
+    time span and a maximum bar budget.
+
+    Walks the supported TF ladder from finest to coarsest and returns
+    the smallest TF whose bar count for ``visible_seconds`` fits under
+    ``max_bars``. The caller then feeds that string to
+    :func:`downsample_ohlc_polars`.
+
+    Examples
+    --------
+    >>> # 10 years × 365 d × 24 h × 3600 s ≈ 3.15e8 s.
+    >>> # 1m needs 5.25M bars > 2K → climb the ladder.
+    >>> choose_target_tf(10 * 365 * 24 * 3600)
+    '1w'
+    """
+    if visible_seconds <= 0:
+        return "1m"
+    ladder_seconds = [
+        ("1m", 60),
+        ("2m", 120),
+        ("3m", 180),
+        ("5m", 300),
+        ("15m", 900),
+        ("30m", 1800),
+        ("1h", 3600),
+        ("4h", 14400),
+        ("1d", 86400),
+        ("1w", 7 * 86400),
+    ]
+    budget = max(1, int(max_bars))
+    for tf, secs in ladder_seconds:
+        if visible_seconds / secs <= budget:
+            return tf
+    return "1w"
+
+
+__all__ = [
+    "downsample_ohlc",
+    "downsample_xy",
+    "downsample_ohlc_polars",
+    "choose_target_tf",
+    "DEFAULT_MAX_BARS",
+]
