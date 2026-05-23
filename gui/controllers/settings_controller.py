@@ -149,6 +149,9 @@ class SettingsController:
         ls = self.settings.get("last_strat")
         if not (ls and os.path.exists(ls)):
             return
+        # Load file into editor FIRST, regardless of compilation errors
+        if hasattr(h, "strategy_editor_tab"):
+            h.strategy_editor_tab.bind_strategy_file(ls)
         try:
             strat = StrategyLoader.load(ls)
             h.engine.load_strategy(strat)
@@ -157,8 +160,6 @@ class SettingsController:
                     h.settings_tab.rebuild_strategy_form(strat)
                 except Exception as e:
                     logger.debug(f"rebuild_strategy_form failed: {e!r}")
-            if hasattr(h, "strategy_editor_tab"):
-                h.strategy_editor_tab.bind_strategy_file(ls)
         except Exception as e:
             logger.warning(f"Strategy: {e}")
 

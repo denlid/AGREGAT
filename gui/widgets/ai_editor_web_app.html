@@ -1839,6 +1839,7 @@
                     chatHistory.innerHTML += messageHTML;
                     scrollChatToBottom();
                 }
+                window.appendSystemMessage = appendSystemMessage;
 
                 function setGeneratingState(generating) {
                     isGenerating = generating;
@@ -1943,6 +1944,13 @@
                         streamChunks: aiStreamChunkNum,
                         markdownLen: currentAiMarkdown.length
                     });
+                    // Immediately replace the placeholder to stop animation
+                    if (currentAiMessageDiv && !currentAiMarkdown) {
+                        currentAiMessageDiv.innerHTML =
+                            '<div style="font-size:11px;color:var(--text3);font-style:normal;padding:4px 0;">'
+                            + '&#10074;&#10074; Stopping…'
+                            + '</div>';
+                    }
                     safeBridgeCall('receive_stop_ai');
                 }
 
@@ -2048,17 +2056,49 @@
                         filledFromFinal: !!(finalText && !currentAiMarkdown)
                     });
 
-                    if (finalText && !currentAiMarkdown) {
+                    if (finalText && !currentAiMarkdown && finalText !== '__stopped__') {
                         currentAiMarkdown = String(finalText);
                     }
 
+                    var hadContent = !!currentAiMarkdown;
+
                     // Save the final AI response to the active tab before clearing
-                    if (currentAiMarkdown) {
+                    if (hadContent) {
                         addMessageToActiveTab('assistant', currentAiMarkdown);
                     }
 
                     cancelStreamMarkdownFlush();
-                    applyStreamMarkdownFlush();
+
+                    if (hadContent) {
+                        applyStreamMarkdownFlush();
+                    }
+
+                    // FIND and update the placeholder if no content arrived (error/stop before first chunk)
+                    if (!hadContent) {
+                        var placeholderEl = chatHistory.querySelector('.ai-generating-root');
+                        if (placeholderEl) {
+                            var msgEl = placeholderEl.closest('.ai-message');
+                            if (msgEl) {
+                                if (finalText === '__stopped__') {
+                                    msgEl.innerHTML = '<div style="font-size:11px;color:var(--text3);font-style:normal;padding:4px 0;">⏸ Stopped</div>';
+                                } else if (finalText && String(finalText).indexOf('__error__:') === 0) {
+                                    // Extract error text directly from the parameter
+                                    var errText = String(finalText).slice(9); // remove '__error__:' prefix
+                                    msgEl.innerHTML = '<div style="font-size:12px;color:var(--red);font-style:normal;padding:4px 0;">&#10060; ' + escapeHtml('Error: ' + errText) + '</div>';
+                                } else {
+                                    // Empty or falsy finalText (no content arrived from API) — show warning
+                                    msgEl.innerHTML = '<div style="font-size:12px;color:var(--text2);font-style:normal;padding:8px 0;text-align:center;">'
+                                        + '⚠️ AI повернуло порожню відповідь.<br>'
+                                        + '<span style="font-size:11px;color:var(--text3);">Спробуйте переформулювати запит або перевірте консоль (F12 → Console) для деталей.</span>'
+                                        + '</div>';
+                                    aiEditorDebug('finish_ai_message_empty_response', {
+                                        finalArgLen: finalText != null ? String(finalText).length : 0,
+                                        streamChunks: aiStreamChunkNum
+                                    });
+                                }
+                            }
+                        }
+                    }
 
                     currentAiMessageDiv = null;
                     currentAiMarkdown = '';
@@ -2078,7 +2118,7 @@
                     });
                     addMessageToActiveTab('system', 'Error: ' + msg, { isError: true });
                     appendSystemMessage('Error: ' + msg, true);
-                    window.finish_ai_message();
+                    window.finish_ai_message('__error__:' + (msg || ''));
                 };
 
                 window.set_editor_value = function (text) {

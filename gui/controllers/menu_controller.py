@@ -32,6 +32,9 @@ class MenuController:
         h = self._host
 
         fm = mb.addMenu("File")
+
+        fm.addAction("New Strategy...", h._session_ctrl.create_strategy, "Ctrl+N")
+        fm.addSeparator()
         fm.addAction("Load Data...", h._session_ctrl.load_data, "Ctrl+O")
         fm.addAction("Load Strategy...", h._session_ctrl.load_strategy, "Ctrl+L")
         # Phase 2.6 (C9) — submenu populated lazily via aboutToShow so
@@ -115,6 +118,7 @@ class MenuController:
         h = self._host
         actions = [
             ("File: Load CSV data", h._session_ctrl.load_data),
+            ("File: New strategy", h._session_ctrl.create_strategy),
             ("File: Load strategy", h._session_ctrl.load_strategy),
             ("File: Save .agbk session", h._session_ctrl.save_session),
             ("File: Load .agbk session", h._session_ctrl.load_session),

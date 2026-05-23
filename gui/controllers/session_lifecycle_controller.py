@@ -82,6 +82,58 @@ class SessionLifecycleController:
     # ------------------------------------------------------------------
     # Strategy loader
     # ------------------------------------------------------------------
+    def create_strategy(self) -> None:
+        from engine.strategy.context import StrategyLoader
+
+        h = self._host
+        default_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "strategies")
+        default_path = os.path.join(default_dir, "new_strategy.py")
+
+        fp, _ = QFileDialog.getSaveFileName(h, "New Strategy", default_path, "Python (*.py)")
+        if not fp:
+            return
+
+        template = """from engine.api import Strategy
+import numpy as np
+
+strategy = Strategy(
+    name="New Strategy",
+    risk=1.0
+)
+
+@strategy.on_candle()
+def _(c):
+    pass
+"""
+        try:
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(template)
+        except Exception as e:
+            logger.error(f"❌ Failed to create strategy file: {e!r}", exc_info=True)
+            h.show_error(f"Failed to create file: {e}")
+            return
+
+        # Load file into editor FIRST
+        if hasattr(h, "strategy_editor_tab"):
+            h.strategy_editor_tab.bind_strategy_file(fp)
+            if hasattr(h, "tabs"):
+                h.tabs.setCurrentWidget(h.strategy_editor_tab)
+
+        try:
+            logger.info(f"📜 Loading new strategy from: {fp}")
+            strategy = StrategyLoader.load(fp)
+            h.engine.load_strategy(strategy)
+            logger.info(f"✅ Strategy loaded: {strategy.__class__.__name__}")
+            h._settings_ctrl.save("last_strat", fp)
+            if hasattr(h, "settings_tab") and hasattr(h.settings_tab, "rebuild_strategy_form"):
+                try:
+                    h.settings_tab.rebuild_strategy_form(strategy)
+                except Exception as e:
+                    logger.debug(f"rebuild_strategy_form failed: {e!r}")
+        except Exception as e:
+            logger.error(f"❌ Strategy load failed: {e!r}", exc_info=True)
+            h.show_error(str(e))
+
     def load_strategy(self) -> None:
         from engine.strategy.context import StrategyLoader
 
@@ -89,6 +141,9 @@ class SessionLifecycleController:
         fp, _ = QFileDialog.getOpenFileName(h, "Load Strategy", "", "Python (*.py)")
         if not fp:
             return
+        # Load file into editor FIRST, regardless of compilation errors
+        if hasattr(h, "strategy_editor_tab"):
+            h.strategy_editor_tab.bind_strategy_file(fp)
         try:
             logger.info(f"📜 Loading strategy from: {fp}")
             strategy = StrategyLoader.load(fp)
@@ -100,8 +155,6 @@ class SessionLifecycleController:
                     h.settings_tab.rebuild_strategy_form(strategy)
                 except Exception as e:
                     logger.debug(f"rebuild_strategy_form failed: {e!r}")
-            if hasattr(h, "strategy_editor_tab"):
-                h.strategy_editor_tab.bind_strategy_file(fp)
         except Exception as e:
             logger.error(f"❌ Strategy load failed: {e!r}", exc_info=True)
             h.show_error(str(e))

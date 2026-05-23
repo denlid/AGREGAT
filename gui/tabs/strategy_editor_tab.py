@@ -27,16 +27,21 @@ def _validate_code_syntax(code: str) -> tuple[bool, str]:
 def _validate_strategy_structure(code: str) -> list[str]:
     """Return warnings about potential structural issues in strategy code."""
     warnings = []
-    if "class " not in code:
-        warnings.append("No class definition found in code")
-    if "on_candle" not in code and "vectorized_signals" not in code:
+    has_on_candle = "on_candle" in code
+    has_vectorized = "vectorized_signals" in code
+    has_api_strategy = "Strategy(" in code and ".on_candle" in code
+    has_class = "class " in code
+
+    if not has_class and not has_api_strategy:
+        warnings.append("No class definition or api.Strategy object found")
+    if not has_on_candle and not has_vectorized and not has_api_strategy:
         warnings.append("No execution method (on_candle/vectorized_signals) found")
     if "import " not in code:
         warnings.append("No imports found — code may be incomplete")
     if "self.params" in code and "PARAMS" not in code:
         warnings.append("Code uses self.params but has no PARAMS definition")
-    if "Strategy" not in code:
-        warnings.append("Code does not inherit from Strategy class")
+    if "Strategy" not in code and not has_api_strategy:
+        warnings.append("Code does not inherit/use Strategy class")
     return warnings
 
 
@@ -105,6 +110,8 @@ class StrategyEditorTab(QWidget):
         return "New strategy"
 
     def _refresh_header_title(self) -> None:
+        if not self._editor_web_ready:
+            return
         base = self._header_base_label()
         self.editor.set_strategy_header_title(f"{base} *" if self._editor_dirty else base)
 
@@ -184,6 +191,18 @@ class StrategyEditorTab(QWidget):
         spec.loader.exec_module(module)
         from engine.strategy.context import Strategy
 
+        # Try 1: engine.api.Strategy objects (new simplified API)
+        try:
+            from engine.api import Strategy as ApiStrategy
+            for attr_name in dir(module):
+                attr = getattr(module, attr_name)
+                if isinstance(attr, ApiStrategy):
+                    strategy_cls = attr._build_class()
+                    return strategy_cls()
+        except ImportError:
+            pass
+
+        # Try 2: legacy class-based Strategy subclasses
         strategy_cls = None
         for attr_name in dir(module):
             attr = getattr(module, attr_name)
@@ -384,23 +403,15 @@ class StrategyEditorTab(QWidget):
             self.handle_backtest_error(tb)
 
     def handle_backtest_error(self, traceback_str):
+        """Show error in the editor. Does NOT auto-trigger AI."""
         self.latest_error = traceback_str
-        self.editor.ask_ai_to_fix(traceback_str)
-        
-        # We need the code context. Since we are in python, we don't have it directly.
-        # But we saved it to TEMP_STRAT_PATH
-        code_context = ""
-        if os.path.exists(TEMP_STRAT_PATH):
-            with open(TEMP_STRAT_PATH, "r", encoding="utf-8") as f:
-                code_context = f.read()
-
-        self._start_ai_worker(
-            "Fix this error.", code_context, self.latest_error, extra_context={}
-        )
+        self.editor.show_system_message(f"⚠️ Backtest error:\n{traceback_str}", is_error=True)
 
     def on_stop_ai(self):
         if self.ai_worker:
             self.ai_worker.stop()
+        # Signal the JS that generation was stopped by user (not an error)
+        self.editor.finish_generation("__stopped__")
 
     def on_save_strategy(self, code):
         bound = self._strategy_file_path

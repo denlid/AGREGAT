@@ -500,6 +500,18 @@ class SettingsTab(QWidget):
         )
         f7.addRow("API Key:", self.ai_api_key_le)
 
+        self.ai_max_tokens_spin = QSpinBox()
+        self.ai_max_tokens_spin.setRange(512, 128000)
+        self.ai_max_tokens_spin.setValue(16384)
+        self.ai_max_tokens_spin.setSingleStep(1024)
+        self.ai_max_tokens_spin.setSuffix(" tokens")
+        self.ai_max_tokens_spin.setToolTip(
+            "Maximum tokens the model can generate in one response. "
+            "Increase if your prompt is very long (strategy code + regulations + chat history). "
+            "Default: 16384. Max depends on model (gpt-4o = 128k context)."
+        )
+        f7.addRow("Max Tokens:", self.ai_max_tokens_spin)
+
         grp7.setLayout(f7)
         layout.addWidget(grp7)
         self._repopulate_ai_model_combo(select_model="gpt-4o")
@@ -629,6 +641,7 @@ class SettingsTab(QWidget):
             "model": self.ai_model_cb.currentText().strip(),
             "openai_base_url": base_url,
             "openai_extra_body": extra_body,
+            "max_tokens": self.ai_max_tokens_spin.value(),
         }
 
     # ---- Persistence (Phase 2) ----
@@ -652,6 +665,7 @@ class SettingsTab(QWidget):
             "ai_api_key": self.ai_api_key_le.text(),
             "ai_custom_base_url": self.ai_custom_base_url_le.text(),
             "ai_custom_extra_body": self.ai_custom_extra_body_le.text(),
+            "ai_max_tokens": self.ai_max_tokens_spin.value(),
             "fast_mode": self.fast_mode_cb.isChecked(),
             "auto_save_logs": self.auto_save_logs_cb.isChecked(),
             "max_log_lines": self.max_log_lines_spin.value(),
@@ -696,6 +710,7 @@ class SettingsTab(QWidget):
             self.ai_custom_base_url_le,
             self.ai_custom_extra_body_le,
             self.ai_api_key_le,
+            self.ai_max_tokens_spin,
             self.fast_mode_cb,
             self.auto_save_logs_cb, self.max_log_lines_spin, self.show_grid_cb,
             self.crosshair_cb, self.autofit_y_cb, self.exec_profile_cb,
@@ -724,6 +739,10 @@ class SettingsTab(QWidget):
             self.ai_custom_extra_body_le.setText(settings.get("ai_custom_extra_body", ""))
             self._update_ai_custom_visibility()
             self.ai_api_key_le.setText(settings.get("ai_api_key", ""))
+            try:
+                self.ai_max_tokens_spin.setValue(int(settings.get("ai_max_tokens", 16384)))
+            except Exception:
+                self.ai_max_tokens_spin.setValue(16384)
             self.fast_mode_cb.setChecked(bool(settings.get("fast_mode", False)))
             self.auto_save_logs_cb.setChecked(bool(settings.get("auto_save_logs", True)))
             self.max_log_lines_spin.setValue(int(settings.get("max_log_lines", 5000)))

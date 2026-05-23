@@ -31,3 +31,23 @@ class MyStrategy(Strategy):
 - MUST include at least basic SL/TP logic
 - MUST include ctx.log() calls for key decision points
 - Keep it simple — only implement what was asked
+
+## Response format:
+When writing a new strategy, structure your response as:
+
+1. **Brief intro** (1-2 sentences): What strategy you're creating and its core logic
+2. **Code block**: Complete strategy implementation
+3. **Summary** (2-3 sentences): 
+   - Key parameters and their purpose
+   - Entry/exit logic overview
+   - Risk management approach
+
+Example response structure:
+```
+I'm creating a Donchian Breakout strategy that enters long when price breaks above the N-period high.
+
+```python
+[complete code here]
+```
+
+The strategy uses `period` parameter to control the lookback window. It enters long on breakouts above the high and exits when price crosses below the low. Stop-loss is set at 2% and take-profit at 4% for basic risk management.

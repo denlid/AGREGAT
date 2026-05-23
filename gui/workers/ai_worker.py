@@ -50,7 +50,7 @@ class AIAssistantWorker(QThread):
         extra_context: Optional[Dict[str, Any]] = None,
         openai_base_url: str = "",
         openai_extra_body: Optional[Dict[str, Any]] = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
     ) -> None:
         super().__init__()
         self._chunk_count = 0
@@ -74,6 +74,8 @@ class AIAssistantWorker(QThread):
         self._gemini_client_ref: Any = None
         self._start_time: float = 0.0
         self._phase_msg: str = ""
+        # Track last finish_reason from API for better error messages
+        self._last_finish_reason: str | None = None
 
     def stop(self) -> None:
         self.is_running = False
@@ -139,6 +141,56 @@ class AIAssistantWorker(QThread):
         self.chunk_received.emit(text)
 
     def _finish_generation(self, *, reason: str = "complete") -> None:
+        if self._chunk_count == 0 and self.is_running and not self.full_response:
+            api_reason = self._last_finish_reason or "unknown"
+            logger.warning("AI generation finished with 0 chunks and empty full_response (api_reason=%s, internal_reason=%s)", api_reason, reason)
+            
+            if api_reason == "content_filter":
+                self.error_occurred.emit(
+                    "⚠️ OpenAI Safety Filter заблокував відповідь.\n\n"
+                    "Модель вважає, що ваш запит порушує політику безпеки.\n\n"
+                    "Що робити:\n"
+                    "• Замість «видали» напишіть «заміни» або «перепиши»\n"
+                    "• Уникайте формулювань, які можуть бути сприйняті як деструктивні\n"
+                    "• Розбийте складний запит на кілька простих\n\n"
+                    "Приклад: «Напиши нову стратегію за регламентом нижче»"
+                )
+            elif api_reason == "stop":
+                self.error_occurred.emit(
+                    "⚠️ AI повернуло порожню відповідь (finish_reason=stop).\n\n"
+                    "Модель отримала запит, але вирішила нічого не відповідати.\n\n"
+                    "Це часто трапляється коли:\n"
+                    "• Модель не розуміє, що саме потрібно зробити\n"
+                    "• Запит містить суперечливі інструкції\n"
+                    "• Системний prompt конфліктує з запитом\n\n"
+                    "Спробуйте переформулювати — замість «видали» напишіть «заміни»"
+                )
+            elif api_reason == "length":
+                self.error_occurred.emit(
+                    "⚠️ AI не змогло згенерувати відповідь — досягнуто ліміту токенів (finish_reason=length).\n\n"
+                    f"Поточний ліміт: {self.max_tokens} токенів.\n\n"
+                    "Можливі причини:\n"
+                    "• Ваш промпт (системний + код + регламент + історія) надто великий\n"
+                    "• Модель не встигає завершити генерацію в межах ліміту\n\n"
+                    "Спробуйте:\n"
+                    "1. Скоротити промпт — прибрати зайвий контекст, історію\n"
+                    "2. Використати модель з більшим контекстом\n"
+                    "3. Розбити завдання на частини"
+                )
+            else:
+                self.error_occurred.emit(
+                    f"🤖 AI повернуло порожню відповідь.\n"
+                    f"API finish_reason: {api_reason}\n\n"
+                    f"Можливі причини:\n"
+                    f"• Спрацював safety filter моделі\n"
+                    f"• Некоректний prompt або контекст\n"
+                    f"• Проблеми з моделлю або провайдером\n\n"
+                    f"Спробуйте:\n"
+                    f"1. Замість «видали» напишіть «заміни»\n"
+                    f"2. Зменшити розмір запиту\n"
+                    f"3. Перевірити консоль (F12) для деталей"
+                )
+            return
         self.finished_generation.emit(self.full_response)
 
     def _on_first_stream_token(self) -> None:
@@ -403,13 +455,23 @@ class AIAssistantWorker(QThread):
                     if not self.is_running:
                         break
                     if not getattr(chunk, "choices", None):
+                        logger.debug("OpenAI: chunk without choices attr, skipping")
                         continue
                     if not chunk.choices:
+                        # Shouldn't happen in normal API, but log it
+                        logger.debug("OpenAI: chunk with empty choices list (id=%s)", getattr(chunk, 'id', '?'))
                         continue
+                    # Always save finish_reason when present (even "stop", "length", "content_filter")
+                    finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
+                    if finish_reason is not None:
+                        self._last_finish_reason = finish_reason
+                        logger.info("OpenAI: chunk finish_reason=%s (chunk_count=%d)", finish_reason, self._chunk_count)
                     content = chunk.choices[0].delta.content
                     if content:
                         self._on_first_stream_token()
                         self._emit_chunk(content)
+                    else:
+                        logger.debug("OpenAI: chunk with no delta.content (finish_reason=%s)", finish_reason)
             finally:
                 self._openai_stream = None
         finally:
@@ -458,14 +520,23 @@ class AIAssistantWorker(QThread):
                     if not self.is_running:
                         break
                     if not getattr(chunk, "choices", None):
+                        logger.debug("Custom: chunk without choices attr, skipping")
                         continue
                     if not chunk.choices:
+                        logger.debug("Custom: chunk with empty choices list (id=%s)", getattr(chunk, 'id', '?'))
                         continue
+                    # Track finish_reason (same as standard OpenAI)
+                    finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
+                    if finish_reason is not None:
+                        self._last_finish_reason = finish_reason
+                        logger.info("Custom: chunk finish_reason=%s (chunk_count=%d)", finish_reason, self._chunk_count)
                     delta = chunk.choices[0].delta
                     content = getattr(delta, "content", None) if delta is not None else None
                     if content:
                         self._on_first_stream_token()
                         self._emit_chunk(content)
+                    else:
+                        logger.debug("Custom: chunk with no delta.content (finish_reason=%s)", finish_reason)
             finally:
                 self._openai_stream = None
         finally:
@@ -651,8 +722,10 @@ class AIAssistantWorker(QThread):
                         self._phase(f"Gemini retry {attempt + 1}/3…")
                     else:
                         self._phase("Waiting for API…")
-                    self.full_response = ""
-                    self._chunk_count = 0
+                    # Only reset on first attempt; keep partial data on retry
+                    if attempt == 0:
+                        self.full_response = ""
+                        self._chunk_count = 0
                     stream = client.models.generate_content_stream(
                         model=model,
                         contents=user_content,
@@ -665,6 +738,9 @@ class AIAssistantWorker(QThread):
                         if text:
                             self._on_first_stream_token()
                             self._emit_chunk(text)
+                        else:
+                            finish_reason = getattr(chunk, 'finish_reason', None) or getattr(chunk, 'candidates', None)
+                            logger.debug("Gemini: chunk with empty text (finish_reason=%s)", finish_reason)
                     self._finish_generation(reason=f"gemini_attempt_{attempt + 1}_ok")
                     return
                 except Exception as e:

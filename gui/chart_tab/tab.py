@@ -1642,7 +1642,7 @@ class ChartTab(QWidget):
                     self.plot_widget.addItem(it)
                     self.strategy_graphic_items.append(it)
                 elif d["type"] == "text":
-                    it = pg.TextItem(d["text"], color=color, anchor=(0, 1))
+                    it = pg.TextItem(d["text"], color=color, anchor=(0.5, 0))
                     it.setPos(i1, p1)
                     self.plot_widget.addItem(it)
                     self.strategy_graphic_items.append(it)

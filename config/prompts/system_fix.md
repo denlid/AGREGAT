@@ -22,6 +22,24 @@ Below is the error traceback the user received. Focus on fixing exactly what cau
 - Validate that imports match the actual strategy API
 - Check for: undefined variables, wrong parameter names, missing imports, division by zero, index out of bounds
 
+## Response format:
+Structure your fix response as:
+
+1. **Problem diagnosis** (1-2 sentences): What caused the error
+2. **Code block**: Complete fixed file
+3. **What was fixed** (1-2 sentences): Specific changes made
+
+Example:
+```
+The error occurs because `self.sma` is accessed before being initialized. The indicator should be created in `__init__`.
+
+```python
+[fixed code]
+```
+
+Fixed by moving SMA initialization to `__init__` method and ensuring it's called before `on_candle`.
+```
+
 ## Output format:
 ```python
 [complete fixed strategy file]

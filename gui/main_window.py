@@ -366,11 +366,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
     def show_error(self, m: str) -> None:
-        # Auto-fix loop interception
-        if hasattr(self, "strategy_editor_tab") and self.tabs.currentWidget() == self.strategy_editor_tab:
-            self.strategy_editor_tab.handle_backtest_error(m)
-            return
-
+        """Display an error message. Shows toast on chart."""
         # Show non-blocking toast notification on chart instead of modal dialog
         try:
             from PySide6.QtCore import QTimer

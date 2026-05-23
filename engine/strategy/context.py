@@ -195,9 +195,19 @@ class StrategyLoader:
             logger.error(f"❌ Strategy execution failed: {e!r}")
             raise
 
-        # Pick the first non-base class that exposes either API. We accept
-        # vectorised-only strategies (no on_candle) so the optimisation
-        # workflow doesn't force authors to maintain the visual path.
+        # Try 1: engine.api.Strategy objects (new simplified API)
+        try:
+            from engine.api import Strategy as ApiStrategy
+            for item_name in dir(module):
+                item = getattr(module, item_name)
+                if isinstance(item, ApiStrategy):
+                    strategy_class = item._build_class()
+                    instance: Strategy = strategy_class()
+                    return instance
+        except ImportError:
+            pass  # engine.api not available, fall through
+
+        # Try 2: legacy class-based Strategy subclasses
         strategy_class = None
         for item_name in dir(module):
             item = getattr(module, item_name)
@@ -212,7 +222,8 @@ class StrategyLoader:
         if not strategy_class:
             raise ValueError(
                 f"No valid strategy class found in {filepath}; expected at least "
-                "one of: on_candle(ctx) or vectorized_signals(df)."
+                "one of: on_candle(ctx) or vectorized_signals(df), "
+                "or an engine.api.Strategy instance."
             )
 
         instance: Strategy = strategy_class()
