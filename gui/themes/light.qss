@@ -1,0 +1,15 @@
+/* AGREGAT — Light theme overlay (Sprint 2.8 skeleton).
+ *
+ * The base palette lives in ``gui/theme.py`` (THEMES["light"]); this
+ * file is the place future GUI work parks "structural" QSS — fonts,
+ * radii, spacing — that the Python-built stylesheet doesn't already
+ * cover. Loaded at runtime by ``ThemeService.qss("light")``.
+ */
+
+QToolTip {
+    border: 1px solid #DDE0E8;
+    background: #F8F9FB;
+    color: #1A1A2E;
+    padding: 4px 6px;
+    border-radius: 4px;
+}

@@ -1,0 +1,17 @@
+# Dev / test dependencies. Install with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Kept separate from ``requirements.txt`` so production / GUI installs
+# don't pull in test-only libraries (memray for example only builds on
+# Linux/macOS).
+
+pytest>=7.4.0
+pytest-qt>=4.4.0
+ruff>=0.5.0
+
+# Phase 5.2 — property-based tests for DSL round-trip and SL/TP invariants.
+hypothesis>=6.100.0
+
+# Phase 5.3 — memory regression tests (skipped automatically when
+# pytest-memray is not installed; required for CI memory budgets).
+pytest-memray>=1.7.0
