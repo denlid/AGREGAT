@@ -21,7 +21,11 @@ Memory is bounded by chunking — see ``MAX_CELLS_PER_CHUNK``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+<<<<<<< HEAD
 from typing import Any, Literal, Optional
+=======
+from typing import Any, Callable, Literal, Optional
+>>>>>>> origin/main
 
 import numpy as np
 
@@ -181,6 +185,10 @@ def bootstrap_pnl(
     seed: Optional[int] = None,
     block_size: int = 1,
     method: BootstrapMethod = "iid",
+<<<<<<< HEAD
+=======
+    cancel_token: Optional[Callable[[], bool]] = None,
+>>>>>>> origin/main
 ) -> MCResult:
     """Resample ``pnls`` with replacement and reconstruct equity paths.
 
@@ -253,6 +261,11 @@ def bootstrap_pnl(
 
     done = 0
     while done < n_iter:
+<<<<<<< HEAD
+=======
+        if cancel_token is not None and cancel_token():
+            raise RuntimeError("cancelled")
+>>>>>>> origin/main
         size = min(chunk, int(n_iter) - done)
         if block_size <= 1:
             idx = rng.integers(0, n, size=(size, n))

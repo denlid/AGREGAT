@@ -1,50 +1,72 @@
 """
 Log Console — Thread-safe GUI log handler with auto-save functionality.
 
+<<<<<<< HEAD
 Phase 3 changes:
+=======
+Phase 1 changes:
+>>>>>>> origin/main
   • The auto-save file is held open for the lifetime of the LogConsole
     instead of opened/closed on every `append_log` call (was 100s of syscalls/sec
     during step_n bulk runs).
   • The buffered handle is flushed eagerly so logs survive crashes.
   • Max-lines is configurable from Settings via `set_max_lines()`.
+<<<<<<< HEAD
   • All log levels (DEBUG, INFO, WARNING, ERROR) are collected into an
     in-memory ring buffer. A level threshold (set via Settings → Log Level)
     controls which entries are rendered in the UI.
   • Search highlights matches in-place (VS Code style), with up/down
     navigation and a match counter — non-matching lines remain visible.
+=======
+>>>>>>> origin/main
 """
 
 from __future__ import annotations
 
 import logging
 import os
+<<<<<<< HEAD
 from collections import deque
+=======
+>>>>>>> origin/main
 from datetime import datetime
 from typing import IO, Optional
 
 from PySide6.QtCore import QObject, Signal
+<<<<<<< HEAD
 from PySide6.QtGui import QColor, QTextCursor
+=======
+>>>>>>> origin/main
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
     QLabel,
+<<<<<<< HEAD
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
     QTextEdit,
+=======
+    QPlainTextEdit,
+    QPushButton,
+>>>>>>> origin/main
     QVBoxLayout,
     QWidget,
 )
 
 logger = logging.getLogger("StrategyTester.gui.log_console")
 
+<<<<<<< HEAD
 # Numeric ordering — higher = more severe.
 _LOG_ORDER = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3}
 
+=======
+>>>>>>> origin/main
 
 class _LogBridge(QObject):
     """Bridge object that emits a Qt signal from any thread — safe for cross-thread logging."""
 
+<<<<<<< HEAD
     log_message = Signal(str, str)  # level_name, formatted_message
 
 
@@ -53,6 +75,13 @@ class GUILogHandler(logging.Handler):
 
     Collects ALL levels — the UI decides what to display.
     """
+=======
+    log_message = Signal(str)
+
+
+class GUILogHandler(logging.Handler):
+    """Routes log messages to a GUI callback via a Qt signal (thread-safe)."""
+>>>>>>> origin/main
 
     def __init__(self, bridge: _LogBridge):
         super().__init__()
@@ -61,11 +90,15 @@ class GUILogHandler(logging.Handler):
 
     def emit(self, record):
         msg = self.format(record)
+<<<<<<< HEAD
         self.bridge.log_message.emit(record.levelname, msg)
 
 
 _SEARCH_HIGHLIGHT_COLOR = "#448AFFE0"  # vibrant blue (tone: 400, alpha: 88%) — stands out sharply
 _SEARCH_CURRENT_COLOR = "#FF6D00EE"    # deep orange (tone: 900, alpha: 93%) — unmistakable current match
+=======
+        self.bridge.log_message.emit(msg)
+>>>>>>> origin/main
 
 
 class LogConsole(QWidget):
@@ -74,6 +107,7 @@ class LogConsole(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
 
+<<<<<<< HEAD
         # ── In-memory ring buffer (all entries, never filtered) ──
         self._max_entries = 5000
         self._entries: deque[tuple[str, str]] = deque(maxlen=self._max_entries)  # (level, message)
@@ -88,6 +122,9 @@ class LogConsole(QWidget):
         self._all_highlight_selections: list[QTextEdit.ExtraSelection] = []
 
         # ── Header with controls ──
+=======
+        # Header with controls
+>>>>>>> origin/main
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 4)
 
@@ -99,16 +136,25 @@ class LogConsole(QWidget):
         header.addWidget(self.auto_save_cb)
 
         btn_clear = QPushButton("Clear")
+<<<<<<< HEAD
         btn_clear.setFixedWidth(60)
+=======
+        btn_clear.setFixedWidth(70)
+>>>>>>> origin/main
         btn_clear.clicked.connect(self.clear_log)
         header.addWidget(btn_clear)
 
         btn_export = QPushButton("Export...")
+<<<<<<< HEAD
         btn_export.setFixedWidth(70)
+=======
+        btn_export.setFixedWidth(80)
+>>>>>>> origin/main
         btn_export.clicked.connect(self.export_log)
         header.addWidget(btn_export)
 
         header.addStretch()
+<<<<<<< HEAD
 
         # ── Search area (right side) — entry + ▲/▼ buttons ──
         self._search_input = QLineEdit()
@@ -157,6 +203,13 @@ class LogConsole(QWidget):
         self.text_edit.setReadOnly(True)
         # We manage filtering ourselves — disable built-in max block filter
         self.text_edit.setMaximumBlockCount(0)
+=======
+        layout.addLayout(header)
+
+        self.text_edit = QPlainTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setMaximumBlockCount(5000)  # Prevent unbounded memory growth
+>>>>>>> origin/main
         from gui.styling import style_helpers as sh
         from gui.styling.theme import font_mono, get_theme, register_theme_listener
 
@@ -168,6 +221,7 @@ class LogConsole(QWidget):
 
         layout.addWidget(self.text_edit)
 
+<<<<<<< HEAD
         # ── Thread-safe bridge ──
         self._bridge = _LogBridge()
         self._bridge.log_message.connect(self.append_log)
@@ -183,6 +237,20 @@ class LogConsole(QWidget):
         root_logger.addHandler(handler)
 
         # ── Auto-save setup — keep file handle open for the lifetime of the console ──
+=======
+        # Thread-safe bridge
+        self._bridge = _LogBridge()
+        self._bridge.log_message.connect(self.append_log)
+        handler = GUILogHandler(self._bridge)
+        handler.setLevel(logging.DEBUG)
+        # Attach to the *root* StrategyTester logger so all child loggers
+        # (engine.*, gui.*, strategies.*) propagate up and surface in the console.
+        root_logger = logging.getLogger("StrategyTester")
+        root_logger.handlers = [h for h in root_logger.handlers if not isinstance(h, GUILogHandler)]
+        root_logger.addHandler(handler)
+
+        # Auto-save setup — keep file handle open for the lifetime of the console
+>>>>>>> origin/main
         self.log_dir = "logs"
         os.makedirs(self.log_dir, exist_ok=True)
         self.current_log_file = os.path.join(
@@ -193,6 +261,7 @@ class LogConsole(QWidget):
         self._open_log_file()
 
         logger.info(f"📝 Auto-save enabled: {self.current_log_file}")
+<<<<<<< HEAD
         logger.info(f"📝 Log level threshold: INFO (1) — set via Settings → Log Level")
 
     # ------------------------------------------------------------------
@@ -209,6 +278,8 @@ class LogConsole(QWidget):
         if self._level_threshold != old:
             self._reapply_filters()
             self._clear_search_state()
+=======
+>>>>>>> origin/main
 
     # ------------------------------------------------------------------
     # File handle management
@@ -228,6 +299,7 @@ class LogConsole(QWidget):
             print(f"[LogConsole] Cannot open log file {self.current_log_file}: {e}")
 
     def set_max_lines(self, n: int) -> None:
+<<<<<<< HEAD
         """Update the max line limit on the ring buffer."""
         self._max_entries = max(100, int(n))
         # Resize the deque
@@ -236,6 +308,10 @@ class LogConsole(QWidget):
         self._entries.extend(old)
         self._reapply_filters()
         self._clear_search_state()
+=======
+        """Update the max line limit on the log display."""
+        self.text_edit.setMaximumBlockCount(max(100, int(n)))
+>>>>>>> origin/main
 
     def closeEvent(self, e):  # noqa: D401 — Qt naming
         if self._log_fh is not None:
@@ -263,6 +339,7 @@ class LogConsole(QWidget):
             "  border-radius: 4px;}"
         )
 
+<<<<<<< HEAD
     def append_log(self, level: str, msg: str) -> None:
         """Append log message to ring buffer and optionally to the persistent file."""
         self._entries.append((level, msg))
@@ -282,10 +359,15 @@ class LogConsole(QWidget):
 
     def _render_entry(self, msg: str) -> None:
         """Append a single entry to the text edit (no filtering by search)."""
+=======
+    def append_log(self, msg: str) -> None:
+        """Append log message to display and optionally to the persistent file."""
+>>>>>>> origin/main
         self.text_edit.appendPlainText(msg)
         scrollbar = self.text_edit.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+<<<<<<< HEAD
     # ------------------------------------------------------------------
     # Search — highlight + navigation (VS Code style)
     # ------------------------------------------------------------------
@@ -426,6 +508,21 @@ class LogConsole(QWidget):
         self.text_edit.clear()
         self._clear_search_state()
         self._all_highlight_selections = []
+=======
+        if self.auto_save_cb.isChecked() and self._log_fh is not None:
+            try:
+                self._log_fh.write(msg + "\n")
+                # Don't flush every line — let buffered IO win.
+                # The file is flushed on closeEvent and on critical errors.
+            except (OSError, ValueError):
+                # File closed under us; reopen on next call
+                self._log_fh = None
+                self._open_log_file()
+
+    def clear_log(self) -> None:
+        """Clear the log display."""
+        self.text_edit.clear()
+>>>>>>> origin/main
         logger.info("🗑️ Log display cleared")
 
     def export_log(self) -> None:
@@ -444,4 +541,8 @@ class LogConsole(QWidget):
                     f.write(self.text_edit.toPlainText())
                 logger.info(f"✅ Log exported to: {fp}")
             except OSError as e:
+<<<<<<< HEAD
                 logger.error(f"❌ Failed to export log: {e!r}")
+=======
+                logger.error(f"❌ Failed to export log: {e!r}")
+>>>>>>> origin/main

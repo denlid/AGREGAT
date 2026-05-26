@@ -87,7 +87,10 @@ class StrategyEditorTab(QWidget):
         self.editor.bridge.attachment_requested.connect(self.on_attachment_requested)
         self.editor.bridge.ready.connect(self._on_editor_web_ready)
         self.editor.bridge.editor_model_changed.connect(self._on_editor_model_changed)
+<<<<<<< HEAD
         self.editor.bridge.rename_strategy_requested.connect(self.on_rename_strategy)
+=======
+>>>>>>> origin/main
 
     def _on_editor_model_changed(self) -> None:
         self._editor_dirty = True
@@ -469,6 +472,7 @@ class StrategyEditorTab(QWidget):
         if not path:
             return
         payload = {"kind": kind, "name": os.path.basename(path), "path": path}
+<<<<<<< HEAD
         self.editor.set_attachment(payload)
 
     def on_rename_strategy(self, new_name: str):
@@ -521,3 +525,6 @@ class StrategyEditorTab(QWidget):
             self.editor.show_system_message(f"Renamed to {new_name}")
         except OSError as e:
             self.editor.show_rename_error(f"Rename failed: {e}")
+=======
+        self.editor.set_attachment(payload)
+>>>>>>> origin/main

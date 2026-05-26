@@ -133,19 +133,26 @@ class AdvancedMonteCarloDialog(QDialog):
 
         # Histogram + summary
         self.hist = pg.PlotWidget()
+<<<<<<< HEAD
         self.hist.setBackground(QColor("#0D0D0F"))
         self.hist.showGrid(x=True, y=True, alpha=0.12)
         self.hist.setLabel("left", "Frequency", color="#5A5A6E")
         self.hist.setLabel("bottom", "Final equity ($)", color="#5A5A6E")
+=======
+        self.hist.showGrid(x=True, y=True, alpha=0.12)
+>>>>>>> origin/main
         self.hist.setMinimumHeight(220)
         layout.addWidget(self.hist)
 
         self.summary = QTextEdit()
         self.summary.setReadOnly(True)
+<<<<<<< HEAD
         from gui.styling import style_helpers as sh
         from gui.styling.theme import get_theme
 
         self.summary.setStyleSheet(sh.code_text(get_theme()))
+=======
+>>>>>>> origin/main
         layout.addWidget(self.summary)
 
         # Buttons
@@ -158,11 +165,47 @@ class AdvancedMonteCarloDialog(QDialog):
         btn_row.addWidget(self.btn_close)
         layout.addLayout(btn_row)
 
+<<<<<<< HEAD
+=======
+        self._apply_theme()
+
+>>>>>>> origin/main
     def _mode_changed(self) -> None:
         is_shock = self.mode_combo.currentIndex() == 1
         self.slip_spin.setEnabled(is_shock)
         self.miss_spin.setEnabled(is_shock)
 
+<<<<<<< HEAD
+=======
+    def _apply_theme(self):
+        from gui.styling import style_helpers as sh
+        from gui.styling.theme import get_theme
+        t = get_theme()
+        self.setStyleSheet(
+            f"QDialog {{ background: {sh.c(t, 'bg')}; color: {sh.c(t, 'text')}; }}"
+            f"QGroupBox {{ font-weight: 600; color: {sh.c(t, 'text2')}; border: 1px solid {sh.c(t, 'border2')}; "
+            f"  border-radius: 8px; margin-top: 14px; padding: 12px 8px 8px 8px; background: {sh.c(t, 'surface')}; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; "
+            f"  padding: 2px 8px; }}"
+            f"QPushButton {{ background: {sh.c(t, 'surface')}; color: {sh.c(t, 'text')}; "
+            f"  border: 1px solid {sh.c(t, 'border2')}; border-radius: 6px; "
+            f"  padding: 6px 14px; font-weight: 500; min-height: 28px; }}"
+            f"QPushButton:hover {{ background: {sh.c(t, 'elevated')}; border-color: {sh.c(t, 'accent')}; }}"
+            f"QPushButton:pressed {{ background: {sh.c(t, 'accent')}; color: #fff; }}"
+            f"QPushButton:disabled {{ color: {sh.c(t, 'text_dis')}; }}"
+            f"QComboBox,QSpinBox,QDoubleSpinBox {{ background: {sh.c(t, 'surface')}; color: {sh.c(t, 'text')}; "
+            f"  border: 1px solid {sh.c(t, 'border2')}; border-radius: 4px; padding: 2px 4px; }}"
+            f"QCheckBox {{ color: {sh.c(t, 'text')}; spacing: 6px; }}"
+        )
+        self.hist.setBackground(QColor(sh.c(t, "chart_bg")))
+        for axis_name in ("left", "bottom"):
+            ax = self.hist.getAxis(axis_name)
+            if ax:
+                ax.setPen(pg.mkPen(QColor(sh.c(t, "chart_axis"))))
+                ax.setTextPen(pg.mkPen(QColor(sh.c(t, "chart_axis_text"))))
+        self.summary.setStyleSheet(sh.code_text(t))
+
+>>>>>>> origin/main
     def _run(self) -> None:
         if not getattr(self.engine, "trades", None):
             self.summary.setText("No trades available for simulation.")

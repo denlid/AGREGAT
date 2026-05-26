@@ -1034,12 +1034,16 @@ class SettingsTab(QWidget):
         logger.info(f"💰 Initial equity changed to: ${v:,.0f}")
 
     def _on_log_level(self, level):
+<<<<<<< HEAD
         """Change the UI display threshold + logger level.
 
         The Log Console collects ALL levels into its ring buffer, but
         only renders entries at or above this threshold. The StrategyTester
         logger level is also updated for backward compat with other handlers.
         """
+=======
+        """Change logging level for all StrategyTester loggers."""
+>>>>>>> origin/main
         level_map = {
             "DEBUG": logging.DEBUG,
             "INFO": logging.INFO,
@@ -1047,6 +1051,7 @@ class SettingsTab(QWidget):
             "ERROR": logging.ERROR,
         }
         target_level = level_map.get(level, logging.INFO)
+<<<<<<< HEAD
 
         # Update the Log Console's UI display threshold
         if self.pw and hasattr(self.pw, "log_console"):
@@ -1059,6 +1064,9 @@ class SettingsTab(QWidget):
             from gui.tabs.log_console import GUILogHandler
             if not isinstance(handler, GUILogHandler):
                 handler.setLevel(target_level)
+=======
+        logging.getLogger("StrategyTester").setLevel(target_level)
+>>>>>>> origin/main
         logger.info(f"📝 Log level changed to: {level}")
 
     def _on_render_win_changed(self, v):

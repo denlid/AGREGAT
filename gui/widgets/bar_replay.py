@@ -148,9 +148,10 @@ class BarReplayControls(QWidget):
             return
         logger.info(f"⏭ Jumping to #{ti} ({dt.date()})...")
 
-        # Jump directly to bar `ti` without resetting accumulated data
-        # (trades, drawings, equity). TF aggregator is prebuilt —
-        # advance_to() is O(1) per TF.
+        # Teleport: reset engine state and jump directly to bar `ti`
+        # without replaying every bar through strategy logic.
+        # TF aggregator is prebuilt — advance_to() is O(1) per TF.
+        self.engine.reset()
         self.engine.current_idx = ti
         self.engine.tf_aggregator.advance_to(ti)
 

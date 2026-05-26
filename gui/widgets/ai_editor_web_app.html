@@ -82,6 +82,7 @@
             letter-spacing: 0.5px;
         }
 
+<<<<<<< HEAD
         #editor-title-container {
             display: flex;
             align-items: center;
@@ -129,6 +130,8 @@
             border-color: var(--accent-light);
         }
 
+=======
+>>>>>>> origin/main
         #monaco-root {
             flex: 1;
             width: 100%;
@@ -692,6 +695,7 @@
 
 <body>
     <div id="top-bar">
+<<<<<<< HEAD
         <div id="editor-title-container">
             <span id="editor-header-title" class="header-title">New strategy</span>
             <button id="editor-title-edit-btn" onclick="startEditingTitle()" title="Rename strategy" aria-label="Rename strategy">
@@ -700,6 +704,9 @@
                 </svg>
             </button>
         </div>
+=======
+        <span id="editor-header-title" class="header-title">New strategy</span>
+>>>>>>> origin/main
         <div style="display:flex; gap:10px; align-items:center;">
             <button id="restore-chat-btn" class="btn" onclick="toggleChatPanel()" aria-label="Toggle Chat"
                 title="Toggle chat panel">
@@ -2214,6 +2221,7 @@
                     el.textContent = (title && String(title).trim()) ? String(title).trim() : 'New strategy';
                 };
 
+<<<<<<< HEAD
                 // ============= STRATEGY RENAME FUNCTIONS =============
                 window.startEditingTitle = function () {
                     const titleSpan = document.getElementById('editor-header-title');
@@ -2284,6 +2292,8 @@
                     appendSystemMessage('Rename failed: ' + msg, true);
                 };
 
+=======
+>>>>>>> origin/main
                 window.set_chat_input_text = function (text) {
                     inputEl.value = text || '';
                     inputEl.dispatchEvent(new Event('input'));

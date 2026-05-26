@@ -214,6 +214,36 @@ class MonteCarloDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
+<<<<<<< HEAD
+=======
+        self._apply_theme()
+
+    def _apply_theme(self):
+        from gui.styling import style_helpers as sh
+        from gui.styling.theme import get_theme
+        t = get_theme()
+        self.setStyleSheet(
+            f"QDialog {{ background: {sh.c(t, 'bg')}; color: {sh.c(t, 'text')}; }}"
+            f"QGroupBox {{ font-weight: 600; color: {sh.c(t, 'text2')}; border: 1px solid {sh.c(t, 'border2')}; "
+            f"  border-radius: 8px; margin-top: 14px; padding: 12px 8px 8px 8px; background: {sh.c(t, 'surface')}; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; "
+            f"  padding: 2px 8px; }}"
+            f"QPushButton {{ background: {sh.c(t, 'surface')}; color: {sh.c(t, 'text')}; "
+            f"  border: 1px solid {sh.c(t, 'border2')}; border-radius: 6px; "
+            f"  padding: 6px 14px; font-weight: 500; min-height: 28px; }}"
+            f"QPushButton:hover {{ background: {sh.c(t, 'elevated')}; border-color: {sh.c(t, 'accent')}; }}"
+            f"QPushButton:pressed {{ background: {sh.c(t, 'accent')}; color: #fff; }}"
+            f"QPushButton:disabled {{ color: {sh.c(t, 'text_dis')}; }}"
+            f"QSpinBox {{ background: {sh.c(t, 'surface')}; color: {sh.c(t, 'text')}; "
+            f"  border: 1px solid {sh.c(t, 'border2')}; border-radius: 4px; padding: 2px 4px; }}"
+            f"QCheckBox {{ color: {sh.c(t, 'text')}; spacing: 6px; }}"
+            f"QProgressBar {{ background: {sh.c(t, 'bg')}; border: 1px solid {sh.c(t, 'border2')}; "
+            f"  border-radius: 4px; text-align: center; color: {sh.c(t, 'text')}; }}"
+            f"QProgressBar::chunk {{ background: {sh.c(t, 'accent')}; border-radius: 3px; }}"
+        )
+        self.results_text.setStyleSheet(sh.code_text(t))
+
+>>>>>>> origin/main
     def run_simulation(self):
         if not self.engine.trades:
             self.results_text.setText("❌ No trades available for simulation.")

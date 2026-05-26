@@ -5,10 +5,13 @@ Engine package — Core backtesting engine.
 import logging
 
 logger = logging.getLogger("StrategyTester")
+<<<<<<< HEAD
 # Level is controlled externally:
 #   - LogConsole sets it to DEBUG on init so all messages reach the ring buffer.
 #   - Settings → Log Level lets the user override at runtime.
 # We do NOT set it here to avoid overriding those external controls on import.
+=======
+>>>>>>> origin/main
 logger.setLevel(logging.DEBUG)
 
 from engine.strategy.context import Context, Strategy, StrategyLoader

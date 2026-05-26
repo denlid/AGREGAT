@@ -24,7 +24,10 @@ class UnifiedBridge(QObject):
     attachment_requested = Signal(str)
     editor_model_changed = Signal()
     chat_tabs_state_changed = Signal(str)  # JSON state pushed from JS
+<<<<<<< HEAD
     rename_strategy_requested = Signal(str)  # new_name
+=======
+>>>>>>> origin/main
 
     @Slot()
     def receive_editor_dirty(self) -> None:
@@ -69,11 +72,14 @@ class UnifiedBridge(QObject):
         """Called from JS when tabs state changes — forward to Python for cross-panel sync."""
         self.chat_tabs_state_changed.emit(state_json)
 
+<<<<<<< HEAD
     @Slot(str)
     def receive_rename_strategy(self, new_name: str) -> None:
         """Called from JS when user wants to rename the strategy file."""
         self.rename_strategy_requested.emit(new_name)
 
+=======
+>>>>>>> origin/main
 
 class AIAssistantEditor(QWebEngineView):
     def __init__(self, parent=None):
@@ -153,11 +159,14 @@ class AIAssistantEditor(QWebEngineView):
         escaped = json.dumps(title or "")
         self.page().runJavaScript(f"window.set_strategy_header_title({escaped});")
 
+<<<<<<< HEAD
     def show_rename_error(self, msg: str) -> None:
         """Show error message when rename fails."""
         escaped = json.dumps(msg)
         self.page().runJavaScript(f"window.show_rename_error({escaped});")
 
+=======
+>>>>>>> origin/main
     def apply_chat_tabs_state(self, state_json: str) -> None:
         """Push full tabs state JSON to the JS side — used for cross-panel sync."""
         escaped = json.dumps(state_json)

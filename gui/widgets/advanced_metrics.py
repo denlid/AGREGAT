@@ -6,7 +6,11 @@ streams (variable time-between-trades). Annualised metrics route through
 
 from __future__ import annotations
 
+<<<<<<< HEAD
 from typing import List
+=======
+from typing import Any, List, Optional
+>>>>>>> origin/main
 
 import numpy as np
 
@@ -58,23 +62,40 @@ def calculate_sortino_ratio(
     trades: List[Trade],
     initial_equity: float,
     risk_free_rate: float = 0.0,
+<<<<<<< HEAD
+=======
+    equity_curve: Any = None,
+>>>>>>> origin/main
 ) -> float:
     """Annualised Sortino based on daily equity returns (downside only)."""
     if not trades:
         return 0.0
+<<<<<<< HEAD
     eq = build_equity_curve(trades, initial_equity)
+=======
+    eq = equity_curve if equity_curve is not None else build_equity_curve(trades, initial_equity)
+>>>>>>> origin/main
     return _eq_sortino(eq, risk_free=risk_free_rate)
 
 
 def calculate_calmar_ratio(
     trades: List[Trade],
     initial_equity: float,
+<<<<<<< HEAD
     years: float = None,  # kept for backwards compat; unused
+=======
+    years: Optional[float] = None,  # kept for backwards compat; unused
+    equity_curve: Any = None,
+>>>>>>> origin/main
 ) -> float:
     """Annualised return divided by max drawdown."""
     if not trades:
         return 0.0
+<<<<<<< HEAD
     eq = build_equity_curve(trades, initial_equity)
+=======
+    eq = equity_curve if equity_curve is not None else build_equity_curve(trades, initial_equity)
+>>>>>>> origin/main
     return _eq_calmar(eq, initial_equity)
 
 
@@ -83,6 +104,7 @@ def calculate_calmar_ratio(
 # ---------------------------------------------------------------------------
 
 
+<<<<<<< HEAD
 def calculate_var(trades: List[Trade], confidence: float = 0.95) -> float:
     """Value-at-Risk over per-trade PnL distribution. Delegates to engine."""
     if not trades:
@@ -112,6 +134,45 @@ def calculate_ulcer_index(trades: List[Trade], initial_equity: float) -> float:
     if not trades:
         return 0.0
     eq = build_equity_curve(trades, initial_equity).to_numpy(dtype="float64")
+=======
+def calculate_var(trades: List[Trade], confidence: float = 0.95,
+                  pnl_array: Optional[np.ndarray] = None) -> float:
+    """Value-at-Risk over per-trade PnL distribution. Delegates to engine."""
+    if not trades:
+        return 0.0
+    pnls = pnl_array if pnl_array is not None else np.array([t.pnl for t in trades], dtype="float64")
+    return _eng_var(pnls, confidence)
+
+
+def calculate_cvar(trades: List[Trade], confidence: float = 0.95,
+                   pnl_array: Optional[np.ndarray] = None) -> float:
+    """Expected Shortfall over per-trade PnL distribution. Delegates to engine."""
+    if not trades:
+        return 0.0
+    pnls = pnl_array if pnl_array is not None else np.array([t.pnl for t in trades], dtype="float64")
+    return _eng_cvar(pnls, confidence)
+
+
+def calculate_omega_ratio(trades: List[Trade], threshold: float = 0.0,
+                          pnl_array: Optional[np.ndarray] = None) -> float:
+    """Omega = Σ gains over threshold / Σ losses below threshold. Delegates to engine."""
+    if not trades:
+        return 0.0
+    pnls = pnl_array if pnl_array is not None else np.array([t.pnl for t in trades], dtype="float64")
+    return _eng_omega(pnls, threshold)
+
+
+def calculate_ulcer_index(
+    trades: List[Trade],
+    initial_equity: float,
+    equity_curve: Any = None,
+) -> float:
+    """Ulcer Index — RMS of percentage drawdowns. Delegates to engine."""
+    if not trades:
+        return 0.0
+    eq_series = equity_curve if equity_curve is not None else build_equity_curve(trades, initial_equity)
+    eq = eq_series.to_numpy(dtype="float64")
+>>>>>>> origin/main
     return _eng_ulcer(eq)
 
 
@@ -161,6 +222,7 @@ def analyze_trade_duration(trades: List[Trade]) -> dict:
 
 
 def calculate_consecutive_wins_losses(trades: List[Trade]) -> dict:
+<<<<<<< HEAD
     """Streak statistics over the trade stream."""
     if not trades:
         return {}
@@ -200,6 +262,26 @@ def calculate_consecutive_wins_losses(trades: List[Trade]) -> dict:
         "avg_loss_streak": float(np.mean(loss_streaks)) if loss_streaks else 0.0,
         "total_win_streaks": len(win_streaks),
         "total_loss_streaks": len(loss_streaks),
+=======
+    """Streak statistics over the trade stream (NumPy-vectorised)."""
+    if not trades:
+        return {}
+    pnls = np.array([t.pnl for t in trades], dtype="float64")
+    signs = np.where(pnls > 0, 1, np.where(pnls < 0, -1, 0))
+    diffs = np.diff(signs, prepend=0)
+    starts = np.where(diffs != 0)[0]
+    lengths = np.diff(np.concatenate([starts, [len(trades)]]))
+    types = signs[starts]
+    ws_lens = lengths[types == 1]
+    ls_lens = lengths[types == -1]
+    return {
+        "max_win_streak": int(ws_lens.max()) if ws_lens.size > 0 else 0,
+        "max_loss_streak": int(ls_lens.max()) if ls_lens.size > 0 else 0,
+        "avg_win_streak": float(ws_lens.mean()) if ws_lens.size > 0 else 0.0,
+        "avg_loss_streak": float(ls_lens.mean()) if ls_lens.size > 0 else 0.0,
+        "total_win_streaks": int(ws_lens.size),
+        "total_loss_streaks": int(ls_lens.size),
+>>>>>>> origin/main
     }
 
 

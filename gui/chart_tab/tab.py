@@ -41,6 +41,8 @@ class ChartTab(QWidget):
         super().__init__()
         self.engine = engine
         self._is_syncing = False  # prevent recursive sync loops
+        self._chart_alive = True  # guard for timer callbacks after destruction
+        self.destroyed.connect(lambda: setattr(self, "_chart_alive", False))
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
@@ -1669,3 +1671,171 @@ class ChartTab(QWidget):
                     self.strategy_graphic_items.append(it)
             except Exception as e:
                 logger.error(f"Draw: {e}")
+
+    # ==============================
+    # Trade focus navigation
+    # ==============================
+    def focus_trade(self, trade, pad_bars: int = 60) -> None:
+        """Best-effort: pan/zoom chart to a trade's entry/exit window.
+
+        Intended for navigation from Trades tab popups; must never raise.
+        """
+        trade_id = getattr(trade, "id", None)
+        if hasattr(self, "_last_focused_trade") and self._last_focused_trade == trade_id:
+            return
+        self._last_focused_trade = trade_id
+
+        try:
+            rt = getattr(self, "res_times", None)
+            if rt is None or len(rt) == 0:
+                logger.debug("focus_trade: res_times not available")
+                return
+
+            # Safe time extraction
+            et = getattr(trade, "entry_time_np", None)
+            if et is None:
+                et_raw = getattr(trade, "entry_time", None)
+                if not et_raw:
+                    logger.debug("focus_trade: trade missing entry_time")
+                    return
+                try:
+                    et_ts = pd.to_datetime(et_raw, errors="coerce")
+                    if pd.isna(et_ts):
+                        logger.debug("focus_trade: invalid entry_time format")
+                        return
+                    et = np.datetime64(et_ts)
+                except Exception as e:
+                    logger.debug(f"focus_trade: entry_time conversion failed: {e}")
+                    return
+
+            xt = getattr(trade, "exit_time_np", None)
+            if xt is None:
+                xt_raw = getattr(trade, "exit_time", None)
+                if xt_raw:
+                    try:
+                        xt_ts = pd.to_datetime(xt_raw, errors="coerce")
+                        if not pd.isna(xt_ts):
+                            xt = np.datetime64(xt_ts)
+                    except Exception:
+                        pass
+                if xt is None:
+                    xt = et
+
+            # Safe searchsorted with bounds checking
+            try:
+                ie = int(np.clip(np.searchsorted(rt, et, side="right") - 1, 0, len(rt) - 1))
+                ix = int(np.clip(np.searchsorted(rt, xt, side="right") - 1, 0, len(rt) - 1))
+            except (ValueError, IndexError, TypeError) as e:
+                logger.debug(f"focus_trade: searchsorted failed: {e}")
+                return
+
+            x1 = max(0, min(ie, ix) - int(pad_bars))
+            x2 = min(len(rt) - 1, max(ie, ix) + int(pad_bars))
+            if x2 <= x1:
+                logger.debug("focus_trade: invalid x range")
+                return
+
+            vb = self.plot_widget.getViewBox()
+            if vb is None:
+                logger.debug("focus_trade: ViewBox not available")
+                return
+
+            try:
+                vb.setRange(xRange=(x1, x2), padding=0.02)
+            except Exception as e:
+                logger.debug(f"focus_trade: setRange failed: {e}")
+                return
+
+            # Clear previous focus artifacts (region + lines)
+            try:
+                if hasattr(self, "_trade_focus_region") and self._trade_focus_region is not None:
+                    self.plot_widget.removeItem(self._trade_focus_region)
+                    self._trade_focus_region = None
+                if hasattr(self, "_trade_focus_lines") and self._trade_focus_lines:
+                    for ln in list(self._trade_focus_lines):
+                        try:
+                            self.plot_widget.removeItem(ln)
+                        except Exception:
+                            pass
+                    self._trade_focus_lines = []
+            except Exception:
+                pass
+
+            # Highlight region (subtle)
+            try:
+                t = get_theme()
+                brush = QColor(sh.c(t, "accent_dim"))
+                brush.setAlpha(45)
+                region = pg.LinearRegionItem(values=(min(ie, ix), max(ie, ix)), movable=False)
+                region.setBrush(brush)
+                region.setZValue(-50)
+                self.plot_widget.addItem(region)
+                self._trade_focus_region = region
+            except Exception:
+                pass
+
+            # Entry/Exit vertical markers (clear anchors)
+            try:
+                t = get_theme()
+                self._trade_focus_lines = []
+                col_entry = QColor(sh.c(t, "accent_light"))
+                col_exit = QColor(sh.c(t, "amber"))
+                col_entry.setAlpha(220)
+                col_exit.setAlpha(220)
+                le = pg.InfiniteLine(
+                    pos=min(ie, ix),
+                    angle=90,
+                    movable=False,
+                    pen=pg.mkPen(col_entry, width=2),
+                )
+                lx = pg.InfiniteLine(
+                    pos=max(ie, ix),
+                    angle=90,
+                    movable=False,
+                    pen=pg.mkPen(col_exit, width=2),
+                )
+                le.setZValue(50)
+                lx.setZValue(50)
+                self.plot_widget.addItem(le)
+                self.plot_widget.addItem(lx)
+                self._trade_focus_lines.extend([le, lx])
+            except Exception:
+                pass
+
+            # Auto-clear after short delay (keeps chart clean)
+            try:
+                if not hasattr(self, "_trade_focus_clear_timer"):
+                    self._trade_focus_clear_timer = QTimer(self)
+                    self._trade_focus_clear_timer.setSingleShot(True)
+                    self._trade_focus_clear_timer.timeout.connect(
+                        self._clear_trade_focus_highlight
+                    )
+                elif self._trade_focus_clear_timer is not None and not self._chart_alive:
+                    return
+                self._trade_focus_clear_timer.start(8000)
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("focus_trade failed")
+
+    def _clear_trade_focus_highlight(self) -> None:
+        """Remove trade focus region/lines (best-effort)."""
+        if not self._chart_alive:
+            return
+        try:
+            if hasattr(self, "_trade_focus_region") and self._trade_focus_region is not None:
+                try:
+                    self.plot_widget.removeItem(self._trade_focus_region)
+                except Exception:
+                    pass
+                self._trade_focus_region = None
+            if hasattr(self, "_trade_focus_lines") and self._trade_focus_lines:
+                for ln in list(self._trade_focus_lines):
+                    try:
+                        self.plot_widget.removeItem(ln)
+                    except Exception:
+                        pass
+                self._trade_focus_lines = []
+            self._last_focused_trade = None
+        except Exception:
+            pass

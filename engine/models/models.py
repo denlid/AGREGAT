@@ -5,6 +5,9 @@ Engine Models — Data classes for positions, trades, orders, assets, and sessio
 from datetime import time
 from typing import Any, Optional
 
+import numpy as np
+import pandas as pd
+
 
 # ==========================================
 # Asset Configuration
@@ -272,14 +275,14 @@ class Trade:
         self.exit_time = exit_time
         # Pre-cache np.datetime64 for fast chart marker rendering.
         # Avoids repeated pd.to_datetime(str) on every redraw.
-        import numpy as _np
-
         try:
-            self.entry_time_np = _np.datetime64(entry_time)
+            _et_ts = pd.to_datetime(entry_time, errors="coerce")
+            self.entry_time_np = _et_ts.to_datetime64() if not pd.isna(_et_ts) else None
         except (ValueError, TypeError):
             self.entry_time_np = None
         try:
-            self.exit_time_np = _np.datetime64(exit_time)
+            _xt_ts = pd.to_datetime(exit_time, errors="coerce")
+            self.exit_time_np = _xt_ts.to_datetime64() if not pd.isna(_xt_ts) else None
         except (ValueError, TypeError):
             self.exit_time_np = None
         self.volume = volume
@@ -346,8 +349,6 @@ def _to_time_and_weekday(
     if isinstance(t, time):
         return t, None
     try:
-        import pandas as pd
-
         ts = pd.Timestamp(t)
         if asset is not None and getattr(asset, "session_tz", None):
             tz = asset.session_tz

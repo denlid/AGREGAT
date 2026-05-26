@@ -33,7 +33,10 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
+<<<<<<< HEAD
     QGraphicsOpacityEffect,
+=======
+>>>>>>> origin/main
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -73,17 +76,40 @@ class Toast(QWidget):
 
     dismissed = Signal()
 
+<<<<<<< HEAD
+=======
+    # Tightened defaults so notifications don't linger on screen.
+    # Callers can still pass a larger value explicitly.
+    DEFAULT_DURATION_MS = 1600
+    MAX_DURATION_MS = 6000
+
+    # Fallback: force-hide after this many ms even if fade-animation stalls.
+    _FORCE_HIDE_MS = 600
+
+>>>>>>> origin/main
     def __init__(
         self,
         message: str,
         level: ToastLevel = ToastLevel.INFO,
+<<<<<<< HEAD
         duration_ms: int = 4000,
+=======
+        duration_ms: int = DEFAULT_DURATION_MS,
+>>>>>>> origin/main
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._level = level
+<<<<<<< HEAD
         self._duration_ms = max(0, int(duration_ms))
         self._dismissed = False
+=======
+        # Clamp to a sane ceiling so a stray large value can't pin a toast
+        # on screen.
+        self._duration_ms = max(0, min(int(duration_ms), self.MAX_DURATION_MS))
+        self._dismissed = False
+        self._hovered = False
+>>>>>>> origin/main
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -92,6 +118,10 @@ class Toast(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+<<<<<<< HEAD
+=======
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+>>>>>>> origin/main
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         bg, border, text = _PALETTE[level]
@@ -113,6 +143,7 @@ class Toast(QWidget):
         row.addWidget(self._label, 1)
 
         self._close_btn = QPushButton("✕")
+<<<<<<< HEAD
         self._close_btn.setFixedSize(20, 20)
         self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_btn.setStyleSheet(
@@ -120,33 +151,62 @@ class Toast(QWidget):
             f" color: {text}; background: transparent;"
             " border: none; font-size: 12px;}"
             "QPushButton:hover { color: white; }"
+=======
+        self._close_btn.setFixedSize(24, 24)
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_btn.setStyleSheet(
+            "QPushButton {"
+            f" color: {text}; background: rgba(255,255,255,8);"
+            " border: none; border-radius: 12px; font-size: 13px; font-weight: 700;}"
+            "QPushButton:hover { background: rgba(255,255,255,25); color: white; }"
+            "QPushButton:pressed { background: rgba(255,255,255,40); }"
+>>>>>>> origin/main
         )
         self._close_btn.clicked.connect(self.dismiss)
         row.addWidget(self._close_btn, 0, Qt.AlignmentFlag.AlignTop)
 
         layout.addLayout(row)
 
+<<<<<<< HEAD
         # Optional fade animations
         self._opacity_effect = QGraphicsOpacityEffect(self)
         self._opacity_effect.setOpacity(0.0)
         self.setGraphicsEffect(self._opacity_effect)
         self._fade_in = QPropertyAnimation(self._opacity_effect, b"opacity", self)
+=======
+        # Use windowOpacity instead of QGraphicsOpacityEffect — the
+        # graphics effect breaks timer / mouse events on Tool windows
+        # (known Qt/PySide issue on Windows).
+        self._fade_in = QPropertyAnimation(self, b"windowOpacity", self)
+>>>>>>> origin/main
         self._fade_in.setDuration(180)
         self._fade_in.setStartValue(0.0)
         self._fade_in.setEndValue(1.0)
         self._fade_in.setEasingCurve(QEasingCurve.Type.OutCubic)
 
+<<<<<<< HEAD
         self._fade_out = QPropertyAnimation(self._opacity_effect, b"opacity", self)
+=======
+        self._fade_out = QPropertyAnimation(self, b"windowOpacity", self)
+>>>>>>> origin/main
         self._fade_out.setDuration(220)
         self._fade_out.setStartValue(1.0)
         self._fade_out.setEndValue(0.0)
         self._fade_out.setEasingCurve(QEasingCurve.Type.InCubic)
         self._fade_out.finished.connect(self._on_fade_out_done)
 
+<<<<<<< HEAD
         # Auto-dismiss timer
         self._auto_timer = QTimer(self)
         self._auto_timer.setSingleShot(True)
         self._auto_timer.timeout.connect(self.dismiss)
+=======
+        # Safety net: force-hide if the fade-out never finishes
+        # (e.g. animation stalled on some platform).
+        self._force_timer = QTimer(self)
+        self._force_timer.setSingleShot(True)
+        self._force_timer.timeout.connect(self._force_hide)
+>>>>>>> origin/main
 
     # ------------------------------------------------------------------
     # API
@@ -170,37 +230,80 @@ class Toast(QWidget):
         x = top_right.x() - size.width()
         y = top_right.y()
         self.setGeometry(QRect(x, y, size.width(), size.height()))
+<<<<<<< HEAD
         self.show()
         self._fade_in.start()
         if self._duration_ms > 0:
             self._auto_timer.start(self._duration_ms)
+=======
+        self.setWindowOpacity(0.0)
+        self.show()
+        self._fade_in.start()
+        if self._duration_ms > 0:
+            QTimer.singleShot(self._duration_ms, self.dismiss)
+>>>>>>> origin/main
 
     def dismiss(self) -> None:
         if self._dismissed:
             return
         self._dismissed = True
+<<<<<<< HEAD
         self._auto_timer.stop()
         # Run fade-out only if the widget is visible — otherwise emit
         # dismissed synchronously so headless tests don't have to spin
         # the event loop.
         if self.isVisible():
             self._fade_out.start()
+=======
+        self._force_timer.stop()
+        if self.isVisible():
+            self._fade_out.start()
+            # Safety: force hide after _FORCE_HIDE_ms regardless
+            self._force_timer.start(self._FORCE_HIDE_MS)
+>>>>>>> origin/main
         else:
             self._on_fade_out_done()
 
     # ------------------------------------------------------------------
     # Qt overrides
     # ------------------------------------------------------------------
+<<<<<<< HEAD
+=======
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+>>>>>>> origin/main
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             self.dismiss()
         super().mousePressEvent(event)
 
+<<<<<<< HEAD
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setBrush(self._bg_color)
         painter.setPen(self._border_color)
+=======
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        self.dismiss()
+        super().mouseDoubleClickEvent(event)
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg = self._bg_color.lighter(120) if self._hovered else self._bg_color
+        painter.setBrush(bg)
+        border = self._border_color.lighter(130) if self._hovered else self._border_color
+        painter.setPen(border)
+>>>>>>> origin/main
         rect = self.rect().adjusted(0, 0, -1, -1)
         painter.drawRoundedRect(rect, 8, 8)
 
@@ -208,12 +311,24 @@ class Toast(QWidget):
     # internals
     # ------------------------------------------------------------------
     def _on_fade_out_done(self) -> None:
+<<<<<<< HEAD
+=======
+        self._force_timer.stop()
+>>>>>>> origin/main
         try:
             self.hide()
         finally:
             self.dismissed.emit()
             self.deleteLater()
 
+<<<<<<< HEAD
+=======
+    def _force_hide(self) -> None:
+        """Called if the fade-out animation stalls."""
+        self._fade_out.stop()
+        self._on_fade_out_done()
+
+>>>>>>> origin/main
 
 class ToastManager:
     """Owns a vertical stack of toasts anchored to a parent widget.
@@ -226,6 +341,14 @@ class ToastManager:
 
     SPACING = 10
     MARGIN = 16
+<<<<<<< HEAD
+=======
+    # Cap how many toasts may stack at once so a burst of milestones can't
+    # bury the dashboard.
+    MAX_STACK = 4
+    # Drop a duplicate message if an identical one is already visible.
+    DEDUPE_WINDOW = True
+>>>>>>> origin/main
 
     def __init__(self, parent: QWidget) -> None:
         self._parent = parent
@@ -240,9 +363,31 @@ class ToastManager:
         message: str,
         *,
         level: ToastLevel = ToastLevel.INFO,
+<<<<<<< HEAD
         duration_ms: int = 4000,
     ) -> Toast:
         """Display a new toast and return the widget."""
+=======
+        duration_ms: int = Toast.DEFAULT_DURATION_MS,
+    ) -> Toast:
+        """Display a new toast and return the widget.
+
+        If an identical message is already on screen the existing toast
+        is returned instead of stacking a duplicate. The stack is capped
+        at :attr:`MAX_STACK`; the oldest toast is auto-dismissed when the
+        cap is reached.
+        """
+        if self.DEDUPE_WINDOW:
+            for existing in self._stack:
+                if existing.message == message and existing.level == level:
+                    return existing
+        # Make room for the new one by dismissing the oldest if needed.
+        while len(self._stack) >= self.MAX_STACK:
+            oldest = self._stack[-1]
+            oldest.dismiss()
+            if oldest in self._stack:
+                self._stack.remove(oldest)
+>>>>>>> origin/main
         toast = Toast(message, level=level, duration_ms=duration_ms, parent=self._parent)
         toast.dismissed.connect(lambda t=toast: self._on_dismissed(t))
         self._stack.insert(0, toast)

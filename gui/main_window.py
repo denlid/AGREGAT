@@ -40,10 +40,11 @@ from gui.controllers.replay_controller import ReplayController
 from gui.controllers.session_lifecycle_controller import SessionLifecycleController
 from gui.controllers.settings_controller import SettingsController
 from gui.controllers.status_bar_controller import StatusBarController
+from gui.controllers.mode_controller import ModeController
 from gui.controllers.theme_controller import ThemeController
 from gui.controllers.toolbar_controller import ToolbarController
 from gui.tabs.log_console import LogConsole
-from gui.tabs.quant_tab import QuantTab
+
 from gui.tabs.settings_tab import SettingsTab
 from gui.tabs.stats_tab import StatsTab
 from gui.styling.theme import register_theme_listener
@@ -51,6 +52,7 @@ from gui.tabs.trades_tab import TradesTab
 from gui.tabs.strategy_editor_tab import StrategyEditorTab
 from gui.widgets.ai_editor_web import AIAssistantEditor
 from gui.workers.ai_worker import AIAssistantWorker
+from gui.shared_data_cache import SharedTradesCache
 
 logger = logging.getLogger("StrategyTester.gui.main_window")
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -74,18 +76,22 @@ class MainWindow(QMainWindow):
             | Qt.WindowType.WindowMinimizeButtonHint
             | Qt.WindowType.WindowMaximizeButtonHint
         )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet("QMenuBar { border: none; }")
 
         self.engine = BacktestEngine()
         self.engine.error_occurred.connect(self.show_error)
         self.engine.load_strategy(_Empty())
+        # Shared UI cache for trades-derived aggregates (Stats/Analytics/Quant)
+        self.shared_cache = SharedTradesCache(self.engine)
+        # Expose on engine for easy access from tabs
+        setattr(self.engine, "_shared_cache", self.shared_cache)
 
         self.chart_tab = ChartTab(self.engine)
         self.chart_tab_2: ChartTab | None = None
         self.stats_tab = StatsTab(self.engine)
         self.trades_tab = TradesTab(self.engine)
         self.analytics_tab = AnalyticsTab(self.engine)
-        self.quant_tab = QuantTab(self.engine)
         self.log_console = LogConsole()
         self.strategy_editor_tab = StrategyEditorTab(self.engine, self)
         self.settings_tab = SettingsTab(self.engine, parent_window=self)
@@ -116,6 +122,13 @@ class MainWindow(QMainWindow):
         self._toolbar_ctrl = ToolbarController(self)
         self._status_bar_ctrl = StatusBarController(self)
         self._theme_ctrl = ThemeController(self)
+        # Dashboard audience toggle (Retail/Quant). Tabs subscribe to
+        # `mode_changed` and hide quant-only sections in retail mode.
+        self.mode_controller = ModeController(self)
+        for _tab in (self.stats_tab, self.analytics_tab):
+            attach = getattr(_tab, "attach_mode_controller", None)
+            if callable(attach):
+                attach(self.mode_controller)
 
         self._build_layout()
         self._wire_signals()
@@ -169,7 +182,6 @@ class MainWindow(QMainWindow):
             (self.stats_tab, "Stats"),
             (self.trades_tab, "Trades"),
             (self.analytics_tab, "Analytics"),
-            (self.quant_tab, "Quant"),
             (self.log_console, "Logs"),
             (self.strategy_editor_tab, "Editor"),
             (self.settings_tab, "Settings"),
@@ -191,11 +203,55 @@ class MainWindow(QMainWindow):
         e.data_loaded.connect(self._replay_ctrl.on_data_loaded)
         e.position_changed.connect(self.chart_tab.on_position_changed)
         e.simulation_finished.connect(self._replay_ctrl.on_simulation_finished)
+        # Invalidate shared cache on data/trade changes
+        self._on_trade_for_cache = lambda *_: self.shared_cache.invalidate()
+        self._on_data_for_cache = lambda *_: self.shared_cache.invalidate()
+        try:
+            e.trade_completed.connect(self._on_trade_for_cache)
+            e.data_loaded.connect(self._on_data_for_cache)
+        except Exception:
+            pass
+        # Heatmap → Trades drill-down (heatmap clicks)
+        try:
+            self.analytics_tab.drill_down_requested.connect(self._on_quant_drill_down_requested)
+        except Exception:
+            pass
         self.global_ai_panel.bridge.chat_requested_ext.connect(self._on_global_ai_chat_requested)
         self.global_ai_panel.bridge.stop_ai_requested.connect(self._on_global_ai_stop_requested)
         self.global_ai_panel.bridge.chart_selection_requested.connect(self._on_chart_selection_requested)
         self.global_ai_panel.bridge.attachment_requested.connect(self._on_ai_attachment_requested)
         self.chart_tab.sigAreaSelected.connect(self._on_chart_area_selected)
+
+    def _unwire_signals(self) -> None:
+        e = self.engine
+        try:
+            e.step_completed.disconnect(self._replay_ctrl.on_step)
+        except Exception:
+            pass
+        try:
+            e.stats_updated.disconnect(self._status_bar_ctrl.on_stats)
+        except Exception:
+            pass
+        try:
+            e.data_loaded.disconnect(self._replay_ctrl.on_data_loaded)
+        except Exception:
+            pass
+        try:
+            e.position_changed.disconnect(self.chart_tab.on_position_changed)
+        except Exception:
+            pass
+        try:
+            e.simulation_finished.disconnect(self._replay_ctrl.on_simulation_finished)
+        except Exception:
+            pass
+        try:
+            e.trade_completed.disconnect(self._on_trade_for_cache)
+        except Exception:
+            pass
+        try:
+            e.data_loaded.disconnect(self._on_data_for_cache)
+        except Exception:
+            pass
 
     def _is_editor_tab_active(self) -> bool:
         """Check if the Editor tab or AI panel has focus, blocking chart shortcuts."""
@@ -309,15 +365,13 @@ class MainWindow(QMainWindow):
         if idx == 0 and prev == self._strategy_editor_tab_index and self.strategy_editor_tab.should_sync_editor_to_engine():
             self.strategy_editor_tab.sync_engine_from_editor()
 
-        # 0=Chart, 1=Stats, 2=Trades, 3=Analytics, 4=Quant, 5=Logs, 6=Editor, 7=Settings
+        # 0=Chart, 1=Stats, 2=Trades, 3=Analytics, 4=Logs, 5=Editor, 6=Settings
         if idx == 1:
             self.stats_tab._recalc()
         elif idx == 2:
             self.trades_tab._apply_filter()
         elif idx == 3:
             self.analytics_tab.refresh_all()
-        elif idx == 4:
-            self.quant_tab.refresh_all()
 
     def on_export_report(self) -> None:
         from gui.persistence.report_export import export_report_dialog
@@ -329,6 +383,41 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.exception("export_report failed")
             QMessageBox.critical(self, "Export failed", str(e))
+
+    def _switch_theme(self, name: str) -> None:
+        self._theme_ctrl.switch_theme(name)
+
+    def _apply_native_corners(self) -> None:
+        import sys
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            dwmapi = ctypes.WinDLL("dwmapi")
+            hwnd = self.winId()
+            attr = 33
+            # DWMWCP_ROUND = 2
+            preference = ctypes.c_int(2)
+            dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                wintypes.DWORD(attr),
+                ctypes.byref(preference),
+                ctypes.sizeof(preference)
+            )
+        except Exception:
+            pass
+
+    def showEvent(self, event) -> None:
+        self._apply_native_corners()
+        super().showEvent(event)
+
+    def changeEvent(self, event) -> None:
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._theme_ctrl.apply_theme()
+            self._apply_native_corners()
+        super().changeEvent(event)
 
     # -- Qt event hooks -----------------------------------------------
     def keyPressEvent(self, e) -> None:  # type: ignore[no-untyped-def]
@@ -346,6 +435,7 @@ class MainWindow(QMainWindow):
         super().keyReleaseEvent(e)
 
     def closeEvent(self, e) -> None:  # type: ignore[no-untyped-def]
+        self._unwire_signals()
         self.bar_replay.stop_playback()
 
         # Sprint 3.5 — Fast startup cache
@@ -539,3 +629,21 @@ class MainWindow(QMainWindow):
             "path": path,
         }
         self.global_ai_panel.set_attachment(payload)
+
+    # ------------------------------------------------------------------
+    # Heatmap → Trades drill-down
+    # ------------------------------------------------------------------
+    def _on_quant_drill_down_requested(self, payload: dict) -> None:
+        """Apply heatmap drill-down filters to the Trades table."""
+        try:
+            if not payload:
+                self.trades_tab.clear_drilldown()
+                return
+
+            self.trades_tab.apply_drilldown(payload)
+
+            idx = self.tabs.indexOf(self.trades_tab)
+            if idx >= 0:
+                self.tabs.setCurrentIndex(idx)
+        except Exception:
+            logger.exception("Quant drill-down failed")
