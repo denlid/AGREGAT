@@ -53,11 +53,6 @@ class ReplayController:
         h = self._host
         h.bar_replay.stop_playback()
         h.engine.reset()
-<<<<<<< HEAD
-        h.trades_tab._clear()
-        h.analytics_tab.refresh_all(force=True)
-        h.stats_tab._recalc()
-=======
         # Reset doesn't emit signals; ensure UI caches are invalidated.
         try:
             cache = getattr(h.engine, "_shared_cache", None)
@@ -72,7 +67,6 @@ class ReplayController:
             h.quant_tab.refresh_all()
         except Exception:
             logger.exception("quant_tab.refresh_all failed on reset")
->>>>>>> origin/main
         h.progress.setValue(0)
         h.bar_replay._update_state()
 
@@ -104,12 +98,9 @@ class ReplayController:
         h.lbl_info.setText(f"{ts}  {price}  #{idx}  [{sn}]")
 
     def step_visual_candle(self) -> None:
-<<<<<<< HEAD
-=======
         import time as _time
         t_total = _time.perf_counter()
 
->>>>>>> origin/main
         h = self._host
         eng = h.engine
         if eng.df is None or eng.current_idx >= eng.total_bars - 1:
@@ -123,10 +114,7 @@ class ReplayController:
         if ni >= eng.total_bars:
             return
 
-<<<<<<< HEAD
-=======
         t0 = _time.perf_counter()
->>>>>>> origin/main
         try:
             nt = pd.Timestamp(eng._time[ni])
             be = nt.floor(pt) + pd.Timedelta(pt)
@@ -134,21 +122,13 @@ class ReplayController:
             steps = max(1, (ti - 1) - eng.current_idx)
         except Exception:
             steps = 1
-<<<<<<< HEAD
-
-=======
         t_calc = _time.perf_counter() - t0
 
         t0 = _time.perf_counter()
->>>>>>> origin/main
         if steps > 1:
             eng.step_n(steps)
         else:
             eng.step()
-<<<<<<< HEAD
-            return
-
-=======
             logger.info(
                 f"⏱ step_visual: calc={t_calc*1000:.1f}ms step=instant "
                 f"(1m, total={(_time.perf_counter()-t_total)*1000:.1f}ms)"
@@ -157,16 +137,11 @@ class ReplayController:
         t_step = _time.perf_counter() - t0
 
         t0 = _time.perf_counter()
->>>>>>> origin/main
         if eng.current_idx >= 0:
             eng.step_completed.emit(
                 eng.current_idx,
                 eng.candle_at(eng.current_idx),
             )
-<<<<<<< HEAD
-
-        eng.update_stats()
-=======
         t_emit = _time.perf_counter() - t0
 
         t0 = _time.perf_counter()
@@ -181,7 +156,6 @@ class ReplayController:
             f"stats={t_stats*1000:.1f}ms "
             f"TOTAL={t_all*1000:.1f}ms"
         )
->>>>>>> origin/main
 
     def step_back_visual_candle(self) -> None:
         h = self._host

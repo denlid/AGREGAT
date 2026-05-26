@@ -45,8 +45,6 @@ from PySide6.QtGui import QColor
 from gui.styling import style_helpers as sh
 from gui.styling.theme import get_theme
 
-<<<<<<< HEAD
-=======
 SKIPPED_COLUMNS = [
     "Time", "Reason", "Calc lot", "Cap", "SL pts", "Equity",
 ]
@@ -100,7 +98,6 @@ class SkippedTradesModel(QAbstractTableModel):
         return None
 
 
->>>>>>> origin/main
 COLUMNS: List[str] = [
     "ID",
     "Direction",
@@ -171,13 +168,6 @@ COL_RR = 18
 
 def _calc_rr(trade: Any) -> float:
     """Risk/Reward ratio (R-multiple). 0 when SL was zero / unknown."""
-<<<<<<< HEAD
-    initial_sl = getattr(trade, "initial_sl", 0.0)
-    if initial_sl and initial_sl != 0:
-        risk = abs(trade.entry_price - initial_sl)
-        if risk > 0:
-            return trade.pnl_points / risk
-=======
     try:
         initial_sl = getattr(trade, "initial_sl", None)
         if initial_sl is None or initial_sl == 0:
@@ -189,7 +179,6 @@ def _calc_rr(trade: Any) -> float:
             return pnl_points / risk
     except (TypeError, ValueError, AttributeError):
         pass
->>>>>>> origin/main
     return 0.0
 
 
@@ -243,12 +232,9 @@ class TradesTableModel(QAbstractTableModel):
         self._string_keys: Dict[int, List[str]] = {}
         self._datetime_keys: Dict[int, np.ndarray] = {}
         self._search_blobs: List[str] = []
-<<<<<<< HEAD
-=======
         # Phase 2 EPIC 2.3 — anomaly cache (populated by _build_caches).
         self._anomaly_kind: np.ndarray = np.zeros(0, dtype=np.int8)
         self._anomaly_text: List[str] = []
->>>>>>> origin/main
         self._refresh_theme_colors()
 
     # ------------------------------------------------------------------
@@ -268,8 +254,6 @@ class TradesTableModel(QAbstractTableModel):
         self._build_caches()
         self.endResetModel()
 
-<<<<<<< HEAD
-=======
     def append_trades(self, new_trades: List[Any]) -> None:
         """Append trades without a full model reset. Emits rowsInserted.
         Skips full cache rebuild — only appends to caches.
@@ -360,7 +344,6 @@ class TradesTableModel(QAbstractTableModel):
             self._is_long = np.concatenate([self._is_long, dir_arr == "LONG"])
             self._is_short = np.concatenate([self._is_short, dir_arr == "SHORT"])
 
->>>>>>> origin/main
     # ------------------------------------------------------------------
     # Phase 6.2 — sort-key + search-blob caches
     # ------------------------------------------------------------------
@@ -406,26 +389,6 @@ class TradesTableModel(QAbstractTableModel):
             COL_SESSION: [str(t.session) for t in ts],
         }
 
-<<<<<<< HEAD
-        # Datetime columns — fall back to the raw string when the trade
-        # doesn't carry the precomputed numpy timestamp.
-        et_np = [getattr(t, "entry_time_np", None) for t in ts]
-        xt_np = [getattr(t, "exit_time_np", None) for t in ts]
-        # If the engine populated entry_time_np, store as datetime64 array;
-        # otherwise we'll fall back to lexicographic compare on strings.
-        if all(v is not None for v in et_np):
-            self._datetime_keys[COL_ENTRY_TIME] = np.asarray(et_np)
-        if all(v is not None for v in xt_np):
-            self._datetime_keys[COL_EXIT_TIME] = np.asarray(xt_np)
-
-        # Lowercased search blob per row — built once, reused on every
-        # keystroke. Pre-blob ~ 7 µs / row × 50k = 350 ms one-time vs
-        # the previous ~350 ms *per keystroke*.
-        self._search_blobs = [
-            f"{t.id} {t.direction} {t.exit_reason} {t.session}".lower() for t in ts
-        ]
-
-=======
         # Datetime columns — use partial availability (NaT for missing).
         et_np = [getattr(t, "entry_time_np", None) for t in ts]
         xt_np = [getattr(t, "exit_time_np", None) for t in ts]
@@ -527,7 +490,6 @@ class TradesTableModel(QAbstractTableModel):
             self._anomaly_kind = np.zeros(n, dtype=np.int8)
             self._anomaly_text = [""] * n
 
->>>>>>> origin/main
     def search_blob(self, source_row: int) -> str:
         """Return the precomputed lowercased search blob for ``source_row``."""
         if 0 <= source_row < len(self._search_blobs):
@@ -620,9 +582,6 @@ class TradesTableModel(QAbstractTableModel):
             return int(Qt.AlignmentFlag.AlignCenter)
         if role == Qt.ItemDataRole.ForegroundRole:
             return self._foreground(trade, col)
-<<<<<<< HEAD
-        if role == Qt.ItemDataRole.ToolTipRole:
-=======
         if role == Qt.ItemDataRole.BackgroundRole:
             return self._background_or_anomaly(row, trade, col)
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -631,7 +590,6 @@ class TradesTableModel(QAbstractTableModel):
                 tip = self._anomaly_text[row]
                 if tip:
                     return tip
->>>>>>> origin/main
             # Cell-level tooltip mirrors the header tooltip — handy for
             # narrow columns that get elided.
             return COLUMN_TOOLTIPS.get(COLUMNS[col], "")
@@ -648,8 +606,6 @@ class TradesTableModel(QAbstractTableModel):
         self._c_red = QColor(sh.c(t, "red_bright"))
         self._c_amber = QColor(sh.c(t, "amber"))
         self._c_text3 = QColor(sh.c(t, "text3"))
-<<<<<<< HEAD
-=======
         # Phase 6.3 — semi-transparent background colors for badges (alpha=38, ~15%)
         self._bg_long = QColor(sh.c(t, "accent_light"))
         self._bg_long.setAlpha(38)
@@ -669,7 +625,6 @@ class TradesTableModel(QAbstractTableModel):
         self._bg_anomaly_red.setAlpha(120)
         self._bg_anomaly_amber = QColor(sh.c(t, "amber"))
         self._bg_anomaly_amber.setAlpha(120)
->>>>>>> origin/main
 
     @staticmethod
     def _mae_pct(trade: Any) -> float:
@@ -812,8 +767,6 @@ class TradesTableModel(QAbstractTableModel):
             return self._c_red
         return None
 
-<<<<<<< HEAD
-=======
     def _background(self, trade: Any, col: int) -> Optional[QColor]:
         """Phase 6.3 — semi-transparent background badges for Direction, PnL, Exit Reason."""
         if col == COL_DIRECTION:
@@ -847,7 +800,6 @@ class TradesTableModel(QAbstractTableModel):
                 return self._bg_anomaly_red
         return self._background(trade, col)
 
->>>>>>> origin/main
 
 class TradesFilterProxy(QAbstractTableModel):
     """Custom filter+sort proxy that bypasses Qt's quicksort entirely.
@@ -888,15 +840,12 @@ class TradesFilterProxy(QAbstractTableModel):
         self._date_from: Optional[Any] = None
         self._date_to: Optional[Any] = None
 
-<<<<<<< HEAD
-=======
         # Phase 6.3 — heatmap drill-down filter attributes
         self._filter_hour: Optional[int] = None
         self._filter_weekday: Optional[int] = None
         self._filter_year: Optional[int] = None
         self._filter_month: Optional[int] = None
 
->>>>>>> origin/main
         # Sort state
         self._sort_col: int = -1
         self._sort_order: Qt.SortOrder = Qt.SortOrder.AscendingOrder
@@ -980,8 +929,6 @@ class TradesFilterProxy(QAbstractTableModel):
         self._date_to = b
         self._rebuild_mapping()
 
-<<<<<<< HEAD
-=======
     # ------------------------------------------------------------------
     # Phase 6.3 — heatmap drill-down filter setters
     # ------------------------------------------------------------------
@@ -1038,7 +985,6 @@ class TradesFilterProxy(QAbstractTableModel):
         """Clear all drill-down filters (hour/weekday/year/month)."""
         self.apply_drilldown(hour=None, weekday=None, year=None, month=None)
 
->>>>>>> origin/main
     def sort(
         self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder
     ) -> None:  # noqa: N802
@@ -1094,12 +1040,9 @@ class TradesFilterProxy(QAbstractTableModel):
 
         ft = self._filter_type
         pnls = src._numeric_keys.get(COL_PNL_DOLLARS)
-<<<<<<< HEAD
-=======
         rr_values = src._numeric_keys.get(COL_RR)
         durations = src._numeric_keys.get(COL_DURATION)
 
->>>>>>> origin/main
         if ft == "Wins" and pnls is not None:
             mask &= pnls > 0
         elif ft == "Losses" and pnls is not None:
@@ -1107,18 +1050,8 @@ class TradesFilterProxy(QAbstractTableModel):
         elif ft == "BE" and pnls is not None:
             mask &= pnls == 0
         elif ft in ("Long", "Short"):
-<<<<<<< HEAD
-            directions = src._string_keys.get(COL_DIRECTION, [])
-            target = "LONG" if ft == "Long" else "SHORT"
-            dir_mask = np.fromiter(
-                (d == target for d in directions),
-                dtype=bool,
-                count=len(directions),
-            )
-=======
             target_long = ft == "Long"
             dir_mask = src._is_long if target_long else src._is_short
->>>>>>> origin/main
             if dir_mask.size == n:
                 mask &= dir_mask
         elif ft == "Custom Date":
@@ -1132,8 +1065,6 @@ class TradesFilterProxy(QAbstractTableModel):
                     mask &= et >= self._date_from
                 if self._date_to is not None:
                     mask &= et <= self._date_to
-<<<<<<< HEAD
-=======
         # Phase 6.3 — extended filter presets
         elif ft == "Large Wins (>2R)" and rr_values is not None and pnls is not None:
             mask &= (pnls > 0) & (rr_values > 2.0)
@@ -1153,20 +1084,11 @@ class TradesFilterProxy(QAbstractTableModel):
             mask &= src._drill_year == self._filter_year
         if hasattr(src, "_drill_month") and self._filter_month is not None:
             mask &= src._drill_month == self._filter_month
->>>>>>> origin/main
 
         if self._search_text:
             blobs = src._search_blobs
             needle = self._search_text
-<<<<<<< HEAD
-            search_mask = np.fromiter(
-                (needle in b for b in blobs),
-                dtype=bool,
-                count=len(blobs),
-            )
-=======
             search_mask = np.fromiter((needle in b for b in blobs), dtype=bool, count=n)
->>>>>>> origin/main
             if search_mask.size == n:
                 mask &= search_mask
 

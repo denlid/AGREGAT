@@ -97,20 +97,12 @@ class ComputeWorker(QObject):
         QThreadPool.globalInstance().start(_Task(self))
 
     def _do_run(self) -> None:
-<<<<<<< HEAD
         # Pass the cancel flag to the callable iff it accepts a `cancel_token`
         # kwarg; otherwise call as-is.
-=======
->>>>>>> origin/main
         kwargs = dict(self._kwargs)
         try:
             result = self._fn(*self._args, **kwargs)
         except Exception as exc:  # pragma: no cover — defensive
-<<<<<<< HEAD
-=======
-            if self._cancel.is_set():
-                return
->>>>>>> origin/main
             self._log.exception("ComputeWorker callable raised")
             self.error.emit(exc)
             return

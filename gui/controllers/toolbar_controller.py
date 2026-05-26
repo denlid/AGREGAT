@@ -273,8 +273,6 @@ class ToolbarController:
 
     def _add_action_buttons(self, tb: QHBoxLayout) -> None:
         h = self._host
-<<<<<<< HEAD
-=======
         # Dashboard mode toggle (Retail ⇄ Quant). Shown as a small text
         # button so it's discoverable without crowding the toolbar.
         mc = getattr(h, "mode_controller", None)
@@ -296,7 +294,6 @@ class ToolbarController:
             h.btn_dashboard_mode.clicked.connect(_flip)
             tb.addWidget(h.btn_dashboard_mode)
 
->>>>>>> origin/main
         h.btn_export_report = self._icon_btn(
             "📤", "Export full report (trades / stats / equity / analytics)", 28
         )

@@ -69,20 +69,14 @@ class CustomTitleBar(QWidget):
         border = theme.get("border", "#333333")  # noqa: F841
         hover = theme.get("hover", "#2A2A32")
 
-<<<<<<< HEAD
-=======
         r = "0px" if self._parent.isMaximized() else "8px"
 
->>>>>>> origin/main
         # Subtle gradient or flat bg
         self.setStyleSheet(f"""
             CustomTitleBar {{
                 background: {bg};
-<<<<<<< HEAD
-=======
                 border-top-left-radius: {r};
                 border-top-right-radius: {r};
->>>>>>> origin/main
             }}
             QLabel {{
                 color: {text};

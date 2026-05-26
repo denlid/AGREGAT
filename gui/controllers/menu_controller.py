@@ -132,13 +132,8 @@ class MenuController:
             ("View: Switch to Stats tab", lambda: h.tabs.setCurrentIndex(1)),
             ("View: Switch to Trades tab", lambda: h.tabs.setCurrentIndex(2)),
             ("View: Switch to Analytics tab", lambda: h.tabs.setCurrentIndex(3)),
-<<<<<<< HEAD
-            ("View: Switch to Quant tab", lambda: h.tabs.setCurrentIndex(4)),
-            ("View: Switch to Logs tab", lambda: h.tabs.setCurrentIndex(5)),
-=======
             ("View: Switch to Logs tab", lambda: h.tabs.setCurrentIndex(4)),
             ("View: Switch to Editor tab", lambda: h.tabs.setCurrentIndex(5)),
->>>>>>> origin/main
             ("View: Switch to Settings tab", lambda: h.tabs.setCurrentIndex(6)),
             ("Chart: Fit all", h.chart_tab._fit_all),
             ("Chart: Undo drawing", h._replay_ctrl.undo_drawing),

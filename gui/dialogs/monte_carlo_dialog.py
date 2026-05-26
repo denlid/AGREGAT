@@ -214,8 +214,6 @@ class MonteCarloDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
-<<<<<<< HEAD
-=======
         self._apply_theme()
 
     def _apply_theme(self):
@@ -243,7 +241,6 @@ class MonteCarloDialog(QDialog):
         )
         self.results_text.setStyleSheet(sh.code_text(t))
 
->>>>>>> origin/main
     def run_simulation(self):
         if not self.engine.trades:
             self.results_text.setText("❌ No trades available for simulation.")

@@ -7,10 +7,6 @@ Sub-tabs:
 - Hour×weekday + month×year heatmaps
 - Drawdown episodes table + exit-reason attribution
 - Slippage simulator (interactive what-if)
-<<<<<<< HEAD
-- Strategy comparison (load .agbk vs current run)
-=======
->>>>>>> origin/main
 """
 
 from __future__ import annotations
@@ -20,42 +16,23 @@ from typing import List, Optional
 
 import numpy as np
 import pyqtgraph as pg
-<<<<<<< HEAD
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import (
-    QDoubleSpinBox,
-    QFileDialog,
-=======
 from PySide6.QtCore import QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
->>>>>>> origin/main
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
-<<<<<<< HEAD
-    QTableWidget,
-    QTableWidgetItem,
-=======
     QTableView,
->>>>>>> origin/main
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-<<<<<<< HEAD
-from engine.persistence.persistence import load_session_raw
 from engine.analytics.trade_analytics import (
-    compare_runs,
-=======
-from engine.analytics.trade_analytics import (
->>>>>>> origin/main
     drawdown_durations,
     exit_reason_attribution,
     hour_weekday_heatmap,
@@ -63,19 +40,11 @@ from engine.analytics.trade_analytics import (
     month_year_heatmap,
     r_multiples,
     simulate_slippage,
-<<<<<<< HEAD
-    summarise_run,
-)
-from gui.styling import style_helpers as sh
-from gui.styling.theme import get_theme, register_theme_listener
-from gui.workers.workers import ComputeWorker, Spinner
-=======
 )
 from gui.styling import style_helpers as sh
 from gui.styling.theme import font_mono, get_theme, register_theme_listener
 from gui.workers.workers import ComputeWorker, Spinner
 from gui.widgets.simple_table_model import SimpleTableModel
->>>>>>> origin/main
 
 
 def _compute_heatmaps(trades: list) -> dict:
@@ -101,13 +70,6 @@ MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 # Heatmap widget — colour-mapped 2-D grid with text overlay
 # ----------------------------------------------------------------------------
 class _Heatmap(pg.GraphicsLayoutWidget):
-<<<<<<< HEAD
-    """Generic colour-mapped heatmap with cell labels."""
-
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent=parent)
-        self.setBackground(QColor("#0D0D0F"))
-=======
     """Premium heatmap with modern glass-morphism styling, smooth gradients, and subtle animations."""
 
     # Signal emitted when a cell is clicked: (row, col)
@@ -124,17 +86,10 @@ class _Heatmap(pg.GraphicsLayoutWidget):
         self._vmax = 1.0
         self._selected: Optional[tuple[int, int]] = None
 
->>>>>>> origin/main
         self._view = self.addPlot(row=0, col=0)
         self._view.setMenuEnabled(False)
         self._view.setMouseEnabled(False, False)
         self._view.hideButtons()
-<<<<<<< HEAD
-        self._image = pg.ImageItem(axisOrder="row-major")
-        self._view.addItem(self._image)
-        self._labels: List[pg.TextItem] = []
-
-=======
         self._view.invertY(True)
         self._image = pg.ImageItem(axisOrder="row-major")
         self._image.setOpts(axisOrder="row-major")
@@ -276,40 +231,18 @@ class _Heatmap(pg.GraphicsLayoutWidget):
             self._tooltip.setPos(col, tip_y)
             self._tooltip.show()
 
->>>>>>> origin/main
     def set_grid(
         self,
         data: np.ndarray,
         x_labels: List[str],
         y_labels: List[str],
-<<<<<<< HEAD
-        cmap: str = "RdYlGn",
-=======
         cmap: str = "turbo",
->>>>>>> origin/main
         show_text: bool = True,
     ) -> None:
         for lbl in self._labels:
             self._view.removeItem(lbl)
         self._labels.clear()
         self._image.clear()
-<<<<<<< HEAD
-        if data.size == 0:
-            return
-        finite = data[np.isfinite(data)]
-        if finite.size == 0:
-            return
-        vmax = max(abs(float(finite.max())), abs(float(finite.min())), 1e-9)
-        # Symmetric colour scale around 0 → use diverging colormap.
-        try:
-            lut = pg.colormap.get(cmap).getLookupTable(0.0, 1.0, 256)
-        except Exception:
-            lut = pg.colormap.get("viridis").getLookupTable(0.0, 1.0, 256)
-        self._image.setLookupTable(lut)
-        self._image.setLevels((-vmax, vmax))
-        self._image.setImage(np.where(np.isfinite(data), data, 0.0), autoLevels=False)
-        # Axis ticks
-=======
         self._data = None
         if data.size == 0:
             self._rows = 0
@@ -360,14 +293,10 @@ class _Heatmap(pg.GraphicsLayoutWidget):
             [[(-vmax, self._fmt_money(-vmax)), (0.0, "0"), (vmax, self._fmt_money(vmax))]]
         )
 
->>>>>>> origin/main
         ax_b = self._view.getAxis("bottom")
         ax_l = self._view.getAxis("left")
         ax_b.setTicks([list(enumerate(x_labels))])
         ax_l.setTicks([list(enumerate(y_labels))])
-<<<<<<< HEAD
-        # Labels per cell
-=======
         t = get_theme()
         for axis in [ax_b, ax_l]:
             axis.setStyle(tickTextOffset=6, tickLength=0)
@@ -387,7 +316,6 @@ class _Heatmap(pg.GraphicsLayoutWidget):
                 self._selected = None
                 self._highlight.hide()
 
->>>>>>> origin/main
         if show_text:
             rows, cols = data.shape
             for r in range(rows):
@@ -395,11 +323,6 @@ class _Heatmap(pg.GraphicsLayoutWidget):
                     val = data[r, c]
                     if not np.isfinite(val) or val == 0:
                         continue
-<<<<<<< HEAD
-                    txt = pg.TextItem(f"{val:.0f}", color="#0D0D0F", anchor=(0.5, 0.5))
-                    txt.setPos(c, r)
-                    txt.setFont(QFont("Consolas", 7))
-=======
                     # Contrast-aware text color
                     norm_val = (val + vmax) / (2 * vmax) if vmax > 0 else 0.5
                     text_color = "#0A0A0C" if norm_val > 0.5 else "#FFFFFF"
@@ -408,7 +331,6 @@ class _Heatmap(pg.GraphicsLayoutWidget):
                     )
                     txt.setPos(c, r)
                     txt.setFont(QFont(font_mono(), 8, QFont.Weight.Bold))
->>>>>>> origin/main
                     self._view.addItem(txt)
                     self._labels.append(txt)
 
@@ -419,13 +341,6 @@ class _Heatmap(pg.GraphicsLayoutWidget):
 class QuantTab(QWidget):
     """Phase 5 — advanced trade analytics dashboard."""
 
-<<<<<<< HEAD
-    def __init__(self, engine):
-        super().__init__()
-        self.engine = engine
-        self._compare_trades: List = []
-        self._compare_initial_equity: float = 0.0
-=======
     # Emitted when user clicks heatmap cell and wants to drill down to Trades.
     drill_down_requested = Signal(dict)
 
@@ -433,7 +348,6 @@ class QuantTab(QWidget):
         super().__init__()
         self.engine = engine
         self._active_drilldown: dict = {}
->>>>>>> origin/main
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -461,19 +375,12 @@ class QuantTab(QWidget):
         # Phase 3 — captions / summaries that need re-tinting on theme switch.
         self._section_captions: list = []
         self._summary_labels: list = []
-<<<<<<< HEAD
-        self._compare_text_widgets: list = []
-=======
->>>>>>> origin/main
 
         self._build_mae_mfe_tab()
         self._build_r_multiples_tab()
         self._build_heatmap_tab()
         self._build_attribution_tab()
         self._build_slippage_tab()
-<<<<<<< HEAD
-        self._build_compare_tab()
-=======
 
         # Debounce slider value-changed events: slippage simulation is O(N)
         # over the trade list, so we coalesce rapid changes into one recompute.
@@ -481,7 +388,6 @@ class QuantTab(QWidget):
         self._slip_debounce.setSingleShot(True)
         self._slip_debounce.setInterval(120)
         self._slip_debounce.timeout.connect(self._update_slippage)
->>>>>>> origin/main
 
         # Phase 3 — re-apply local stylesheets every time the theme flips.
         self._apply_theme()
@@ -496,10 +402,6 @@ class QuantTab(QWidget):
             cap.setStyleSheet(sh.section_caption(t))
         for s in self._summary_labels:
             s.setStyleSheet(sh.summary_label(t))
-<<<<<<< HEAD
-        for c_ in self._compare_text_widgets:
-            c_.setStyleSheet(sh.code_text(t))
-=======
         # Tables (Model/View)
         for tbl in (getattr(self, "dd_table", None), getattr(self, "attr_table", None)):
             if tbl is not None:
@@ -507,7 +409,6 @@ class QuantTab(QWidget):
                     tbl.setStyleSheet(sh.analytics_table(t))
                 except Exception:
                     pass
->>>>>>> origin/main
         # Plot backgrounds re-tint with the theme bg.
         for plot_attr in ("mae_mfe_plot", "mae_hist", "r_hist", "r_cum", "slip_plot"):
             plot = getattr(self, plot_attr, None)
@@ -577,9 +478,6 @@ class QuantTab(QWidget):
         w = QWidget()
         l = QVBoxLayout(w)
         l.setContentsMargins(12, 10, 12, 10)
-<<<<<<< HEAD
-        l.setSpacing(6)
-=======
         l.setSpacing(8)
         # Drill-down status row
         top = QHBoxLayout()
@@ -598,28 +496,19 @@ class QuantTab(QWidget):
         top.addWidget(self._btn_clear_drill)
         l.addLayout(top)
 
->>>>>>> origin/main
         cap1 = QLabel("Hour × Weekday — Net PnL ($)")
         self._section_captions.append(cap1)
         l.addWidget(cap1)
         self.hw_heatmap = _Heatmap()
         self.hw_heatmap.setMinimumHeight(280)
-<<<<<<< HEAD
-=======
         # Phase 6.3 — connect heatmap cell clicks to drill-down navigation
         self.hw_heatmap.cell_clicked.connect(self._on_hw_heatmap_click)
->>>>>>> origin/main
         l.addWidget(self.hw_heatmap, stretch=1)
         cap2 = QLabel("Year × Month — Net PnL ($)")
         self._section_captions.append(cap2)
         l.addWidget(cap2)
         self.my_heatmap = _Heatmap()
         self.my_heatmap.setMinimumHeight(220)
-<<<<<<< HEAD
-        l.addWidget(self.my_heatmap, stretch=1)
-        self.tabs.addTab(w, "Heatmaps")
-
-=======
         # Phase 6.3 — connect heatmap cell clicks to drill-down navigation
         self.my_heatmap.cell_clicked.connect(self._on_my_heatmap_click)
         l.addWidget(self.my_heatmap, stretch=1)
@@ -697,7 +586,6 @@ class QuantTab(QWidget):
         self._set_active_drilldown(payload)
         self.drill_down_requested.emit(payload)
 
->>>>>>> origin/main
     # --------------------------------------------------------------- Attribution
     def _build_attribution_tab(self) -> None:
         w = QWidget()
@@ -708,15 +596,6 @@ class QuantTab(QWidget):
         cap_dd = QLabel("Drawdown Episodes")
         self._section_captions.append(cap_dd)
         l.addWidget(cap_dd)
-<<<<<<< HEAD
-        self.dd_table = QTableWidget(0, 6)
-        self.dd_table.setHorizontalHeaderLabels(
-            ["#", "Peak idx", "Trough idx", "Recover idx", "Depth ($)", "Underwater (trades)"]
-        )
-        self.dd_table.horizontalHeader().setStretchLastSection(True)
-        self.dd_table.setAlternatingRowColors(True)
-        self.dd_table.verticalHeader().setVisible(False)
-=======
         self.dd_table = QTableView()
         self.dd_table.horizontalHeader().setStretchLastSection(True)
         self.dd_table.setAlternatingRowColors(True)
@@ -726,21 +605,11 @@ class QuantTab(QWidget):
             parent=self,
         )
         self.dd_table.setModel(self._dd_model)
->>>>>>> origin/main
         l.addWidget(self.dd_table, stretch=1)
 
         cap_attr = QLabel("Exit-reason Attribution")
         self._section_captions.append(cap_attr)
         l.addWidget(cap_attr)
-<<<<<<< HEAD
-        self.attr_table = QTableWidget(0, 5)
-        self.attr_table.setHorizontalHeaderLabels(
-            ["Reason", "Count", "Sum PnL", "Avg PnL", "Win-rate"]
-        )
-        self.attr_table.horizontalHeader().setStretchLastSection(True)
-        self.attr_table.setAlternatingRowColors(True)
-        self.attr_table.verticalHeader().setVisible(False)
-=======
         def _attr_style(r: int, c: int, v: str) -> dict:
             # Sum PnL column color
             if c == 2:
@@ -763,7 +632,6 @@ class QuantTab(QWidget):
             cell_style_fn=_attr_style,
         )
         self.attr_table.setModel(self._attr_model)
->>>>>>> origin/main
         l.addWidget(self.attr_table, stretch=1)
         self.tabs.addTab(w, "Attribution")
 
@@ -780,11 +648,7 @@ class QuantTab(QWidget):
         self.slip_spin.setSingleStep(0.5)
         self.slip_spin.setValue(2.0)
         self.slip_spin.setSuffix(" $/trade")
-<<<<<<< HEAD
-        self.slip_spin.valueChanged.connect(self._update_slippage)
-=======
         self.slip_spin.valueChanged.connect(self._schedule_slippage_update)
->>>>>>> origin/main
         form.addRow("Per-trade extra cost:", self.slip_spin)
         l.addWidget(cfg)
 
@@ -798,30 +662,6 @@ class QuantTab(QWidget):
         l.addWidget(self.slip_summary)
         self.tabs.addTab(w, "Slippage")
 
-<<<<<<< HEAD
-    # --------------------------------------------------------------- Compare
-    def _build_compare_tab(self) -> None:
-        w = QWidget()
-        l = QVBoxLayout(w)
-        l.setContentsMargins(12, 10, 12, 10)
-        l.setSpacing(8)
-        ctrls = QHBoxLayout()
-        btn_load = QPushButton("Load .agbk session …")
-        btn_load.clicked.connect(self._load_compare_session)
-        ctrls.addWidget(btn_load)
-        btn_clear = QPushButton("Clear")
-        btn_clear.clicked.connect(self._clear_compare)
-        ctrls.addWidget(btn_clear)
-        ctrls.addStretch()
-        l.addLayout(ctrls)
-        self.compare_text = QTextEdit()
-        self.compare_text.setReadOnly(True)
-        self._compare_text_widgets.append(self.compare_text)
-        l.addWidget(self.compare_text, stretch=1)
-        self.tabs.addTab(w, "Compare")
-
-=======
->>>>>>> origin/main
     # =====================================================================
     def refresh_all(self) -> None:
         try:
@@ -830,10 +670,6 @@ class QuantTab(QWidget):
             self._update_heatmaps()
             self._update_attribution()
             self._update_slippage()
-<<<<<<< HEAD
-            self._update_compare()
-=======
->>>>>>> origin/main
         except Exception:
             logger.exception("QuantTab.refresh_all failed")
 
@@ -967,28 +803,19 @@ class QuantTab(QWidget):
             hw.net_pnl,
             x_labels=WEEKDAY_LABELS,
             y_labels=[f"{h:02d}" for h in range(24)],
-<<<<<<< HEAD
-        )
-        if my.years:
-=======
             cmap="theme_div",
         )
         if my.years:
             # Store years for drill-down click handling
             self._last_my_years = list(my.years)
->>>>>>> origin/main
             self.my_heatmap.set_grid(
                 my.net_pnl,
                 x_labels=MONTH_LABELS,
                 y_labels=[str(y) for y in my.years],
-<<<<<<< HEAD
-            )
-=======
                 cmap="theme_div",
             )
         else:
             self._last_my_years = []
->>>>>>> origin/main
 
     def _on_heatmap_error(self, exc: Exception) -> None:
         if hasattr(self, "_heatmap_spinner"):
@@ -997,13 +824,8 @@ class QuantTab(QWidget):
 
     def _update_attribution(self) -> None:
         if not getattr(self.engine, "trades", None):
-<<<<<<< HEAD
-            self.dd_table.setRowCount(0)
-            self.attr_table.setRowCount(0)
-=======
             self._dd_model.set_rows([])
             self._attr_model.set_rows([])
->>>>>>> origin/main
             return
         trades = self.engine.trades
         eq = np.empty(len(trades) + 1, dtype=float)
@@ -1012,31 +834,15 @@ class QuantTab(QWidget):
             np.asarray([t.pnl for t in trades], dtype=float)
         )
         episodes = drawdown_durations(eq)
-<<<<<<< HEAD
-        self.dd_table.setRowCount(len(episodes))
-        for r, e in enumerate(episodes):
-            cells = [
-=======
         dd_rows = []
         for r, e in enumerate(episodes):
             dd_rows.append([
->>>>>>> origin/main
                 str(r + 1),
                 str(e.start_idx),
                 str(e.trough_idx),
                 "—" if e.recover_idx is None else str(e.recover_idx),
                 f"${e.depth_dollars:,.2f}",
                 str(e.underwater_trades),
-<<<<<<< HEAD
-            ]
-            for c, txt in enumerate(cells):
-                self.dd_table.setItem(r, c, QTableWidgetItem(txt))
-
-        rows = exit_reason_attribution(trades)
-        self.attr_table.setRowCount(len(rows))
-        for r, row in enumerate(rows):
-            cells = [
-=======
             ])
         self._dd_model.set_rows(dd_rows)
 
@@ -1044,20 +850,11 @@ class QuantTab(QWidget):
         attr_rows = []
         for row in rows:
             attr_rows.append([
->>>>>>> origin/main
                 row.reason,
                 str(row.count),
                 f"${row.sum_pnl:,.2f}",
                 f"${row.avg_pnl:,.2f}",
                 f"{row.win_rate * 100:.1f}%",
-<<<<<<< HEAD
-            ]
-            for c, txt in enumerate(cells):
-                item = QTableWidgetItem(txt)
-                if c == 2:
-                    item.setForeground(QColor("#26A69A") if row.sum_pnl >= 0 else QColor("#EF5350"))
-                self.attr_table.setItem(r, c, item)
-=======
             ])
         self._attr_model.set_rows(attr_rows)
 
@@ -1068,7 +865,6 @@ class QuantTab(QWidget):
             self._slip_debounce.start()
         except Exception:
             self._update_slippage()
->>>>>>> origin/main
 
     def _update_slippage(self) -> None:
         self.slip_plot.clear()
@@ -1094,65 +890,4 @@ class QuantTab(QWidget):
             f"({res.avg_slip_per_trade:.2f}$ × {res.base_pnls.size} trades)"
         )
 
-<<<<<<< HEAD
-    # --------------------------------------------------------------- compare
-    def _load_compare_session(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Load .agbk session", "", "AGREGAT backtest (*.agbk)"
-        )
-        if not path:
-            return
-        try:
-            data = load_session_raw(path)
-            self._compare_trades = list(data.get("trades", []))
-            meta = data.get("meta", {})
-            self._compare_initial_equity = float(meta.get("initial_equity", 0.0))
-        except Exception as e:
-            self.compare_text.setText(f"Failed to load session: {e!r}")
-            return
-        self._update_compare()
-
-    def _clear_compare(self) -> None:
-        self._compare_trades = []
-        self._compare_initial_equity = 0.0
-        self.compare_text.setText("Cleared.")
-
-    def _update_compare(self) -> None:
-        cur_trades = list(getattr(self.engine, "trades", []) or [])
-        if not cur_trades and not self._compare_trades:
-            self.compare_text.setText("No data — load a saved session and run a backtest.")
-            return
-        a = summarise_run(
-            self._compare_trades,
-            name="Saved",
-            initial_equity=self._compare_initial_equity or float(self.engine.initial_equity),
-        )
-        b = summarise_run(
-            cur_trades, name="Current", initial_equity=float(self.engine.initial_equity)
-        )
-        diff = compare_runs(a, b)
-
-        def _fmt(metric: str, fmt: str) -> str:
-            d = diff[metric]
-            sign = "+" if d["delta"] >= 0 else ""
-            return (
-                f"  {metric:<16}  A={fmt.format(d['a'])}    "
-                f"B={fmt.format(d['b'])}    "
-                f"Δ={sign}{fmt.format(d['delta'])}"
-            )
-
-        text = (
-            f"A = {a.name} ({a.n_trades} trades) | B = {b.name} ({b.n_trades} trades)\n"
-            f"{'─' * 60}\n"
-            f"{_fmt('total_pnl', '${:,.2f}')}\n"
-            f"{_fmt('win_rate', '{:.2%}')}\n"
-            f"{_fmt('profit_factor', '{:.2f}')}\n"
-            f"{_fmt('expectancy', '${:.2f}')}\n"
-            f"{_fmt('max_dd_pct', '{:.2f}%')}\n"
-        )
-        self.compare_text.setText(text)
-
-
-=======
->>>>>>> origin/main
 __all__ = ["QuantTab"]

@@ -46,10 +46,7 @@ class ThemeController:
 
         h = self._host
         t = get_theme()
-<<<<<<< HEAD
-=======
         r = "0px" if h.isMaximized() else "8px"
->>>>>>> origin/main
 
         if hasattr(h, "custom_title_bar"):
             h.custom_title_bar._apply_style(t)
@@ -59,10 +56,7 @@ class ThemeController:
             if cw:
                 cw.setStyleSheet(
                     f"#main_container {{ border: 1px solid {sh.c(t, 'border')}; "
-<<<<<<< HEAD
-=======
                     f"border-radius: {r}; "
->>>>>>> origin/main
                     f"background: {sh.c(t, 'bg')}; }}"
                 )
 
@@ -77,14 +71,10 @@ class ThemeController:
         if hasattr(h, "btn_reset"):
             h.btn_reset.setStyleSheet(sh.reset_button(t))
         if hasattr(h, "_status_bar"):
-<<<<<<< HEAD
-            h._status_bar.setStyleSheet(sh.status_bar(t))
-=======
             h._status_bar.setStyleSheet(
                 sh.status_bar(t) +
                 f" border-bottom-left-radius: {r}; border-bottom-right-radius: {r};"
             )
->>>>>>> origin/main
 
         for attr, key in (
             ("st_eq", "accent_light"),

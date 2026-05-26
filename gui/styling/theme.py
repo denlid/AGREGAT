@@ -44,46 +44,6 @@ CHART_SCHEMES = {
 # ==========================================
 THEMES = {
     "dark": {
-<<<<<<< HEAD
-        "bg": "#0B0B0D",
-        "surface": "#131316",
-        "elevated": "#1A1A1F",
-        "elevated2": "#222228",
-        "hover": "#2A2A32",
-        "accent": "#2962FF",
-        "accent_light": "#5C8AFF",
-        "accent_dim": "#1A3A8F",
-        "text": "#E8E8EE",
-        "text2": "#8A8A96",
-        "text3": "#55555F",
-        "text_dis": "#3A3A42",
-        "border": "#252530",
-        "border2": "#1E1E28",
-        "green": "#26A69A",
-        "green_bright": "#00E676",
-        "red": "#EF5350",
-        "red_bright": "#FF1744",
-        "amber": "#FF9800",
-        "cyan": "#00BCD4",
-        "purple": "#7C4DFF",
-        "chart_bg": "#0B0B0D",
-        "chart_grid": "#1A1A22",
-        "chart_axis": "#1E1E28",
-        "chart_axis_text": "#5A5A6E",
-        "chart_equity_line": "#2196F3",
-        "chart_equity_fill": "#155A96",
-        "chart_peak_line": "#FF9800",
-        "chart_dd_line": "#EF5350",
-        "chart_dd_fill": "#8F3230",
-        "chart_win_marker": "#26A69A",
-        "chart_loss_marker": "#EF5350",
-    },
-    "quant": {
-        # Sprint 2.8 — research-desk-style "Quant" theme. Black-on-near-black
-        # backdrop with a magenta/cyan accent pair so trader screens stay
-        # readable in low-light rooms. Inherits from Dark and overrides
-        # only the swing colours.
-=======
         # Premium deep dark — layered greys instead of pure #000
         "bg": "#0E1114",
         "surface": "#161A1E",
@@ -121,7 +81,6 @@ THEMES = {
     },
     "quant": {
         # Sprint 2.8 — research-desk style. Inherits dark base.
->>>>>>> origin/main
         "bg": "#06070A",
         "surface": "#0E0F14",
         "elevated": "#13141B",
@@ -139,11 +98,7 @@ THEMES = {
         "green": "#1DE9B6",
         "green_bright": "#00E5A0",
         "red": "#FF3D71",
-<<<<<<< HEAD
-        "red_bright": "#FF1744",
-=======
         "red_bright": "#FF5252",
->>>>>>> origin/main
         "amber": "#FFB300",
         "cyan": "#00E5FF",
         "purple": "#B388FF",
@@ -155,11 +110,7 @@ THEMES = {
         "chart_equity_fill": "#003D52",
         "chart_peak_line": "#FFB300",
         "chart_dd_line": "#FF3D71",
-<<<<<<< HEAD
-        "chart_dd_fill": "#5C0D3A",
-=======
         "chart_dd_fill": "#3A0A1E",
->>>>>>> origin/main
         "chart_win_marker": "#1DE9B6",
         "chart_loss_marker": "#FF3D71",
     },
@@ -299,15 +250,6 @@ def apply_drop_shadow(
 
 
 def font_text() -> str:
-<<<<<<< HEAD
-    """Stylesheet-friendly font stack for prose / labels / buttons."""
-    return "'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif"
-
-
-def font_mono() -> str:
-    """Stylesheet-friendly font stack for tables / numbers / log output."""
-    return "'Roboto Mono', 'JetBrains Mono', 'Cascadia Mono', 'Consolas', monospace"
-=======
     """Stylesheet-friendly font stack for prose / labels / buttons.
     
     Premium tier: Inter (geometric, excellent legibility), fallback to system.
@@ -321,7 +263,6 @@ def font_mono() -> str:
     Premium tier: JetBrains Mono (coding ligatures, crisp), then Roboto Mono.
     """
     return "'JetBrains Mono', 'Roboto Mono', 'Cascadia Code', 'Consolas', 'Courier New', monospace"
->>>>>>> origin/main
 
 
 def apply_theme(app: QApplication, name: str = "dark"):
