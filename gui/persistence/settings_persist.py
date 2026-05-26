@@ -45,6 +45,7 @@ DEFAULTS: Dict[str, Any] = {
     "max_log_lines": 5000,
     "show_grid": True,
     "crosshair": True,
+    "autofit_y": True,
     "show_volume": False,
     "last_asset": "DE40",
     "exec_profile": "Optimistic",
@@ -56,6 +57,7 @@ DEFAULTS: Dict[str, Any] = {
     "ai_api_key": "",
     "ai_custom_base_url": "",
     "ai_custom_extra_body": "",
+    "ai_max_tokens": 16384,
 }
 
 
