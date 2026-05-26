@@ -1,0 +1,2611 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta http-equiv="Content-Type" content="text/html;charset=utf-8" />
+    <style>
+        :root {
+            --bg: #0B0B0D;
+            --surface: #131316;
+            --elevated: #1A1A1F;
+            --border: #252530;
+            --accent: #2962FF;
+            --accent-light: #5C8AFF;
+            --text: #E8E8EE;
+            --text2: #8A8A96;
+            --text3: #55555F;
+            --red: #EF5350;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #top-bar {
+            height: 40px;
+            background: var(--elevated);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 15px;
+            flex-shrink: 0;
+            z-index: 20;
+        }
+
+        #panels-row {
+            flex: 1;
+            display: flex;
+            flex-direction: row;
+            min-height: 0;
+        }
+
+        #editor-container {
+            width: 70%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            min-width: 200px;
+        }
+
+        #editor-header {
+            height: 40px;
+            background: var(--elevated);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 15px;
+            flex-shrink: 0;
+        }
+
+        .header-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text2);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        #monaco-root {
+            flex: 1;
+            width: 100%;
+            min-height: 0;
+            position: relative;
+        }
+
+        #monaco-edit {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+
+        #resizer {
+            width: 4px;
+            height: 100%;
+            background: var(--bg);
+            cursor: col-resize;
+            z-index: 10;
+            transition: background 0.2s;
+            border-right: 1px solid var(--border);
+            border-left: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        #resizer:hover,
+        #resizer.active {
+            background: var(--accent);
+        }
+
+        #chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 250px;
+            background: var(--surface);
+        }
+
+        #chat-tabs {
+            display: flex;
+            flex-shrink: 0;
+            background: var(--elevated);
+            border-bottom: 1px solid var(--border);
+            overflow-x: auto;
+            overflow-y: hidden;
+            min-height: 36px;
+            align-items: flex-end;
+            padding: 0 4px;
+        }
+
+        #chat-tabs::-webkit-scrollbar {
+            height: 3px;
+        }
+
+        #chat-tabs::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 2px;
+        }
+
+        .chat-tab {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 10px;
+            margin: 0 2px;
+            border: 1px solid var(--border);
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+            background: var(--bg);
+            color: var(--text2);
+            cursor: pointer;
+            font-size: 12px;
+            white-space: nowrap;
+            transition: background 0.15s, color 0.15s;
+            user-select: none;
+            min-width: 60px;
+            max-width: 160px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex-shrink: 0;
+        }
+
+        .chat-tab:hover {
+            background: var(--border);
+            color: var(--text);
+        }
+
+        .chat-tab.active {
+            background: var(--surface);
+            color: var(--text);
+            border-bottom: 1px solid var(--surface);
+            margin-bottom: -1px;
+            padding-bottom: 7px;
+            z-index: 1;
+            font-weight: 600;
+        }
+
+        .chat-tab .tab-label {
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .chat-tab .tab-close {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: transparent;
+            border: none;
+            color: var(--text3);
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+            padding: 0;
+            transition: color 0.15s, background 0.15s;
+            flex-shrink: 0;
+        }
+
+        .chat-tab .tab-close:hover {
+            color: var(--red);
+            background: rgba(239, 83, 80, 0.15);
+        }
+
+        .chat-tab-add {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 28px;
+            height: 28px;
+            margin: 0 2px 2px;
+            border-radius: 6px;
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--text2);
+            cursor: pointer;
+            font-size: 18px;
+            transition: all 0.15s;
+            flex-shrink: 0;
+        }
+
+        .chat-tab-add:hover {
+            background: var(--border);
+            color: var(--accent-light);
+            border-color: var(--border);
+        }
+
+        #chat-history {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .message {
+            max-width: 92%;
+            padding: 12px 16px;
+            border-radius: 8px;
+            line-height: 1.5;
+            font-size: 13px;
+            word-wrap: break-word;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+        }
+
+        .user-message {
+            align-self: flex-end;
+            background-color: var(--elevated);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-bottom-right-radius: 2px;
+        }
+
+        .ai-message {
+            align-self: flex-start;
+            background-color: transparent;
+            color: var(--text);
+            width: 100%;
+            box-shadow: none;
+            padding: 0;
+        }
+
+        .ai-message pre {
+            background-color: var(--bg);
+            padding: 0;
+            border-radius: 6px;
+            overflow: hidden;
+            margin: 12px 0;
+            border: 1px solid var(--border);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+
+        .ai-message pre code {
+            display: block;
+            padding: 15px;
+            overflow-x: auto;
+            font-family: 'Roboto Mono', Consolas, monospace;
+            font-size: 12px;
+        }
+
+        .code-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--elevated);
+            padding: 6px 12px;
+            border-bottom: 1px solid var(--border);
+            font-family: sans-serif;
+            font-size: 11px;
+            color: var(--text2);
+        }
+
+        .btn {
+            background: var(--elevated);
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: 0.2s;
+            font-size: 12px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn:hover {
+            background: var(--border);
+            color: #fff;
+            border-color: var(--accent-light);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .apply-btn {
+            padding: 4px 10px;
+            font-size: 11px;
+        }
+
+        #input-area {
+            padding: 20px;
+            background: var(--surface);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        .input-wrapper {
+            display: flex;
+            align-items: flex-end;
+            background: var(--elevated);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px;
+            transition: border-color 0.2s;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            position: relative;
+        }
+
+        .input-wrapper:focus-within {
+            border-color: var(--accent);
+        }
+
+        .attach-wrap {
+            position: relative;
+            margin-bottom: 4px;
+        }
+
+        #attach-btn {
+            background: transparent;
+            color: var(--text2);
+            border: 1px solid var(--border);
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-right: 8px;
+            transition: 0.2s;
+            font-size: 18px;
+            line-height: 1;
+        }
+
+        #attach-btn:hover {
+            color: #fff;
+            border-color: var(--accent-light);
+            background: var(--border);
+        }
+
+        #attach-menu {
+            position: absolute;
+            left: 0;
+            bottom: 38px;
+            min-width: 180px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+            padding: 6px;
+            display: none;
+            z-index: 20;
+        }
+
+        #attach-menu.open {
+            display: block;
+        }
+
+        .attach-item {
+            width: 100%;
+            background: transparent;
+            color: var(--text);
+            border: none;
+            border-radius: 6px;
+            padding: 8px 10px;
+            text-align: left;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .attach-item:hover {
+            background: var(--elevated);
+        }
+
+        #attachments-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .input-pending-actions {
+            display: none;
+            flex-direction: row;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 8px;
+            width: 100%;
+            margin-bottom: 6px;
+            flex-shrink: 0;
+        }
+
+        #pending-reject-btn {
+            border-color: rgba(239, 83, 80, 0.55);
+            color: #EF5350;
+        }
+
+        #pending-reject-btn:hover {
+            border-color: var(--red);
+            color: #fff;
+            background: rgba(239, 83, 80, 0.12);
+        }
+
+        .attachment-chip {
+            border: 1px solid var(--border);
+            background: var(--elevated);
+            color: var(--text2);
+            border-radius: 999px;
+            padding: 4px 8px;
+            font-size: 11px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .attachment-chip button {
+            border: none;
+            background: transparent;
+            color: var(--text2);
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .attachment-chip button:hover {
+            color: var(--red);
+        }
+
+        .ai-line-preview {
+            background: rgba(139, 195, 74, 0.12);
+        }
+
+        .ai-line-preview-glyph {
+            border-left: 3px solid rgba(139, 195, 74, 0.95);
+        }
+
+        .ai-deleted-zone {
+            height: 100%;
+            box-sizing: border-box;
+            background: rgba(239, 83, 80, 0.12);
+            border-left: 3px solid var(--red);
+            overflow: hidden;
+            display: flex;
+            align-items: stretch;
+        }
+
+        .ai-deleted-zone pre {
+            width: 100%;
+            margin: 0;
+            padding: 0;
+            font-family: 'Roboto Mono', Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #d4d4d4;
+            background: transparent;
+            white-space: pre;
+            overflow: hidden;
+            border: none;
+            box-shadow: none;
+        }
+
+        .ai-deleted-zone code {
+            display: block;
+            font-family: 'Roboto Mono', Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #d4d4d4;
+            background: transparent;
+        }
+
+        #chat-input {
+            flex: 1;
+            min-width: 0;
+            background: transparent;
+            color: var(--text);
+            border: none;
+            padding: 8px;
+            resize: none;
+            font-family: inherit;
+            font-size: 13px;
+            min-height: 24px;
+            max-height: 150px;
+            outline: none;
+            line-height: 1.5;
+        }
+
+        #action-btn {
+            flex-shrink: 0;
+            position: relative;
+            z-index: 5;
+            background: var(--accent);
+            color: white;
+            border: none;
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-bottom: 4px;
+            margin-left: 8px;
+            transition: 0.2s;
+            pointer-events: auto;
+        }
+
+        #action-btn:hover:not(:disabled) {
+            background: var(--accent-light);
+        }
+
+        #action-btn.stop-mode {
+            background: var(--elevated);
+            border: 1px solid var(--red);
+            color: var(--red);
+        }
+
+        #action-btn.stop-mode:hover:not(:disabled) {
+            background: rgba(239, 83, 80, 0.1);
+        }
+
+        .thinking {
+            font-style: italic;
+            color: var(--text2);
+            animation: pulse 1.5s infinite;
+        }
+
+        .ai-generating-root {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-width: 100%;
+        }
+
+        .ai-phase-hint {
+            font-size: 11px;
+            line-height: 1.4;
+            color: var(--text3);
+            font-style: normal;
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 0.6;
+            }
+
+            50% {
+                opacity: 1;
+            }
+
+            100% {
+                opacity: 0.6;
+            }
+        }
+
+        .ai-message p {
+            margin-top: 0;
+            margin-bottom: 12px;
+        }
+
+        .ai-message p:last-child {
+            margin-bottom: 0;
+        }
+
+        .ai-message strong {
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .ai-message code:not(.hljs) {
+            background: var(--elevated);
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-family: 'Roboto Mono', Consolas, monospace;
+            font-size: 12px;
+            color: var(--accent-light);
+            border: 1px solid var(--border);
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text3);
+        }
+    </style>
+
+    <link rel="stylesheet" data-name="vs/editor/editor.main"
+        href="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/editor/editor.main.css">
+    <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+
+<body>
+    <div id="top-bar">
+        <span id="editor-header-title" class="header-title">New strategy</span>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <button id="restore-chat-btn" class="btn" onclick="toggleChatPanel()" aria-label="Toggle Chat"
+                title="Toggle chat panel">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                    <path
+                        d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z" />
+                </svg>
+            </button>
+            <button class="btn" onclick="saveStrategy()" aria-label="Save Strategy">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                    <path
+                        d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z" />
+                </svg>
+                Save Strategy
+            </button>
+        </div>
+    </div>
+
+    <div id="panels-row">
+        <div id="editor-container">
+            <div id="monaco-root">
+                <div id="monaco-edit"></div>
+            </div>
+        </div>
+
+        <div id="resizer"></div>
+
+        <div id="chat-container">
+            <div id="chat-tabs">
+                <button id="chat-tab-add" class="chat-tab-add" title="New chat">+</button>
+            </div>
+            <div id="chat-history"></div>
+            <div id="input-area">
+                <div id="attachments-list"></div>
+                <div id="input-pending-actions" class="input-pending-actions">
+                    <button type="button" id="pending-apply-btn" class="btn apply-btn"
+                        aria-label="Apply changes">Apply</button>
+                    <button type="button" id="pending-reject-btn" class="btn apply-btn"
+                        aria-label="Reject changes">Reject</button>
+                </div>
+                <div class="input-wrapper">
+                    <div class="attach-wrap">
+                        <button id="attach-btn" title="Attach" aria-label="Attach file">+</button>
+                        <div id="attach-menu">
+                            <button class="attach-item" id="attach-item-image">🖼 Photo</button>
+                            <button class="attach-item" id="attach-item-doc">📄 Document</button>
+                            <button class="attach-item" id="attach-item-chart">📐 Choose from chart</button>
+                        </div>
+                    </div>
+                    <textarea id="chat-input" placeholder="Ask AI" aria-label="Chat input"></textarea>
+                    <button type="button" id="action-btn" title="Send / Stop AI" aria-label="Send message">
+                        <svg id="icon-send" viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+                        </svg>
+                        <svg id="icon-stop" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"
+                            style="display: none;">
+                            <rect x="6" y="6" width="12" height="12"></rect>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+        <script>
+            var require = {
+                paths: {
+                    'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs'
+                },
+                waitSeconds: 0
+            };
+        </script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
+        <script
+            src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/editor/editor.main.nls.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/editor/editor.main.js"></script>
+        <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+
+        <script>
+            // Global stub: Python may call before IIFE initializes
+            window.set_strategy_header_title = function (title) {
+                var el = document.getElementById('editor-header-title');
+                if (el) el.textContent = (title && String(title).trim()) ? String(title).trim() : 'New strategy';
+            };
+            window.setAiPhaseMessage = function () { };
+            window.applyChatTabsState = function () { };
+        </script>
+        <script>
+            (function () {
+                'use strict';
+
+                // ============= STATE =============
+                let editor = null;
+                let pyBridge = null;
+                let bridgeReady = false;
+                let currentAiMessageDiv = null;
+                let currentAiMarkdown = '';
+                let isGenerating = false;
+                let chartSelectionContext = null;
+                let selectedAttachments = [];
+                let pendingCodeCandidate = '';
+                let pendingPatchChunks = null;
+                let pendingPatchPreviewResult = null;
+                let previewBaselineCode = '';
+                let previewDecorations = [];
+                let previewViewZoneIds = [];
+                let streamFlushRaf = 0;
+                let aiEditorDebugSeq = 0;
+                let aiStreamChunkNum = 0;
+                let markdownFlushCount = 0;
+                let lastFlushTime = 0;
+                const FLUSH_THROTTLE_MS = 100;
+                let _suppressEditorDirty = false;
+                let _panelCollapsed = null; // null = none, 'editor' = editor hidden, 'chat' = chat hidden
+                const EDITOR_MIN = 200;
+                const CHAT_MIN = 250;
+                const SNAP_THRESHOLD = 60; // extra pixels past min to trigger collapse/restore
+                let canUseVision = true; // (4.6) whether current model supports images
+                
+                // ============= AI EDIT HISTORY (3.2) =============
+                const aiEditHistory = [];
+                const MAX_AI_HISTORY = 50;
+                let aiHistoryIndex = -1;
+                let _diffToggleOn = false; // (3.1) side-by-side diff toggle
+                let _accumulatedPatchRaw = ''; // (2.8) incremental patch builder
+
+                // ============= CHAT TABS STATE =============
+                let chatTabs = [];            // { id, label, messages: [{role, content}] }
+                let activeChatTabId = null;
+                let tabIdCounter = 0;
+                const CHAT_PERSIST_KEY = 'agregat_chat_tabs_v1';
+                let _suppressChatTabsSync = false;  // prevent echo loops during cross-panel sync
+                let _localStorageAvailable = false;
+
+                // Check localStorage availability once (QtWebEngine may block it)
+                try {
+                    const testKey = '__agr_storage_test__';
+                    localStorage.setItem(testKey, '1');
+                    localStorage.removeItem(testKey);
+                    _localStorageAvailable = true;
+                } catch (e) {
+                    _localStorageAvailable = false;
+                    console.warn('localStorage not available, using in-memory persistence only');
+                }
+
+                // ============= DOM ELEMENTS =============
+                const inputEl = document.getElementById('chat-input');
+                const attachBtn = document.getElementById('attach-btn');
+                const attachMenu = document.getElementById('attach-menu');
+                const pendingActionsEl = document.getElementById('input-pending-actions');
+                const actionBtn = document.getElementById('action-btn');
+                const iconSend = document.getElementById('icon-send');
+                const iconStop = document.getElementById('icon-stop');
+                const chatHistory = document.getElementById('chat-history');
+                const resizer = document.getElementById('resizer');
+                const leftPanel = document.getElementById('editor-container');
+                const chatContainer = document.getElementById('chat-container');
+                const monacoEditEl = document.getElementById('monaco-edit');
+
+                // ============= CHAT TABS — PERSISTENCE =============
+                function safeLocalStorageGet(key) {
+                    if (!_localStorageAvailable) return null;
+                    try { return localStorage.getItem(key); } catch (e) { return null; }
+                }
+
+                function safeLocalStorageSet(key, value) {
+                    if (!_localStorageAvailable) return;
+                    try { localStorage.setItem(key, value); } catch (e) { }
+                }
+
+                function pushStateToPython() {
+                    if (_suppressChatTabsSync) return;
+                    try {
+                        const state = JSON.stringify({
+                            chatTabs: chatTabs,
+                            activeChatTabId: activeChatTabId,
+                            tabIdCounter: tabIdCounter
+                        });
+                        // Local storage as fallback
+                        safeLocalStorageSet(CHAT_PERSIST_KEY, JSON.stringify(chatTabs));
+                        // Send to Python for cross-panel sync
+                        if (pyBridge && typeof pyBridge.receive_chat_tabs_state === 'function') {
+                            pyBridge.receive_chat_tabs_state(state);
+                        }
+                    } catch (e) {
+                        console.warn('Failed to push chat tabs state:', e);
+                    }
+                }
+
+                function persistChatTabs() {
+                    pushStateToPython();
+                }
+
+                function loadChatTabsFromStorage() {
+                    const raw = safeLocalStorageGet(CHAT_PERSIST_KEY);
+                    if (raw) {
+                        try {
+                            const parsed = JSON.parse(raw);
+                            if (Array.isArray(parsed) && parsed.length > 0) {
+                                chatTabs = parsed;
+                                let maxId = 0;
+                                chatTabs.forEach(t => { if (t.id > maxId) maxId = t.id; });
+                                tabIdCounter = Math.max(tabIdCounter, maxId + 1);
+                                return true;
+                            }
+                        } catch (e) {
+                            console.warn('Failed to parse chat tabs:', e);
+                        }
+                    }
+                    return false;
+                }
+
+                function initChatTabs() {
+                    const loaded = loadChatTabsFromStorage();
+                    if (!loaded) {
+                        const defaultTab = {
+                            id: 1,
+                            label: 'Chat 1',
+                            messages: []
+                        };
+                        chatTabs = [defaultTab];
+                        tabIdCounter = 2;
+                        persistChatTabs();
+                    }
+                    activeChatTabId = chatTabs[0].id;
+                    renderChatTabs();
+                    renderActiveTabMessages();
+                }
+
+                // ============= CROSS-PANEL SYNC (called from Python) =============
+                window.applyChatTabsState = function (stateJson) {
+                    try {
+                        const state = JSON.parse(stateJson);
+                        if (!state || !state.chatTabs) return;
+
+                        _suppressChatTabsSync = true;
+
+                        chatTabs = state.chatTabs;
+                        activeChatTabId = state.activeChatTabId;
+                        if (state.tabIdCounter) {
+                            tabIdCounter = Math.max(tabIdCounter, state.tabIdCounter);
+                        }
+
+                        // Ensure active tab exists
+                        if (!chatTabs.find(t => t.id === activeChatTabId)) {
+                            activeChatTabId = chatTabs.length > 0 ? chatTabs[0].id : null;
+                        }
+
+                        safeLocalStorageSet(CHAT_PERSIST_KEY, JSON.stringify(chatTabs));
+
+                        renderChatTabs();
+                        renderActiveTabMessages();
+
+                        // Release suppression after a microtask to allow next local change
+                        setTimeout(function () { _suppressChatTabsSync = false; }, 0);
+                    } catch (e) {
+                        _suppressChatTabsSync = false;
+                        console.warn('Failed to apply chat tabs state:', e);
+                    }
+                };
+
+                // ============= CHAT TABS — UI RENDERING =============
+                function renderChatTabs() {
+                    const tabsContainer = document.getElementById('chat-tabs');
+                    if (!tabsContainer) return;
+
+                    // Clear existing tab elements (keep the add button)
+                    const addBtn = document.getElementById('chat-tab-add');
+                    tabsContainer.innerHTML = '';
+                    if (addBtn) tabsContainer.appendChild(addBtn);
+
+                    chatTabs.forEach(tab => {
+                        const tabEl = document.createElement('div');
+                        tabEl.className = 'chat-tab' + (tab.id === activeChatTabId ? ' active' : '');
+                        tabEl.setAttribute('data-tab-id', tab.id);
+                        tabEl.title = tab.label;
+
+                        const labelSpan = document.createElement('span');
+                        labelSpan.className = 'tab-label';
+                        labelSpan.textContent = tab.label;
+                        tabEl.appendChild(labelSpan);
+
+                        const closeBtn = document.createElement('button');
+                        closeBtn.className = 'tab-close';
+                        closeBtn.innerHTML = '&#x2715;';
+                        closeBtn.title = 'Close chat';
+                        closeBtn.addEventListener('click', function (e) {
+                            e.stopPropagation();
+                            deleteChatTab(tab.id);
+                        });
+                        tabEl.appendChild(closeBtn);
+
+                        tabEl.addEventListener('click', function (e) {
+                            if (e.target === closeBtn) return;
+                            switchChatTab(tab.id);
+                        });
+
+                        // Double click to rename
+                        tabEl.addEventListener('dblclick', function (e) {
+                            if (e.target === closeBtn) return;
+                            renameChatTab(tab.id);
+                        });
+
+                        tabsContainer.insertBefore(tabEl, addBtn);
+                    });
+
+                    // Scroll active tab into view
+                    requestAnimationFrame(() => {
+                        const activeEl = tabsContainer.querySelector('.chat-tab.active');
+                        if (activeEl) {
+                            activeEl.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+                        }
+                    });
+                }
+
+                function renderActiveTabMessages() {
+                    chatHistory.innerHTML = '';
+                    const activeTab = getActiveTab();
+                    if (!activeTab) return;
+
+                    activeTab.messages.forEach(msg => {
+                        if (msg.role === 'user') {
+                            const escaped = (msg.content || '').replace(/\n/g, '<br>');
+                            chatHistory.innerHTML += `<div class="message user-message">${escaped}</div>`;
+                        } else if (msg.role === 'assistant') {
+                            let html;
+                            try {
+                                html = marked.parse(msg.content);
+                            } catch (e) {
+                                html = escapeHtml(msg.content);
+                            }
+                            chatHistory.innerHTML += `<div class="message ai-message">${html}</div>`;
+                        } else if (msg.role === 'system') {
+                            const color = msg.isError ? 'var(--red)' : '#4CAF50';
+                            chatHistory.innerHTML += `<div class="message" style="background-color: transparent; border: 1px solid ${color}; color: ${color}; align-self: center; font-size: 11px; padding: 4px 10px; opacity: 0.8;">${escapeHtml(msg.content)}</div>`;
+                        }
+                    });
+                    scrollChatToBottom();
+                }
+
+                // ============= CHAT TABS — OPERATIONS =============
+                function getActiveTab() {
+                    return chatTabs.find(t => t.id === activeChatTabId) || null;
+                }
+
+                function ensureActiveTabExists() {
+                    if (!getActiveTab()) {
+                        if (chatTabs.length > 0) {
+                            activeChatTabId = chatTabs[0].id;
+                        } else {
+                            createChatTab();
+                        }
+                        renderChatTabs();
+                        renderActiveTabMessages();
+                    }
+                }
+
+                function createChatTab(label) {
+                    tabIdCounter += 1;
+                    const id = tabIdCounter;
+                    // Generate sequential label without gaps: Chat 1, Chat 2, ...
+                    const seqNum = chatTabs.length + 1;
+                    const newTab = {
+                        id: id,
+                        label: label || ('Chat ' + seqNum),
+                        messages: []
+                    };
+                    chatTabs.push(newTab);
+                    activeChatTabId = id;
+                    renderChatTabs();
+                    renderActiveTabMessages();
+                    persistChatTabs();
+                    return id;
+                }
+
+                function switchChatTab(tabId) {
+                    if (activeChatTabId === tabId) return;
+                    activeChatTabId = tabId;
+                    renderChatTabs();
+                    renderActiveTabMessages();
+                }
+
+                function deleteChatTab(tabId) {
+                    if (chatTabs.length <= 1) {
+                        // Don't delete the last tab — clear it instead
+                        const tab = chatTabs[0];
+                        tab.messages = [];
+                        tab.label = 'Chat 1';
+                        activeChatTabId = tab.id;
+                        renderChatTabs();
+                        renderActiveTabMessages();
+                        persistChatTabs();
+                        return;
+                    }
+
+                    const idx = chatTabs.findIndex(t => t.id === tabId);
+                    if (idx === -1) return;
+
+                    chatTabs.splice(idx, 1);
+
+                    if (activeChatTabId === tabId) {
+                        // Switch to the nearest tab
+                        const newIdx = Math.min(idx, chatTabs.length - 1);
+                        activeChatTabId = chatTabs[newIdx].id;
+                    }
+
+                    renderChatTabs();
+                    renderActiveTabMessages();
+                    persistChatTabs();
+                }
+
+                function renameChatTab(tabId) {
+                    const tab = chatTabs.find(t => t.id === tabId);
+                    if (!tab) return;
+
+                    const newLabel = prompt('Rename chat:', tab.label);
+                    if (newLabel !== null && newLabel.trim()) {
+                        tab.label = newLabel.trim();
+                        renderChatTabs();
+                        persistChatTabs();
+                    }
+                }
+
+                function addMessageToActiveTab(role, content, extra) {
+                    ensureActiveTabExists();
+                    const tab = getActiveTab();
+                    if (!tab) return;
+
+                    const msg = { role: role, content: content };
+                    if (extra) {
+                        Object.keys(extra).forEach(k => { msg[k] = extra[k]; });
+                    }
+                    tab.messages.push(msg);
+                    persistChatTabs();
+                }
+
+                // ============= UTILITY FUNCTIONS =============
+                function escapeHtml(s) {
+                    const str = String(s || '');
+                    return str
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#39;');
+                }
+
+                function normalizeText(s) {
+                    return (s || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                }
+
+                function sanitizeHTML(str) {
+                    const div = document.createElement('div');
+                    div.textContent = str;
+                    return div.innerHTML;
+                }
+
+                // ============= AI DEBUG (browser console only; DevTools → Console) =============
+                function aiEditorDebug(evt, detail) {
+                    try {
+                        aiEditorDebugSeq += 1;
+                        const payload = { evt, seq: aiEditorDebugSeq, ts: Date.now() };
+                        if (detail && typeof detail === 'object') {
+                            Object.keys(detail).forEach(k => {
+                                if (Object.prototype.hasOwnProperty.call(detail, k)) {
+                                    payload[k] = detail[k];
+                                }
+                            });
+                        }
+                        console.debug('[ai_editor]', payload);
+                    } catch (e) { /* ignore */ }
+                }
+
+                // ============= MONACO EDITOR HELPERS =============
+                function isEditorReady() {
+                    return editor && editor.getModel && !editor.getModel().isDisposed();
+                }
+
+                function safeEditorSetValue(text) {
+                    if (!isEditorReady()) {
+                        console.warn('Editor not ready for setValue');
+                        return false;
+                    }
+
+                    try {
+                        const normalizedText = normalizeText(text || '');
+                        editor.setValue(normalizedText);
+
+                        // CRITICAL FIX for QtWebEngine: force layout update
+                        editor.layout();
+
+                        // Force Monaco to process the change
+                        editor.revealLine(Math.min(editor.getModel().getLineCount(), 1));
+
+                        // Additional QtWebEngine hack: trigger reflow
+                        monacoEditEl.style.transform = 'translateZ(0)';
+                        monacoEditEl.offsetHeight; // Force reflow
+                        monacoEditEl.style.transform = '';
+
+                        return true;
+                    } catch (e) {
+                        console.error('Failed to set editor value:', e);
+                        return false;
+                    }
+                }
+
+                function getEditorValue() {
+                    return isEditorReady() ? editor.getValue() : '';
+                }
+
+                // ============= VIEW ZONES MANAGEMENT =============
+                function getEditorLineHeightPx() {
+                    if (!isEditorReady()) return 19;
+                    try {
+                        return editor.getOption(monaco.editor.EditorOption.lineHeight) || 19;
+                    } catch (e) {
+                        return 19;
+                    }
+                }
+
+                function clearPreviewViewZones() {
+                    if (!previewViewZoneIds.length) {
+                        previewViewZoneIds = [];
+                        return;
+                    }
+
+                    if (!isEditorReady()) {
+                        previewViewZoneIds = [];
+                        return;
+                    }
+
+                    const ids = previewViewZoneIds.slice();
+                    previewViewZoneIds = [];
+
+                    try {
+                        editor.changeViewZones(accessor => {
+                            ids.forEach(id => {
+                                try { accessor.removeZone(id); } catch (e) { }
+                            });
+                        });
+                    } catch (e) {
+                        console.error('Failed to clear view zones:', e);
+                    }
+                }
+
+                function buildDeletedZoneDom(lines) {
+                    const root = document.createElement('div');
+                    root.className = 'ai-deleted-zone';
+                    root.setAttribute('aria-hidden', 'true');
+
+                    // Показуємо видалений код — такий же розмір/шрифт як в звичайному коді
+                    if (lines && lines.length > 0) {
+                        const pre = document.createElement('pre');
+                        const code = document.createElement('code');
+
+                        const maxLines = 15;
+                        let displayLines = lines.slice(0, maxLines);
+                        let truncated = lines.length > maxLines;
+
+                        let text = displayLines.join('\n');
+                        if (truncated) {
+                            text += '\n... (' + (lines.length - maxLines) + ' more lines)';
+                        }
+                        code.textContent = text;
+                        pre.appendChild(code);
+                        root.appendChild(pre);
+                    }
+
+                    return root;
+                }
+
+                // ============= DIFF ALGORITHM =============
+                function diffLineOps(oldLines, newLines) {
+                    const m = oldLines.length;
+                    const n = newLines.length;
+
+                    // Use simpler diff for large files
+                    if (m * n > 100000) {
+                        return simpleDiff(oldLines, newLines);
+                    }
+
+                    const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+
+                    for (let i = 1; i <= m; i++) {
+                        for (let j = 1; j <= n; j++) {
+                            if (oldLines[i - 1] === newLines[j - 1]) {
+                                dp[i][j] = dp[i - 1][j - 1] + 1;
+                            } else {
+                                dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+                            }
+                        }
+                    }
+
+                    const ops = [];
+                    let i = m, j = n;
+
+                    while (i > 0 || j > 0) {
+                        if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
+                            ops.unshift({ type: 'eq', oi: i - 1, ni: j - 1 });
+                            i--; j--;
+                        } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+                            ops.unshift({ type: 'ins', ni: j - 1 });
+                            j--;
+                        } else {
+                            ops.unshift({ type: 'del', oi: i - 1 });
+                            i--;
+                        }
+                    }
+
+                    return ops;
+                }
+
+                function simpleDiff(oldLines, newLines) {
+                    const ops = [];
+                    let i = 0, j = 0;
+
+                    while (i < oldLines.length || j < newLines.length) {
+                        if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
+                            ops.push({ type: 'eq', oi: i, ni: j });
+                            i++; j++;
+                        } else if (j < newLines.length && (i >= oldLines.length || oldLines[i] !== newLines[j])) {
+                            ops.push({ type: 'ins', ni: j });
+                            j++;
+                        } else if (i < oldLines.length) {
+                            ops.push({ type: 'del', oi: i });
+                            i++;
+                        }
+                    }
+
+                    return ops;
+                }
+
+                function analyzePatchLineDiff(beforeText, afterText) {
+                    const oldLines = normalizeText(beforeText || '').split('\n');
+                    const newLines = normalizeText(afterText || '').split('\n');
+                    const ops = diffLineOps(oldLines, newLines);
+
+                    const deleteZones = [];
+                    const greenLines = new Set();
+                    let anchorAfter = 0;
+                    let delBuffer = [];
+
+                    function flushDeletes() {
+                        if (!delBuffer.length) return;
+                        deleteZones.push({
+                            afterLineNumber: anchorAfter,
+                            lines: delBuffer.slice()
+                        });
+                        delBuffer = [];
+                    }
+
+                    for (const op of ops) {
+                        if (op.type === 'eq') {
+                            flushDeletes();
+                            anchorAfter = op.ni + 1;
+                        } else if (op.type === 'ins') {
+                            flushDeletes();
+                            greenLines.add(op.ni + 1);
+                            anchorAfter = op.ni + 1;
+                        } else {
+                            delBuffer.push(oldLines[op.oi]);
+                        }
+                    }
+                    flushDeletes();
+
+                    return { deleteZones, greenLines };
+                }
+
+                function highlightPatchPreviewDiff(beforeText, afterText) {
+                    if (!isEditorReady()) return;
+
+                    clearPreviewViewZones();
+
+                    const afterNorm = normalizeText(afterText || '');
+                    const beforeNorm = normalizeText(beforeText || '');
+                    const { deleteZones, greenLines } = analyzePatchLineDiff(beforeNorm, afterNorm);
+
+                    const decs = [];
+                    greenLines.forEach(line => {
+                        decs.push({
+                            range: new monaco.Range(line, 1, line, 1),
+                            options: {
+                                isWholeLine: true,
+                                className: 'ai-line-preview',
+                                linesDecorationsClassName: 'ai-line-preview-glyph'
+                            }
+                        });
+                    });
+
+                    try {
+                        previewDecorations = editor.deltaDecorations(previewDecorations, decs);
+                    } catch (e) {
+                        console.error('Failed to set decorations:', e);
+                    }
+
+                    if (!deleteZones.length) return;
+
+                    const lh = getEditorLineHeightPx();
+                    deleteZones.sort((a, b) => a.afterLineNumber - b.afterLineNumber);
+
+                    try {
+                        editor.changeViewZones(accessor => {
+                            deleteZones.forEach(block => {
+                                const n = block.lines.length;
+                                if (!n) return;
+
+                                const dom = buildDeletedZoneDom(block.lines);  // ← ПЕРЕДАЄМО ТЕКСТ
+
+                                // Вираховуємо висоту: мінімум 20px на рядок, максимум 400px
+                                const lineHeight = 18;
+                                const padding = 16;
+                                const inner = Math.min(400, Math.max(20, n * lineHeight + padding));
+
+                                const id = accessor.addZone({
+                                    afterLineNumber: block.afterLineNumber,
+                                    heightInPx: inner,
+                                    suppressMouseDown: false,
+                                    domNode: dom
+                                });
+
+                                previewViewZoneIds.push(id);
+                            });
+                        });
+                    } catch (e) {
+                        console.error('Failed to add view zones:', e);
+                    }
+                }
+
+                // ============= PATCH FUNCTIONS =============
+                function findBeforeSpan(srcRaw, beforeRaw) {
+                    const src = normalizeText(srcRaw);
+                    const before = normalizeText(beforeRaw);
+
+                    if (!before) return { ok: true, start: 0, end: 0, srcNorm: src };
+
+                    let k = src.indexOf(before);
+                    if (k >= 0) return { ok: true, start: k, end: k + before.length, srcNorm: src };
+
+                    let bt = before;
+                    while (bt.startsWith('\n')) bt = bt.slice(1);
+                    while (bt.endsWith('\n')) bt = bt.slice(0, -1);
+
+                    const patLines = bt.split('\n');
+                    if (!patLines.length || (patLines.length === 1 && patLines[0] === '')) {
+                        return { ok: false, srcNorm: src };
+                    }
+
+                    function rowEqualLoose(a, b) {
+                        if (a === b) return true;
+                        const ra = (a || '').replace(/\s+$/g, '');
+                        const rb = (b || '').replace(/\s+$/g, '');
+                        if (ra === rb) return true;
+                        if ((a || '').trim() === (b || '').trim()) return true;
+
+                        const tab4 = s => s.replace(/\t/g, '    ');
+                        if (tab4(ra) === tab4(rb)) return true;
+                        return tab4(a || '').trim() === tab4(b || '').trim();
+                    }
+
+                    const srcLines = src.split('\n');
+                    const candidates = [];
+
+                    for (let i = 0; i <= srcLines.length - patLines.length; i++) {
+                        let matched = true;
+                        for (let j = 0; j < patLines.length; j++) {
+                            if (!rowEqualLoose(srcLines[i + j] ?? '', patLines[j])) {
+                                matched = false;
+                                break;
+                            }
+                        }
+                        if (matched) candidates.push(i);
+                    }
+
+                    if (candidates.length !== 1) return { ok: false, srcNorm: src };
+
+                    const idx = candidates[0];
+                    let start = 0;
+                    for (let t = 0; t < idx; t++) start += srcLines[t].length + 1;
+
+                    let end = start;
+                    for (let j = 0; j < patLines.length; j++) {
+                        end += srcLines[idx + j].length;
+                        if (j < patLines.length - 1) end += 1;
+                    }
+
+                    return { ok: true, start, end, srcNorm: src };
+                }
+
+                function applyOnePatchToText(text, patch) {
+                    const srcRaw = text || '';
+                    const before = patch.before || '';
+                    const after = patch.after || '';
+
+                    if (!before && !after) return { ok: false, text: normalizeText(srcRaw) };
+
+                    if (!before && after) {
+                        const srcN = normalizeText(srcRaw);
+                        const add = normalizeText(after);
+                        const glue = srcN.endsWith('\n') || !srcN ? '' : '\n';
+                        return { ok: true, text: srcN + glue + add };
+                    }
+
+                    const span = findBeforeSpan(srcRaw, before);
+                    if (!span.ok) return { ok: false, text: normalizeText(srcRaw) };
+
+                    const srcN = span.srcNorm;
+                    return {
+                        ok: true,
+                        text: srcN.slice(0, span.start) + normalizeText(after) + srcN.slice(span.end)
+                    };
+                }
+
+                function applyAllPatchesToText(baseText, chunks) {
+                    let t = normalizeText(baseText);
+
+                    for (let i = 0; i < chunks.length; i++) {
+                        const res = applyOnePatchToText(t, chunks[i]);
+                        if (!res.ok) return { ok: false, text: t, failedIndex: i };
+                        t = res.text;
+                    }
+
+                    return { ok: true, text: t };
+                }
+
+                function parsePatchChunks(rawPatchText) {
+                    const src = normalizeText(rawPatchText || '').replace(/\s+$/, '');
+                    if (!src.trim()) return [];
+
+                    const chunks = [];
+                    let current = [];
+
+                    for (const ln of src.split('\n')) {
+                        if (/^@{3,}\s*$/.test(ln.trim())) {
+                            const block = current.join('\n').trimEnd();
+                            if (block) chunks.push(block);
+                            current = [];
+                            continue;
+                        }
+                        current.push(ln);
+                    }
+
+                    const tail = current.join('\n').trimEnd();
+                    if (tail) chunks.push(tail);
+
+                    const parsed = [];
+                    for (const chunk of chunks) {
+                        const beforeLines = [];
+                        const afterLines = [];
+
+                        for (const line of chunk.split('\n')) {
+                            const m = line.match(/^\s*([+-])(.*)$/);
+                            if (!m) continue;
+                            const sign = m[1];
+                            const payload = m[2] != null ? m[2] : '';
+
+                            if (sign === '-') beforeLines.push(payload);
+                            else afterLines.push(payload);
+                        }
+
+                        if (!beforeLines.length && !afterLines.length) continue;
+
+                        parsed.push({
+                            before: beforeLines.join('\n'),
+                            after: afterLines.join('\n')
+                        });
+                    }
+
+                    return parsed;
+                }
+
+                function extractLatestCodeBlock(markdownText) {
+                    if (!markdownText) return '';
+
+                    const tagged = [...markdownText.matchAll(/```(?:python|py|python3)\s*([\s\S]*?)```/gi)];
+                    if (tagged.length > 0) {
+                        const t = normalizeText(tagged[tagged.length - 1][1] || '')
+                            .replace(/^\n+/, '')
+                            .replace(/\n+$/, '');
+                        if (t.trim()) return t;
+                    }
+
+                    const any = [...markdownText.matchAll(/```(\w*)\s*([\s\S]*?)```/g)];
+                    for (let i = any.length - 1; i >= 0; i--) {
+                        const lang = (any[i][1] || '').toLowerCase();
+                        const body = normalizeText(any[i][2] || '').replace(/^\n+/, '').replace(/\n+$/, '');
+
+                        if (!body.trim()) continue;
+                        if (lang === 'agregat_patch' || lang === 'json') continue;
+                        if (!lang || lang === 'code' || lang === 'text' || lang === 'plaintext') {
+                            if (/\b(class|def|import|from)\b/.test(body)) return body;
+                        }
+                    }
+
+                    return '';
+                }
+
+                function extractLatestPatchBlock(markdownText) {
+                    if (!markdownText) return '';
+
+                    const blocks = [...markdownText.matchAll(/```agregat_patch\s*([\s\S]*?)```/gi)];
+                    if (!blocks.length) return '';
+
+                    let raw = blocks[blocks.length - 1][1] || '';
+                    raw = normalizeText(raw).replace(/^\n+/, '').replace(/\n+$/, '');
+                    return raw;
+                }
+
+                function tryConsumeLatestPatch(markdownText) {
+                    const raw = extractLatestPatchBlock(markdownText);
+                    const chunks = parsePatchChunks(raw);
+
+                    if (!chunks.length) {
+                        pendingPatchChunks = null;
+                        pendingPatchPreviewResult = null;
+                        return false;
+                    }
+
+                    const base = normalizeText(previewBaselineCode || getEditorValue());
+                    const r = applyAllPatchesToText(base, chunks);
+
+                    if (!r.ok) {
+                        aiEditorDebug('patch_apply_failed', {
+                            chunks: chunks.length,
+                            failedIndex: r.failedIndex != null ? r.failedIndex : -1
+                        });
+                        pendingPatchChunks = null;
+                        pendingPatchPreviewResult = null;
+                        return false;
+                    }
+
+                    pendingPatchChunks = chunks;
+                    pendingPatchPreviewResult = r.text;
+                    return true;
+                }
+
+                // ============= APPLY / PREVIEW LOGIC =============
+                function resolveApplyBody(candidateText) {
+                    const base = normalizeText(previewBaselineCode || '');
+                    const ed = normalizeText(getEditorValue());
+                    const cand = normalizeText(candidateText != null ? candidateText : '');
+
+                    if (!cand) return ed;
+                    if (ed === base) return cand;
+                    if (ed !== cand) return ed;
+                    return cand;
+                }
+
+                function applyStreamedCodePreview(codeText) {
+                    if (!isEditorReady() || codeText === undefined || codeText === null) return;
+
+                    const next = normalizeText(String(codeText)).replace(/^\n+/, '').replace(/\n+$/, '');
+                    const before = getEditorValue();
+
+                    if (before !== next) {
+                        safeEditorSetValue(next);
+                    }
+
+                    highlightPatchPreviewDiff(previewBaselineCode || before, next);
+                }
+
+                // ============= AI EDIT HISTORY (3.2) =============
+                function saveEditSnapshot(prompt) {
+                    const code = previewBaselineCode || getEditorValue();
+                    if (!code) return;
+                    
+                    // Discard future entries if we undid
+                    if (aiHistoryIndex < aiEditHistory.length - 1) {
+                        aiEditHistory.splice(aiHistoryIndex + 1);
+                    }
+                    
+                    aiEditHistory.push({
+                        timestamp: Date.now(),
+                        code: code,
+                        prompt: (prompt || '').slice(0, 80)
+                    });
+                    
+                    if (aiEditHistory.length > MAX_AI_HISTORY) {
+                        aiEditHistory.shift();
+                    }
+                    aiHistoryIndex = aiEditHistory.length - 1;
+                }
+                
+                function undoAIAction() {
+                    if (aiHistoryIndex <= 0) return;
+                    aiHistoryIndex--;
+                    const snapshot = aiEditHistory[aiHistoryIndex];
+                    safeEditorSetValue(snapshot.code);
+                    previewBaselineCode = snapshot.code;
+                    clearPreviewViewZones();
+                    appendSystemMessage('↩ Undo to: ' + snapshot.prompt);
+                }
+                
+                function redoAIAction() {
+                    if (aiHistoryIndex >= aiEditHistory.length - 1) return;
+                    aiHistoryIndex++;
+                    const snapshot = aiEditHistory[aiHistoryIndex];
+                    safeEditorSetValue(snapshot.code);
+                    previewBaselineCode = snapshot.code;
+                    clearPreviewViewZones();
+                    appendSystemMessage('↪ Redo to: ' + snapshot.prompt);
+                }
+
+                function applyPendingChanges() {
+                    if (!isEditorReady()) {
+                        appendSystemMessage('Editor not ready. Wait and try again.', true);
+                        return;
+                    }
+
+                    var applied = false;
+
+                    if (pendingPatchChunks && pendingPatchChunks.length && pendingPatchPreviewResult != null) {
+                        const body = resolveApplyBody(pendingPatchPreviewResult);
+
+                        if (safeEditorSetValue(body)) {
+                            saveEditSnapshot('Patch applied');
+                            previewBaselineCode = body;
+                            clearPreviewViewZones();
+                            previewDecorations = editor.deltaDecorations(previewDecorations, []);
+                            pendingPatchChunks = null;
+                            pendingPatchPreviewResult = null;
+                            pendingCodeCandidate = '';
+                            appendSystemMessage('Patch applied.');
+                            updatePendingActionsBar();
+                            applied = true;
+                        } else {
+                            appendSystemMessage('Failed to apply patch. Editor error.', true);
+                        }
+                    } else if (pendingCodeCandidate) {
+                        const body = resolveApplyBody(pendingCodeCandidate);
+
+                        if (safeEditorSetValue(body)) {
+                            saveEditSnapshot('Code applied from AI');
+                            previewBaselineCode = body;
+                            clearPreviewViewZones();
+                            previewDecorations = editor.deltaDecorations(previewDecorations, []);
+                            pendingCodeCandidate = '';
+                            appendSystemMessage('Saved to editor.');
+                            updatePendingActionsBar();
+                            applied = true;
+                        } else {
+                            appendSystemMessage('Failed to save to editor.', true);
+                        }
+                    } else {
+                        appendSystemMessage('Nothing to apply.', true);
+                    }
+
+                    // Auto-save to disk via Python bridge
+                    if (applied) {
+                        safeBridgeCall('receive_save_strategy', getEditorValue());
+                    }
+                }
+
+                function rejectPendingCodePreview() {
+                    if (!isEditorReady()) return;
+
+                    safeEditorSetValue(previewBaselineCode || '');
+                    clearPreviewViewZones();
+                    previewDecorations = editor.deltaDecorations(previewDecorations, []);
+                    pendingCodeCandidate = '';
+                    pendingPatchChunks = null;
+                    pendingPatchPreviewResult = null;
+                    updatePendingActionsBar();
+                    appendSystemMessage('Preview cancelled.');
+                }
+
+                function updatePendingActionsBar() {
+                    if (!pendingActionsEl) return;
+
+                    const show = !!(pendingCodeCandidate ||
+                        (pendingPatchChunks && pendingPatchChunks.length && pendingPatchPreviewResult != null));
+
+                    pendingActionsEl.style.display = show ? 'flex' : 'none';
+                }
+
+                // ============= CHAT FUNCTIONS =============
+                function buildGeneratingPlaceholderHtml(phaseText) {
+                    const p = phaseText || 'Sending…';
+                    return `<div class="ai-generating-root">
+                <div id="ai-phase-line" class="thinking">${escapeHtml(p)}</div>
+                <div class="ai-phase-hint">No change = usually API/network wait. Red square = stop.</div>
+            </div>`;
+                }
+
+                function setAiPhaseMessage(text) {
+                    aiEditorDebug('setAiPhaseMessage', {
+                        len: text != null ? String(text).length : 0,
+                        preview: String(text != null ? text : '').slice(0, 120)
+                    });
+
+                    const line = document.getElementById('ai-phase-line');
+                    if (line) {
+                        line.textContent = text != null ? String(text) : '';
+                        return;
+                    }
+
+                    if (currentAiMessageDiv) {
+                        const fb = currentAiMessageDiv.querySelector('.thinking');
+                        if (fb) fb.textContent = text != null ? String(text) : '';
+                    }
+                }
+                function cancelStreamMarkdownFlush() {
+                    if (streamFlushRaf) {
+                        cancelAnimationFrame(streamFlushRaf);
+                        streamFlushRaf = 0;
+                    }
+                }
+
+                function applyStreamMarkdownFlush() {
+                    if (!currentAiMessageDiv) {
+                        aiEditorDebug('applyStreamMarkdownFlush_skip', { reason: 'no_current_div' });
+                        return;
+                    }
+
+                    if (currentAiMarkdown === '') {
+                        aiEditorDebug('applyStreamMarkdownFlush_skip', { reason: 'empty_markdown' });
+                        return;
+                    }
+
+                    try {
+                        currentAiMessageDiv.innerHTML = marked.parse(currentAiMarkdown);
+                    } catch (e) {
+                        console.error('Markdown parse error:', e);
+                        currentAiMessageDiv.textContent = currentAiMarkdown;
+                    }
+
+                    const patchConsumed = tryConsumeLatestPatch(currentAiMarkdown);
+
+                    if (patchConsumed) {
+                        pendingCodeCandidate = '';
+                        applyStreamedCodePreview(pendingPatchPreviewResult);
+                        updatePendingActionsBar();
+                    } else {
+                        const latestCode = extractLatestCodeBlock(currentAiMarkdown);
+                        if (latestCode) {
+                            pendingPatchChunks = null;
+                            pendingPatchPreviewResult = null;
+                            pendingCodeCandidate = latestCode;
+                            applyStreamedCodePreview(latestCode);
+                            updatePendingActionsBar();
+                        }
+                    }
+
+                    markdownFlushCount += 1;
+
+                    if (markdownFlushCount <= 8 || markdownFlushCount % 25 === 0) {
+                        aiEditorDebug('applyStreamMarkdownFlush', {
+                            flushN: markdownFlushCount,
+                            markdownLen: currentAiMarkdown.length,
+                            patchConsumed,
+                            pendingCodeLen: pendingCodeCandidate ? pendingCodeCandidate.length : 0
+                        });
+                    }
+
+                    scrollChatToBottom();
+                }
+
+                function scheduleStreamMarkdownFlush() {
+                    if (streamFlushRaf) return;
+
+                    const now = Date.now();
+                    if (now - lastFlushTime < FLUSH_THROTTLE_MS) {
+                        // Throttle flushes in QtWebEngine to prevent UI freezes
+                        if (!streamFlushRaf) {
+                            streamFlushRaf = requestAnimationFrame(() => {
+                                streamFlushRaf = 0;
+                                lastFlushTime = Date.now();
+                                applyStreamMarkdownFlush();
+                            });
+                        }
+                        return;
+                    }
+
+                    streamFlushRaf = requestAnimationFrame(() => {
+                        streamFlushRaf = 0;
+                        lastFlushTime = Date.now();
+                        applyStreamMarkdownFlush();
+                    });
+                }
+
+                function scrollChatToBottom() {
+                    if (chatHistory) {
+                        chatHistory.scrollTop = chatHistory.scrollHeight;
+                    }
+                }
+
+                function appendSystemMessage(msg, isError) {
+                    addMessageToActiveTab('system', msg, { isError: !!isError });
+                    const color = isError ? 'var(--red)' : '#4CAF50';
+                    const messageHTML = `<div class="message" style="background-color: transparent; border: 1px solid ${color}; color: ${color}; align-self: center; font-size: 11px; padding: 4px 10px; opacity: 0.8;">${escapeHtml(msg)}</div>`;
+                    chatHistory.innerHTML += messageHTML;
+                    scrollChatToBottom();
+                }
+                window.appendSystemMessage = appendSystemMessage;
+
+                function setGeneratingState(generating) {
+                    isGenerating = generating;
+
+                    if (generating) {
+                        actionBtn.classList.add('stop-mode');
+                        iconSend.style.display = 'none';
+                        iconStop.style.display = 'block';
+                    } else {
+                        actionBtn.classList.remove('stop-mode');
+                        iconSend.style.display = 'block';
+                        iconStop.style.display = 'none';
+                    }
+                }
+
+                // ============= BRIDGE COMMUNICATION =============
+                function safeBridgeCall(method, ...args) {
+                    if (!pyBridge || typeof pyBridge[method] !== 'function') {
+                        console.error(`Bridge method "${method}" not available`);
+                        return false;
+                    }
+
+                    try {
+                        pyBridge[method](...args);
+                        return true;
+                    } catch (e) {
+                        console.error(`Bridge call "${method}" failed:`, e);
+                        return false;
+                    }
+                }
+
+                function sendMessage() {
+                    const text = inputEl.value.trim();
+                    if (!text) return;
+
+                    if (!pyBridge) {
+                        appendSystemMessage('Connection not ready. Please wait...', true);
+                        return;
+                    }
+
+                    previewBaselineCode = getEditorValue();
+                    pendingCodeCandidate = '';
+                    pendingPatchChunks = null;
+                    pendingPatchPreviewResult = null;
+                    clearPreviewViewZones();
+
+                    if (isEditorReady()) {
+                        previewDecorations = editor.deltaDecorations(previewDecorations, []);
+                    }
+
+                    updatePendingActionsBar();
+
+                    inputEl.value = '';
+                    inputEl.style.height = '24px';
+                    setGeneratingState(true);
+
+                    addMessageToActiveTab('user', text);
+                    chatHistory.innerHTML += `<div class="message user-message">${escapeHtml(text).replace(/\n/g, '<br>')}</div>`;
+
+                    currentAiMessageDiv = document.createElement('div');
+                    currentAiMessageDiv.className = 'message ai-message';
+                    currentAiMessageDiv.innerHTML = buildGeneratingPlaceholderHtml('Sending…');
+                    chatHistory.appendChild(currentAiMessageDiv);
+
+                    currentAiMarkdown = '';
+                    scrollChatToBottom();
+
+                    const code = getEditorValue();
+                    const payloadObj = chartSelectionContext ? JSON.parse(JSON.stringify(chartSelectionContext)) : {};
+
+                    if (selectedAttachments.length > 0) {
+                        payloadObj.attachments = selectedAttachments;
+                    }
+
+                    // Include chat history from the active tab (last 20 messages)
+                    const activeTab = getActiveTab();
+                    if (activeTab && activeTab.messages.length > 0) {
+                        payloadObj.chatHistory = activeTab.messages.slice(-20);
+                    }
+
+                    const selectionPayload = Object.keys(payloadObj).length > 0 ? JSON.stringify(payloadObj) : '';
+
+                    aiStreamChunkNum = 0;
+                    markdownFlushCount = 0;
+                    lastFlushTime = 0;
+
+                    aiEditorDebug('sendMessage', {
+                        textLen: text.length,
+                        codeLen: code.length,
+                        selectionPayloadLen: selectionPayload.length,
+                        attachmentCount: (payloadObj.attachments && payloadObj.attachments.length) ? payloadObj.attachments.length : 0
+                    });
+
+                    safeBridgeCall('receive_chat_request_ext', text, code, selectionPayload);
+
+                    selectedAttachments = [];
+                    renderAttachments();
+                }
+
+                function stopAI() {
+                    aiEditorDebug('stopAI', {
+                        streamChunks: aiStreamChunkNum,
+                        markdownLen: currentAiMarkdown.length
+                    });
+                    // Immediately replace the placeholder to stop animation
+                    if (currentAiMessageDiv && !currentAiMarkdown) {
+                        currentAiMessageDiv.innerHTML =
+                            '<div style="font-size:11px;color:var(--text3);font-style:normal;padding:4px 0;">'
+                            + '&#10074;&#10074; Stopping…'
+                            + '</div>';
+                    }
+                    safeBridgeCall('receive_stop_ai');
+                }
+
+                // ============= ATTACHMENT FUNCTIONS =============
+                function requestAttachment(kind) {
+                    attachMenu.classList.remove('open');
+                    if (!pyBridge) return;
+
+                    if (kind === 'chart') {
+                        requestChartSelection();
+                        return;
+                    }
+
+                    safeBridgeCall('receive_attachment_request', kind);
+                }
+
+                function requestChartSelection() {
+                    if (safeBridgeCall('receive_chart_selection_request')) {
+                        appendSystemMessage('Selection mode enabled. Drag on chart to capture area context.');
+                    }
+                }
+
+                function renderAttachments() {
+                    const host = document.getElementById('attachments-list');
+                    if (!host) return;
+
+                    if (!selectedAttachments.length) {
+                        host.innerHTML = '';
+                        return;
+                    }
+
+                    host.innerHTML = selectedAttachments.map((a, idx) => {
+                        const label = `${a.kind === 'image' ? '🖼' : '📄'} ${escapeHtml(a.name)}`;
+                        return `<span class="attachment-chip">${label}<button onclick="window._removeAttachment(${idx})" aria-label="Remove attachment">✕</button></span>`;
+                    }).join('');
+                }
+
+                function removeAttachment(idx) {
+                    selectedAttachments.splice(idx, 1);
+                    renderAttachments();
+                }
+
+                // Expose for inline onclick
+                window._removeAttachment = removeAttachment;
+
+                function set_attachment_from_python(payload) {
+                    if (!payload || !payload.path) return;
+                    selectedAttachments.push(payload);
+                    renderAttachments();
+                    appendSystemMessage(`Attached: ${escapeHtml(payload.name)}`);
+                }
+
+                // ============= PUBLIC API (called from Python) =============
+                
+                // (4.6) Enable/disable vision-dependent UI
+                window.setVisionCapability = function(enabled) {
+                    canUseVision = !!enabled;
+                    if (attachBtn) {
+                        if (canUseVision) {
+                            attachBtn.disabled = false;
+                            attachBtn.title = 'Attach image or document';
+                            document.getElementById('attach-item-image').style.display = 'block';
+                        } else {
+                            attachBtn.disabled = false; // still allow docs, just block image
+                            document.getElementById('attach-item-image').style.display = 'none';
+                            // Remove any image attachments already selected
+                            selectedAttachments = selectedAttachments.filter(a => a.kind !== 'image');
+                            renderAttachments();
+                        }
+                    }
+                };
+                
+                window.setAiPhaseMessage = setAiPhaseMessage;
+
+                window.stream_ai_chunk = function (chunk) {
+                    if (!currentAiMessageDiv) {
+                        aiEditorDebug('stream_ai_chunk_skip', {
+                            reason: 'no_current_div',
+                            chunkLen: (chunk || '').length
+                        });
+                        return;
+                    }
+
+                    aiStreamChunkNum += 1;
+                    currentAiMarkdown += chunk;
+
+                    if (aiStreamChunkNum <= 10 || aiStreamChunkNum % 40 === 0) {
+                        aiEditorDebug('stream_ai_chunk', {
+                            n: aiStreamChunkNum,
+                            chunkLen: (chunk || '').length,
+                            cumulativeLen: currentAiMarkdown.length
+                        });
+                    }
+
+                    scheduleStreamMarkdownFlush();
+                };
+
+                window.finish_ai_message = function (finalText) {
+                    aiEditorDebug('finish_ai_message_begin', {
+                        streamChunks: aiStreamChunkNum,
+                        markdownLen: currentAiMarkdown.length,
+                        finalArgLen: finalText != null ? String(finalText).length : 0,
+                        filledFromFinal: !!(finalText && !currentAiMarkdown)
+                    });
+
+                    if (finalText && !currentAiMarkdown && finalText !== '__stopped__') {
+                        currentAiMarkdown = String(finalText);
+                    }
+
+                    var hadContent = !!currentAiMarkdown;
+
+                    // Save the final AI response to the active tab before clearing
+                    if (hadContent) {
+                        addMessageToActiveTab('assistant', currentAiMarkdown);
+                    }
+
+                    cancelStreamMarkdownFlush();
+
+                    if (hadContent) {
+                        applyStreamMarkdownFlush();
+                    }
+
+                    // FIND and update the placeholder if no content arrived (error/stop before first chunk)
+                    if (!hadContent) {
+                        var placeholderEl = chatHistory.querySelector('.ai-generating-root');
+                        if (placeholderEl) {
+                            var msgEl = placeholderEl.closest('.ai-message');
+                            if (msgEl) {
+                                if (finalText === '__stopped__') {
+                                    msgEl.innerHTML = '<div style="font-size:11px;color:var(--text3);font-style:normal;padding:4px 0;">⏸ Stopped</div>';
+                                } else if (finalText && String(finalText).indexOf('__error__:') === 0) {
+                                    // Extract error text directly from the parameter
+                                    var errText = String(finalText).slice(9); // remove '__error__:' prefix
+                                    msgEl.innerHTML = '<div style="font-size:12px;color:var(--red);font-style:normal;padding:4px 0;">&#10060; ' + escapeHtml('Error: ' + errText) + '</div>';
+                                } else {
+                                    // Empty or falsy finalText (no content arrived from API) — show warning
+                                    msgEl.innerHTML = '<div style="font-size:12px;color:var(--text2);font-style:normal;padding:8px 0;text-align:center;">'
+                                        + '⚠️ AI повернуло порожню відповідь.<br>'
+                                        + '<span style="font-size:11px;color:var(--text3);">Спробуйте переформулювати запит або перевірте консоль (F12 → Console) для деталей.</span>'
+                                        + '</div>';
+                                    aiEditorDebug('finish_ai_message_empty_response', {
+                                        finalArgLen: finalText != null ? String(finalText).length : 0,
+                                        streamChunks: aiStreamChunkNum
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    currentAiMessageDiv = null;
+                    currentAiMarkdown = '';
+                    aiStreamChunkNum = 0;
+
+                    setGeneratingState(false);
+                    updatePendingActionsBar();
+
+                    aiEditorDebug('finish_ai_message_done', {});
+                    inputEl.focus();
+                };
+
+                window.on_ai_error = function (msg) {
+                    aiEditorDebug('on_ai_error', {
+                        msgLen: (msg != null ? String(msg).length : 0),
+                        preview: String(msg || '').slice(0, 200)
+                    });
+                    addMessageToActiveTab('system', 'Error: ' + msg, { isError: true });
+                    appendSystemMessage('Error: ' + msg, true);
+                    window.finish_ai_message('__error__:' + (msg || ''));
+                };
+
+                window.set_editor_value = function (text) {
+                    if (!isEditorReady()) return;
+                    _suppressEditorDirty = true;
+                    try {
+                        if (safeEditorSetValue(text)) {
+                            previewBaselineCode = getEditorValue();
+                            pendingCodeCandidate = '';
+                            pendingPatchChunks = null;
+                            pendingPatchPreviewResult = null;
+                            clearPreviewViewZones();
+                            previewDecorations = editor.deltaDecorations(previewDecorations, []);
+                            updatePendingActionsBar();
+                        }
+                    } finally {
+                        setTimeout(function () { _suppressEditorDirty = false; }, 0);
+                    }
+                };
+
+                function notifyEditorDirty() {
+                    if (_suppressEditorDirty) return;
+                    if (pyBridge && typeof pyBridge.receive_editor_dirty === 'function') {
+                        pyBridge.receive_editor_dirty();
+                    }
+                }
+
+                window.set_strategy_header_title = function (title) {
+                    var el = document.getElementById('editor-header-title');
+                    if (!el) {
+                        // DOM not ready yet — retry once after microtask
+                        var t = title;
+                        setTimeout(function () {
+                            var el2 = document.getElementById('editor-header-title');
+                            if (el2) el2.textContent = (t && String(t).trim()) ? String(t).trim() : 'New strategy';
+                        }, 0);
+                        return;
+                    }
+                    el.textContent = (title && String(title).trim()) ? String(title).trim() : 'New strategy';
+                };
+
+                window.set_chat_input_text = function (text) {
+                    inputEl.value = text || '';
+                    inputEl.dispatchEvent(new Event('input'));
+                    inputEl.focus();
+                };
+
+                window.set_chart_selection_context = function (payload) {
+                    chartSelectionContext = payload;
+                    appendSystemMessage('Chart area captured and attached to AI context.');
+                };
+
+                // Mirror-only: render to DOM without saving (sync is handled by chat_tabs_state)
+                window.appendUserMessage = function (text) {
+                    const escaped = (text || '').replace(/\n/g, '<br>');
+                    chatHistory.innerHTML += `<div class="message user-message">${escaped}</div>`;
+                    scrollChatToBottom();
+                };
+
+                window.appendAiMessage = function (fullText) {
+                    if (!fullText) return;
+                    const html = marked.parse(fullText);
+                    chatHistory.innerHTML += `<div class="message ai-message">${html}</div>`;
+                    scrollChatToBottom();
+                };
+
+                window.clear_chart_selection_context = function () {
+                    chartSelectionContext = null;
+                    appendSystemMessage('Chart area context cleared.');
+                };
+
+                window.toggleChatPanel = function () {
+                    if (_panelCollapsed === 'chat' || !chatContainer.style.display || chatContainer.style.display === 'none') {
+                        // Chat is hidden — restore it
+                        _panelCollapsed = null;
+                        chatContainer.style.display = 'flex';
+                        chatContainer.style.width = ''; // reset to flex sizing
+                        const total = window.innerWidth;
+                        const restoreW = Math.min(CHAT_MIN + SNAP_THRESHOLD * 2, Math.floor(total * 0.35));
+                        leftPanel.style.width = Math.max(EDITOR_MIN, total - restoreW) + 'px';
+                    } else {
+                        // Chat is visible — collapse it
+                        _panelCollapsed = 'chat';
+                        chatContainer.style.display = 'none';
+                        leftPanel.style.width = '100%';
+                    }
+                    if (editor) setTimeout(() => editor.layout(), 50);
+                };
+
+                window.restoreEditorPanel = function () {
+                    // Restore editor panel from collapsed state
+                    if (_panelCollapsed === 'editor') {
+                        _panelCollapsed = null;
+                        leftPanel.style.display = 'flex';
+                        const total = window.innerWidth;
+                        const restoreW = Math.min(EDITOR_MIN + SNAP_THRESHOLD * 2, Math.floor(total * 0.65));
+                        leftPanel.style.width = restoreW + 'px';
+                        chatContainer.style.width = ''; // reset to flex sizing
+                        if (editor) setTimeout(() => editor.layout(), 50);
+                    }
+                };
+
+                window.set_chat_only_mode = function (enabled) {
+                    const editorContainer = document.getElementById('editor-container');
+                    const resizerEl = document.getElementById('resizer');
+                    const chatContainerEl = document.getElementById('chat-container');
+                    const topBar = document.getElementById('top-bar');
+
+                    if (enabled) {
+                        editorContainer.style.display = 'none';
+                        resizerEl.style.display = 'none';
+                        chatContainerEl.style.width = '100%';
+                        if (topBar) topBar.style.display = 'none';
+                    } else {
+                        editorContainer.style.display = 'flex';
+                        resizerEl.style.display = 'block';
+                        chatContainerEl.style.width = 'auto';
+                        if (topBar) topBar.style.display = 'flex';
+                    }
+
+                    if (editor) {
+                        setTimeout(() => editor.layout(), 100);
+                    }
+                };
+
+                window.append_ai_error_ask = function (traceback) {
+                    addMessageToActiveTab('user', 'Fix this error:\n' + traceback);
+                    const escapedTraceback = escapeHtml(traceback);
+                    chatHistory.innerHTML += `<div class="message user-message">Fix this error:<br><pre style="background:var(--bg);padding:8px;border-radius:4px;overflow-x:auto;">${escapedTraceback}</pre></div>`;
+
+                    currentAiMessageDiv = document.createElement('div');
+                    currentAiMessageDiv.className = 'message ai-message';
+                    currentAiMessageDiv.innerHTML = buildGeneratingPlaceholderHtml('Auto-fix…');
+                    chatHistory.appendChild(currentAiMessageDiv);
+
+                    currentAiMarkdown = '';
+                    scrollChatToBottom();
+                    setGeneratingState(true);
+
+                    previewBaselineCode = getEditorValue();
+                    pendingCodeCandidate = '';
+                    pendingPatchChunks = null;
+                    pendingPatchPreviewResult = null;
+                    updatePendingActionsBar();
+                };
+
+                window.saveStrategy = function () {
+                    if (safeBridgeCall('receive_save_strategy', getEditorValue())) {
+                        appendSystemMessage('Strategy saved.');
+                    }
+                };
+
+                window.applyCodeToEditor = function (btn) {
+                    const rawCodeEl = btn.parentElement.nextElementSibling.querySelector('.raw-code');
+                    if (rawCodeEl && isEditorReady()) {
+                        let code = rawCodeEl.value;
+                        const txt = document.createElement('textarea');
+                        txt.innerHTML = code;
+                        code = txt.value;
+
+                        previewBaselineCode = getEditorValue();
+
+                        if (safeEditorSetValue(code)) {
+                            pendingCodeCandidate = '';
+                            pendingPatchChunks = null;
+                            pendingPatchPreviewResult = null;
+                            clearPreviewViewZones();
+                            previewDecorations = editor.deltaDecorations(previewDecorations, []);
+                            appendSystemMessage('Code pasted into editor.');
+                            updatePendingActionsBar();
+                        }
+                    }
+                };
+
+                // ============= INITIALIZATION =============
+                function initEditor() {
+                    try {
+                        editor = monaco.editor.create(monacoEditEl, {
+                            value: [
+                                'from engine.strategy.context import Strategy',
+                                '',
+                                'class AIStrategy(Strategy):',
+                                '    name = "AI Strategy"',
+                                '    ',
+                                '    def on_candle(self, ctx):',
+                                '        pass'
+                            ].join('\n'),
+                            language: 'python',
+                            theme: 'vs-dark',
+                            automaticLayout: true,
+                            minimap: { enabled: true },
+                            fontSize: 13,
+                            fontFamily: "'Roboto Mono', Consolas, monospace",
+                            scrollBeyondLastLine: false,
+                            padding: { top: 15 },
+                            // QtWebEngine optimizations
+                            renderWhitespace: 'none',
+                            renderControlCharacters: false,
+                            renderIndentGuides: false,
+                            'semanticHighlighting.enabled': true,
+                            smoothScrolling: false,
+                            cursorBlinking: 'solid',
+                            cursorSmoothCaretAnimation: false
+                        });
+
+                        editor.onDidChangeModelContent(function () {
+                            notifyEditorDirty();
+                        });
+
+                        // Force initial layout for QtWebEngine
+                        setTimeout(() => {
+                            if (editor) {
+                                editor.layout();
+                                editor.revealLine(1);
+                            }
+                        }, 50);
+
+                        // Additional resize observer for reliability
+                        if (window.ResizeObserver) {
+                            const ro = new ResizeObserver(() => {
+                                if (editor) editor.layout();
+                            });
+                            ro.observe(monacoEditEl);
+                        }
+
+                        console.log('Monaco Editor initialized successfully');
+                        return true;
+                    } catch (e) {
+                        console.error('Failed to initialize Monaco Editor:', e);
+                        return false;
+                    }
+                }
+
+                function initBridge() {
+                    if (typeof QWebChannel === 'undefined') {
+                        console.warn('QWebChannel not loaded, retrying...');
+                        setTimeout(initBridge, 200);
+                        return;
+                    }
+
+                    try {
+                        new QWebChannel(qt.webChannelTransport, function (channel) {
+                            pyBridge = channel.objects.bridge;
+                            bridgeReady = true;
+
+                            if (isEditorReady()) {
+                                pyBridge.editor_ready();
+                                aiEditorDebug('webchannel_ready', { editorReady: true });
+                            } else {
+                                aiEditorDebug('webchannel_ready', { editorReady: false });
+                                // Editor might still be loading, Python side should handle this
+                                setTimeout(() => {
+                                    if (isEditorReady()) {
+                                        pyBridge.editor_ready();
+                                    }
+                                }, 300);
+                            }
+                        });
+                    } catch (e) {
+                        console.error('QWebChannel initialization failed:', e);
+                        setTimeout(initBridge, 500);
+                    }
+                }
+
+                function handleAction() {
+                    if (isGenerating) {
+                        stopAI();
+                    } else {
+                        sendMessage();
+                    }
+                }
+
+                function setupEventListeners() {
+                    // Action button
+                    actionBtn.addEventListener('mousedown', function (ev) {
+                        if (isGenerating) {
+                            ev.stopPropagation();
+                            stopAI();
+                        }
+                    }, true);
+
+                    actionBtn.addEventListener('click', function (e) {
+                        e.preventDefault();
+                        handleAction();
+                    });
+
+                    // Input handling
+                    inputEl.addEventListener('input', function () {
+                        this.style.height = '24px';
+                        this.style.height = (this.scrollHeight) + 'px';
+                    });
+
+                    inputEl.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleAction();
+                        }
+                    });
+
+                    // Attach menu
+                    attachBtn.addEventListener('click', function (e) {
+                        e.stopPropagation();
+                        attachMenu.classList.toggle('open');
+                    });
+
+                    window.addEventListener('click', function () {
+                        attachMenu.classList.remove('open');
+                    });
+
+                    // Chat tabs — add button
+                    document.getElementById('chat-tab-add').addEventListener('click', function () {
+                        createChatTab();
+                    });
+
+                    // Pending actions
+                    document.getElementById('pending-apply-btn').addEventListener('click', applyPendingChanges);
+                    document.getElementById('pending-reject-btn').addEventListener('click', rejectPendingCodePreview);
+
+                    // Attach menu items
+                    document.getElementById('attach-item-image').addEventListener('click', function () { requestAttachment('image'); });
+                    document.getElementById('attach-item-doc').addEventListener('click', function () { requestAttachment('document'); });
+                    document.getElementById('attach-item-chart').addEventListener('click', function () { requestAttachment('chart'); });
+
+                    // Resizer — collapsible editor/chat panels (like Chart tab QSplitter)
+                    let isResizing = false;
+
+                    resizer.addEventListener('mousedown', () => {
+                        isResizing = true;
+                        resizer.classList.add('active');
+                        document.body.style.cursor = 'col-resize';
+                        // Panel stays collapsed on mousedown — only restores on mousemove past threshold
+                    });
+
+                    window.addEventListener('mousemove', (e) => {
+                        if (!isResizing) return;
+                        const total = window.innerWidth;
+                        const edW = e.clientX;
+                        const chatW = total - edW;
+
+                        if (_panelCollapsed === 'chat') {
+                            // Chat is hidden; restore only when dragged far enough (intended chat > CHAT_MIN + SNAP_THRESHOLD)
+                            if (chatW > CHAT_MIN + SNAP_THRESHOLD) {
+                                _panelCollapsed = null;
+                                chatContainer.style.display = 'flex';
+                                leftPanel.style.width = Math.max(EDITOR_MIN, total - chatW) + 'px';
+                            }
+                        } else if (_panelCollapsed === 'editor') {
+                            // Editor is hidden; restore only when dragged far enough
+                            if (edW > EDITOR_MIN + SNAP_THRESHOLD) {
+                                _panelCollapsed = null;
+                                leftPanel.style.display = 'flex';
+                                chatContainer.style.width = ''; // reset to flex sizing
+                                leftPanel.style.width = Math.max(EDITOR_MIN, Math.min(total - CHAT_MIN, edW)) + 'px';
+                            }
+                        } else {
+                            // Normal resize — stick at minimum boundary before collapsing
+                            if (chatW < CHAT_MIN) {
+                                // Keep chat at minimum width, don't collapse immediately
+                                let overscroll = CHAT_MIN - chatW;
+                                if (overscroll > SNAP_THRESHOLD) {
+                                    // Dragged far enough past minimum → collapse
+                                    _panelCollapsed = 'chat';
+                                    chatContainer.style.display = 'none';
+                                    leftPanel.style.width = '100%';
+                                } else {
+                                    // Stick at minimum width (like hitting a wall)
+                                    leftPanel.style.width = (total - CHAT_MIN) + 'px';
+                                }
+                            } else if (edW < EDITOR_MIN) {
+                                // Keep editor at minimum width, don't collapse immediately
+                                let overscroll = EDITOR_MIN - edW;
+                                if (overscroll > SNAP_THRESHOLD) {
+                                    // Dragged far enough past minimum → collapse
+                                    _panelCollapsed = 'editor';
+                                    leftPanel.style.display = 'none';
+                                    chatContainer.style.width = '100%';
+                                } else {
+                                    // Stick at minimum width
+                                    leftPanel.style.width = EDITOR_MIN + 'px';
+                                }
+                            } else {
+                                // Normal resize within bounds
+                                leftPanel.style.width = Math.max(EDITOR_MIN, Math.min(total - CHAT_MIN, edW)) + 'px';
+                            }
+                        }
+                        if (editor) editor.layout();
+                    });
+
+                    window.addEventListener('mouseup', () => {
+                        if (isResizing) {
+                            isResizing = false;
+                            resizer.classList.remove('active');
+                            document.body.style.cursor = 'default';
+                            if (editor) editor.layout();
+                        }
+                    });
+
+                    // Global error handling
+                    window.addEventListener('error', function (e) {
+                        console.error('JS Error:', e.message, e.filename, e.lineno, e.error);
+                    });
+                }
+
+                // ============= MARKED CONFIGURATION =============
+                function configureMarked() {
+                    marked.setOptions({
+                        highlight: function (code, lang) {
+                            if (lang && hljs.getLanguage(lang)) {
+                                try {
+                                    return hljs.highlight(code, { language: lang }).value;
+                                } catch (e) { }
+                            }
+                            try {
+                                return hljs.highlightAuto(code).value;
+                            } catch (e) { }
+                            return escapeHtml(code);
+                        },
+                        breaks: true,
+                        gfm: true
+                    });
+
+                    const renderer = new marked.Renderer();
+                    renderer.code = function (code, lang) {
+                        const validLang = !!(lang && hljs.getLanguage(lang));
+                        let highlighted;
+
+                        try {
+                            highlighted = validLang
+                                ? hljs.highlight(code, { language: lang }).value
+                                : hljs.highlightAuto(code).value;
+                        } catch (e) {
+                            highlighted = escapeHtml(code);
+                        }
+
+                        const escapedCode = code
+                            .replace(/&/g, '&amp;')
+                            .replace(/</g, '&lt;')
+                            .replace(/>/g, '&gt;')
+                            .replace(/"/g, '&quot;')
+                            .replace(/'/g, '&#39;');
+
+                        return `
+                    <div class="code-header">
+                        <span>${escapeHtml(lang || 'python')}</span>
+                        <button class="btn apply-btn" onclick="applyCodeToEditor(this)">
+                            <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                            </svg>
+                            Apply to Editor
+                        </button>
+                    </div>
+                    <pre><code class="hljs ${escapeHtml(lang)}">${highlighted}</code><textarea style="display:none;" class="raw-code">${escapedCode}</textarea></pre>
+                `;
+                    };
+
+                    marked.use({ renderer });
+                }
+
+                // ============= MAIN INITIALIZATION =============
+                function bootstrap() {
+                    configureMarked();
+
+                    // Initialize chat tabs (loads from localStorage or creates default)
+                    initChatTabs();
+
+                    require(['vs/editor/editor.main'], function () {
+                        const editorInitialized = initEditor();
+
+                        if (editorInitialized) {
+                            setupEventListeners();
+                            initBridge();
+                        } else {
+                            document.getElementById('monaco-edit').innerHTML =
+                                '<div style="color:var(--red);padding:20px;">Failed to initialize editor. Please restart the application.</div>';
+                        }
+                    });
+                }
+
+                // Start when DOM is ready
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', bootstrap);
+                } else {
+                    bootstrap();
+                }
+
+            })();
+        </script>
+</body>
+
+</html>

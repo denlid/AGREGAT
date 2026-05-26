@@ -1,0 +1,28 @@
+{
+  "strategy": {
+    "name": "SmaCrossover",
+    "ltf": "1m",
+    "dsl_version": "1"
+  },
+  "indicators": [
+    {"id": "fast", "type": "sma", "period": 9},
+    {"id": "slow", "type": "sma", "period": 21}
+  ],
+  "filters": [
+    {"id": "bull", "type": "cross_above", "lhs": "fast", "rhs": "slow"},
+    {"id": "bear", "type": "cross_below", "lhs": "fast", "rhs": "slow"}
+  ],
+  "entries": [
+    {"when": "bull", "do": "buy_at_next_open"},
+    {"when": "bear", "do": "sell_at_next_open"}
+  ],
+  "exits": [
+    {"type": "fixed_pts_sl", "pts": 5},
+    {"type": "fixed_rr_tp", "rr": 2}
+  ],
+  "risk": {
+    "risk_pct": 1.0,
+    "lot_cap": {"per_100k": 12},
+    "max_open": 1
+  }
+}
