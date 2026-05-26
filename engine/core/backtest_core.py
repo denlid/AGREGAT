@@ -234,6 +234,7 @@ class BacktestCore:
         self._registered_layers: set[str] = set()
         self._next_trade_id = 0
         self._suppress_signals = False
+        self._suppress_drawings = False
 
         # Incremental stats accumulators
         self._stats_wins = 0
@@ -772,7 +773,7 @@ class BacktestCore:
         target = min(self.current_idx + n, self.total_bars - 1)
         initial_idx = self.current_idx
         if n > 100:
-            logger.info(
+            logger.debug(
                 f"⚡ Processing {n} candles in bulk (from #{initial_idx + 1} to #{target + 1})..."
             )
 
@@ -792,7 +793,7 @@ class BacktestCore:
 
         processed = self.current_idx - initial_idx
         if processed > 100:
-            logger.info(
+            logger.debug(
                 f"✅ Bulk done: {processed} candles | Trades: {len(self.trades)} | "
                 f"Equity: ${self.equity:,.2f}"
             )
@@ -1332,7 +1333,7 @@ class BacktestCore:
         if "t2" in kwargs:
             kwargs["_t2_np"] = pd.to_datetime(kwargs["t2"]).to_datetime64()
         self.drawings.append(kwargs)
-        if not self._suppress_signals:
+        if not self._suppress_drawings and not self._suppress_signals:
             self._fire(self.on_drawing_changed, self._next_drawing_id)
         return self._next_drawing_id
 
@@ -1431,6 +1432,95 @@ class BacktestCore:
             self.max_drawdown_pct,
         )
         return result
+
+    # ------------------------------------------------------------------
+    # Headless Visual execution mode (on_candle without Qt)
+    # ------------------------------------------------------------------
+    def run_visual_headless(self, cancel_token=None) -> Optional[VectorizedResult]:
+        """Execute the loaded strategy via on_candle without any Qt signals.
+
+        Runs the strategy on all candles in a single pass, suppressing all
+        Qt notifications (no chart updates, no drawing signals, no trade
+        completed signals). Drawings ARE collected in self.drawings but
+        their Qt signals are suppressed. The result is returned as a
+        VectorizedResult, compatible with all GUI tabs.
+
+        Safe to call from a background thread (ComputeWorker).
+        
+        Args:
+            cancel_token: Optional threading.Event for cooperative cancellation.
+                The worker checks ``cancel_token.is_set()`` at the start of
+                each candle and returns early if set.
+        """
+        if self.df is None or self.strategy is None:
+            logger.warning("run_visual_headless: data or strategy not loaded")
+            return None
+
+        # Встановлюємо пригнічення ДО reset(), щоб reset() не викликав
+        # Qt сигнали (update_stats, on_step_completed) з фонового потоку.
+        # Інакше графік очищується і залишається пустим після Cancel/завершення.
+        self._suppress_signals = True
+        self._suppress_drawings = True
+        self.reset()
+
+        for i in range(self.total_bars):
+            # Cooperative cancellation check
+            if cancel_token is not None and cancel_token.is_set():
+                logger.info("⚠️ Headless visual run cancelled by user")
+                break
+            ok = self._process_one_candle(i)
+            if not ok:
+                break
+
+        # DO NOT restore flags here — they will be restored by the caller
+        # on the main thread. Also do NOT emit any Qt signals from this
+        # background thread (no _fire, no update_stats).
+
+        # Materialise result in VectorizedResult format
+        trades = list(self.trades)
+        equity_curve = np.array(self.equity_track, dtype=np.float64)
+
+        # Replay through centralised DrawdownTracker (same as run_vectorized)
+        self.drawdown.reset(self.initial_equity)
+        for eq in self.equity_track:
+            self.drawdown.update(float(eq))
+        self.max_equity = self.drawdown.peak_equity
+        self.max_drawdown_pct = self.drawdown.max_drawdown_pct
+        self.max_drawdown_abs = self.drawdown.max_drawdown_abs
+        # Only snap to end when the run finished naturally — on cancel,
+        # current_idx is already at the bar where we stopped, so the user
+        # can continue stepping forward manually.
+        if cancel_token is None or not cancel_token.is_set():
+            self.current_idx = max(0, self.total_bars - 1)
+
+        # Repopulate StatsAccumulator (same as run_vectorized)
+        self.stats.reset()
+        for t in self.trades:
+            self.stats.update(t)
+        self._stats_wins = self.stats.wins
+        self._stats_losses = self.stats.losses
+        self._stats_gross_profit = self.stats.gross_profit
+        self._stats_gross_loss = self.stats.gross_loss
+        self._stats_longs = self.stats.longs
+        self._stats_shorts = self.stats.shorts
+        self._stats_dirty = True
+
+        summary = {
+            "n_trades": len(trades),
+            "final_equity": float(self.equity),
+            "total_return_pct": ((self.equity - self.initial_equity) / self.initial_equity * 100.0) if self.initial_equity else 0.0,
+            "peak_drawdown_pct": self.drawdown.max_drawdown_pct,
+            "peak_drawdown_abs": self.drawdown.max_drawdown_abs,
+        }
+
+        return VectorizedResult(
+            trades=trades,
+            equity_curve=equity_curve,
+            peak_drawdown_pct=self.drawdown.max_drawdown_pct,
+            peak_drawdown_abs=self.drawdown.max_drawdown_abs,
+            summary=summary,
+            skipped_trades=list(self.skipped_trades),
+        )
 
     # ------------------------------------------------------------------
     # Stats

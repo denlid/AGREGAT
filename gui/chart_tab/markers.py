@@ -65,6 +65,7 @@ def build_trade_marker_arrays(
         return out
 
     t0 = rt[0]
+    tn = rt[-1]  # end of visible render window
 
     # ------------------------------------------------------------------
     # Vectorised trade processing
@@ -95,9 +96,12 @@ def build_trade_marker_arrays(
             exit_idx[i] = tr.exit_index
             directions.append(tr.direction)
 
-        # Filter: only trades within bounds and visible time range
+        # Filter: only trades within bounds and visible time range.
+        # Reject trades whose *entry* is entirely after the visible render
+        # window — they would map to the last visible candle and create a
+        # visual "bunching" effect after a headless run + Jump.
         valid = (entry_idx < df_len) & (exit_idx < df_len)
-        visible = valid & ~((entry_times < t0) & (exit_times < t0))
+        visible = valid & ~((entry_times < t0) & (exit_times < t0)) & (entry_times <= tn)
 
         if visible.any():
             # Batch searchsorted — single NumPy call for all trades

@@ -31,9 +31,10 @@ from engine.strategy.context import Strategy as _BaseStrategy, Param
 from engine.core.indicators import *  # noqa: F401, F403 — re-export all indicators
 
 # ---------------------------------------------------------------------------
-# Internal: current engine ctx per-candle (set by wrapper, read by context obj)
+# Internal: current engine ctx and active compiled strategy instance
 # ---------------------------------------------------------------------------
 _current_ctx: Any = None
+_current_strategy_instance: Any = None
 
 
 def _set_ctx(ctx: Any) -> None:
@@ -73,9 +74,14 @@ class _Context:
         c.high_htf       float — last HTF high
         c.low_htf        float — last HTF low
         c.open_htf       float — last HTF open
+        c.volume_htf     float — last HTF volume
+        c.time_htf       datetime — last HTF timestamp
         c.close_htf_arr  np.ndarray — all HTF closes
         c.high_htf_arr   np.ndarray — all HTF highs
         c.low_htf_arr    np.ndarray — all HTF lows
+        c.open_htf_arr   np.ndarray — all HTF opens
+        c.volume_htf_arr np.ndarray — all HTF volumes
+        c.time_htf_arr   np.ndarray — all HTF timestamps
     
     State:
         c.position       Position or None
@@ -177,6 +183,20 @@ class _Context:
         return float(v.open[-1])
 
     @property
+    def volume_htf(self) -> float:
+        v = self._htf_view()
+        if v is None or len(v) == 0:
+            return 0.0
+        return float(v.volume[-1])
+
+    @property
+    def time_htf(self) -> Any:
+        v = self._htf_view()
+        if v is None or len(v) == 0:
+            return None
+        return v.time[-1]
+
+    @property
     def close_htf_arr(self) -> np.ndarray:
         v = self._htf_view()
         if v is None:
@@ -196,6 +216,27 @@ class _Context:
         if v is None:
             return np.array([], dtype=np.float64)
         return v.low
+
+    @property
+    def open_htf_arr(self) -> np.ndarray:
+        v = self._htf_view()
+        if v is None:
+            return np.array([], dtype=np.float64)
+        return v.open
+
+    @property
+    def volume_htf_arr(self) -> np.ndarray:
+        v = self._htf_view()
+        if v is None:
+            return np.array([], dtype=np.float64)
+        return v.volume
+
+    @property
+    def time_htf_arr(self) -> np.ndarray:
+        v = self._htf_view()
+        if v is None:
+            return np.array([], dtype="datetime64[ns]")
+        return v.time
 
     # ── State ──
     @property
@@ -299,7 +340,6 @@ class Strategy:
                     "choices": pvalue.choices,
                     "tooltip": pvalue.tooltip,
                 }
-                setattr(self, pname, pvalue.default)
             else:
                 kind = type(pvalue).__name__
                 if kind == "int":
@@ -320,7 +360,62 @@ class Strategy:
                     "choices": None,
                     "tooltip": "",
                 }
-                setattr(self, pname, pvalue)
+
+    def _save_initial_state(self) -> None:
+        """Capture the initial state of the declarative strategy after loading."""
+        self._initial_keys = set(self.__dict__.keys())
+        self._initial_values = {}
+        for k in self._initial_keys:
+            if k.startswith('_'):
+                continue
+            v = getattr(self, k)
+            if isinstance(v, (int, float, bool, str, type(None))):
+                self._initial_values[k] = v
+            elif isinstance(v, list):
+                self._initial_values[k] = list(v)
+            elif isinstance(v, dict):
+                self._initial_values[k] = dict(v)
+            elif isinstance(v, set):
+                self._initial_values[k] = set(v)
+            else:
+                self._initial_values[k] = v
+
+    def reset(self) -> None:
+        """Reset the declarative strategy by deleting all custom runtime variables
+        and restoring simple variables to their initial state."""
+        if not hasattr(self, '_initial_keys'):
+            return
+        # Delete any custom attributes added dynamically during the backtest
+        for key in list(self.__dict__.keys()):
+            if key.startswith('_'):
+                continue
+            if key not in self._initial_keys:
+                try:
+                    delattr(self, key)
+                except AttributeError:
+                    pass
+        # Restore initial values
+        for key, val in self._initial_values.items():
+            if isinstance(val, list):
+                setattr(self, key, list(val))
+            elif isinstance(val, dict):
+                setattr(self, key, dict(val))
+            elif isinstance(val, set):
+                setattr(self, key, set(val))
+            else:
+                setattr(self, key, val)
+
+    def __getattr__(self, name: str) -> Any:
+        # Route parameter access to current running compiled strategy instance if active
+        if name in self._params_def:
+            from engine.api import _current_strategy_instance
+            if _current_strategy_instance is not None:
+                return _current_strategy_instance.params.get(name, self._params_def[name]["default"])
+            return self._params_def[name]["default"]
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
+    def __dir__(self) -> list[str]:
+        return sorted(super().__dir__() + list(self._params_def.keys()))
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -511,6 +606,8 @@ class Strategy:
     def _build_class(self) -> type:
         """Convert this declarative object into a ``engine.strategy.context.Strategy``
         subclass that the engine can load and run."""
+        self._save_initial_state()
+        declarative_self = self
         params: list[Param] = []
         for pname, pdef in self._params_def.items():
             params.append(Param(
@@ -528,8 +625,13 @@ class Strategy:
         callbacks = dict(self._callbacks)
 
         class _CompiledStrategy(_BaseStrategy):
-            name = self._name
+            name = declarative_self._name
             PARAMS = params
+            _declarative = declarative_self
+
+            def __init__(self) -> None:
+                super().__init__()
+                declarative_self.reset()
 
             def on_candle(self, ctx: Any) -> None:
                 if ctx.position:
@@ -537,10 +639,13 @@ class Strategy:
                 cb = callbacks.get("on_candle")
                 if cb is not None:
                     _set_ctx(ctx)
+                    global _current_strategy_instance
+                    _current_strategy_instance = self
                     try:
                         c = _Context(ctx)
                         cb(c)
                     finally:
+                        _current_strategy_instance = None
                         _clear_ctx()
 
         # Dynamically add HTF hooks
@@ -553,10 +658,13 @@ class Strategy:
                 def make_htf_method(t: str, fn: Callable) -> Callable:
                     def htf_method(self: Any, ctx: Any) -> None:
                         _set_ctx(ctx)
+                        global _current_strategy_instance
+                        _current_strategy_instance = self
                         try:
                             c = _Context(ctx, htf_tf=t)
                             fn(c)
                         finally:
+                            _current_strategy_instance = None
                             _clear_ctx()
                     return htf_method
 

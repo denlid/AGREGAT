@@ -148,10 +148,9 @@ class BarReplayControls(QWidget):
             return
         logger.info(f"⏭ Jumping to #{ti} ({dt.date()})...")
 
-        # Teleport: reset engine state and jump directly to bar `ti`
-        # without replaying every bar through strategy logic.
-        # TF aggregator is prebuilt — advance_to() is O(1) per TF.
-        self.engine.reset()
+        # Jump directly to bar `ti` without resetting accumulated data
+        # (trades, drawings, equity). TF aggregator is prebuilt —
+        # advance_to() is O(1) per TF.
         self.engine.current_idx = ti
         self.engine.tf_aggregator.advance_to(ti)
 
@@ -170,90 +169,126 @@ class BarReplayControls(QWidget):
             return
         self.stop_playback()
 
-        # Phase 2 — give the user a Visual / Quant choice when the strategy
-        # supports the vectorised API. Strategies without
-        # ``vectorized_signals(df)`` skip the dialog and run Visual as before
-        # so legacy workflows are unaffected.
-        from engine.strategy.context import has_vectorized_signals
+        # ─── Headless Visual — завжди, без діалогу ───
+        self._run_headless_visual()
 
-        if has_vectorized_signals(self.engine.strategy):
-            from gui.dialogs.run_mode_dialog import RunModeDialog
-
-            mode = RunModeDialog.pick(self.parent(), has_vectorized=True)
-            if mode is None:
-                logger.info("Run cancelled by user")
-                return
-            if mode == "quant":
-                self._run_quant()
-                return
+    def _run_headless_visual(self) -> None:
+        """Запустити on_candle стратегію в фоновому потоці без Qt сигналів.
+        
+        Використовує engine.run_visual_headless() через ComputeWorker.
+        Малюнки збираються, але не відображаються до завершення.
+        Прогрес оновлюється кожні 200мс через QTimer (читає current_idx).
+        Після завершення — оновлює графік та повідомляє про завершення.
+        Кнопка Cancel — кооперативна зупинка через threading.Event.
+        """
+        import threading
+        from gui.workers.workers import ComputeWorker
 
         total = self.engine.total_bars
-        self._run_to_end_batch = 20000  # initial; adapts per tick
-        self._run_to_end_total = total
+        if total <= 0:
+            return
+
+        # threading.Event для кооперативного скасування з фонового потоку
+        self._headless_cancel_event = threading.Event()
+
+        # Обгортка, яка передає cancel_token в run_visual_headless
+        def run_cancellable():
+            return self.engine.run_visual_headless(cancel_token=self._headless_cancel_event)
 
         self.progress_dialog = QProgressDialog(
-            "Running simulation...", "Cancel", self.engine.current_idx + 1, total, self.parent()
+            "Running headless visual backtest…", "Cancel", 0, total, self.parent()
         )
-        self.progress_dialog.setWindowTitle("Fast Run")
+        self.progress_dialog.setWindowTitle("Headless Run")
         self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.progress_dialog.setMinimumDuration(0)
-        self.progress_dialog.setValue(self.engine.current_idx + 1)
-        self.progress_dialog.canceled.connect(self._cancel_run_to_end)
+        self.progress_dialog.setValue(0)
 
-        self._run_to_end_timer = QTimer()
-        self._run_to_end_timer.timeout.connect(self._run_to_end_tick)
-        self._run_to_end_timer.start(0)
+        worker = ComputeWorker(run_cancellable, parent=self)
+        worker.finished.connect(self._on_headless_finished)
+        worker.error.connect(self._on_quant_error)
+        # Cancel: одночасно зупиняємо фоновий потік через Event
+        # і запобігаємо emit finished сигналу через worker.cancel()
+        self.progress_dialog.canceled.connect(self._headless_cancel_event.set)
+        
+        self._quant_worker = worker
 
-    def _run_to_end_tick(self):
-        if self.engine.current_idx >= self._run_to_end_total - 1:
-            self._finish_run_to_end()
+        # Таймер прогресу
+        self._headless_progress_timer = QTimer()
+        self._headless_progress_timer.timeout.connect(self._update_headless_progress)
+        self._headless_progress_timer.start(200)
+
+        worker.start()
+
+    def _update_headless_progress(self) -> None:
+        """Оновити прогрес з current_idx фонового потоку.
+        
+        QTimer зупиняється якщо діалог вже закритий або прогрес дійшов до кінця.
+        """
+        if self.progress_dialog is None:
+            if self._headless_progress_timer:
+                self._headless_progress_timer.stop()
+                self._headless_progress_timer = None
             return
-        if self.progress_dialog and self.progress_dialog.wasCanceled():
-            self._cancel_run_to_end()
+        if self.engine.df is None:
             return
-        remaining = self._run_to_end_total - 1 - self.engine.current_idx
-        batch = min(self._run_to_end_batch, remaining)
-        t0 = _time.perf_counter()
-        self.engine.step_n(batch)
-        elapsed = _time.perf_counter() - t0
-        # Adaptive batch: target ~100ms per tick for smooth UI updates
-        if elapsed > 0:
-            target_sec = 0.10
-            self._run_to_end_batch = max(1000, min(200000, int(batch * target_sec / elapsed)))
-        if self.progress_dialog:
-            self.progress_dialog.setValue(self.engine.current_idx + 1)
-            self.progress_dialog.setLabelText(
-                f"Candle {self.engine.current_idx + 1:,} / {self._run_to_end_total:,}"
-            )
+        val = min(self.engine.current_idx + 1, self.engine.total_bars)
+        self.progress_dialog.setValue(val)
+        self.progress_dialog.setLabelText(
+            f"Candle {val:,} / {self.engine.total_bars:,}"
+        )
+        # Якщо дійшли до кінця — зупинити таймер (worker сам закриє діалог)
+        if val >= self.engine.total_bars:
+            if self._headless_progress_timer:
+                self._headless_progress_timer.stop()
+                self._headless_progress_timer = None
 
-    def _finish_run_to_end(self):
-        if self._run_to_end_timer:
-            self._run_to_end_timer.stop()
-            self._run_to_end_timer = None
-        if self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-        if self.engine.current_idx >= 0:
-            self.engine.step_completed.emit(
-                self.engine.current_idx,
-                self.engine.candle_at(self.engine.current_idx),
-            )
-            self.engine.update_stats()
-        logger.info("🏁 Fast run completed!")
+    def _on_headless_finished(self, result) -> None:
+        """Headless завершено — оновити графік та повідомити про завершення."""
+        # Зупинити таймер прогресу — обов'язково до close()
+        if self._headless_progress_timer:
+            try:
+                self._headless_progress_timer.stop()
+            except Exception:
+                pass
+            self._headless_progress_timer = None
 
-    def _cancel_run_to_end(self):
-        if self._run_to_end_timer:
-            self._run_to_end_timer.stop()
-            self._run_to_end_timer = None
-        if self.progress_dialog:
+        # Закрити діалог
+        if self.progress_dialog is not None:
+            try:
+                self.progress_dialog.close()
+            except Exception:
+                pass
             self.progress_dialog = None
-        if self.engine.current_idx >= 0:
-            self.engine.step_completed.emit(
-                self.engine.current_idx,
-                self.engine.candle_at(self.engine.current_idx),
-            )
+
+        # Відновити прапорці пригнічення сигналів (були встановлені в run_visual_headless)
+        self.engine._suppress_drawings = False
+        self.engine._suppress_signals = False
+
+        # Оновити статистику та сповістити про завершення (на головному потоці — безпечно)
+        try:
             self.engine.update_stats()
-        logger.info("⚠️ Fast run cancelled")
+            self.engine._fire(self.engine.on_simulation_finished)
+        except Exception:
+            pass
+
+        # Re-emit step_completed so chart / status bar update
+        if self.engine.current_idx >= 0 and self.engine.total_bars > 0:
+            try:
+                self.engine.step_completed.emit(
+                    self.engine.current_idx,
+                    self.engine.candle_at(self.engine.current_idx),
+                )
+            except Exception:
+                pass
+            try:
+                win = self.window()
+                if hasattr(win, 'chart_tab'):
+                    win.chart_tab.redraw_chart()
+            except Exception:
+                pass
+
+        n = len(result.trades) if result is not None else 0
+        logger.info("🏁 Headless visual run done — %d trades", n)
 
     # ------------------------------------------------------------------
     # Phase 2 — Quant (vectorised) run mode

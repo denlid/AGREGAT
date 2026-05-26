@@ -82,6 +82,53 @@
             letter-spacing: 0.5px;
         }
 
+        #editor-title-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #editor-title-edit-btn {
+            opacity: 0;
+            transition: opacity 0.2s;
+            cursor: pointer;
+            padding: 4px;
+            background: transparent;
+            border: none;
+            color: var(--text3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 4px;
+        }
+
+        #editor-title-container:hover #editor-title-edit-btn {
+            opacity: 1;
+        }
+
+        #editor-title-edit-btn:hover {
+            background: var(--elevated);
+            color: var(--text2);
+        }
+
+        #editor-title-input {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--accent);
+            border-radius: 4px;
+            padding: 4px 8px;
+            outline: none;
+            text-transform: none;
+            letter-spacing: 0.5px;
+            min-width: 150px;
+        }
+
+        #editor-title-input:focus {
+            border-color: var(--accent-light);
+        }
+
         #monaco-root {
             flex: 1;
             width: 100%;
@@ -645,7 +692,14 @@
 
 <body>
     <div id="top-bar">
-        <span id="editor-header-title" class="header-title">New strategy</span>
+        <div id="editor-title-container">
+            <span id="editor-header-title" class="header-title">New strategy</span>
+            <button id="editor-title-edit-btn" onclick="startEditingTitle()" title="Rename strategy" aria-label="Rename strategy">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                    <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>
+                </svg>
+            </button>
+        </div>
         <div style="display:flex; gap:10px; align-items:center;">
             <button id="restore-chat-btn" class="btn" onclick="toggleChatPanel()" aria-label="Toggle Chat"
                 title="Toggle chat panel">
@@ -2158,6 +2212,76 @@
                         return;
                     }
                     el.textContent = (title && String(title).trim()) ? String(title).trim() : 'New strategy';
+                };
+
+                // ============= STRATEGY RENAME FUNCTIONS =============
+                window.startEditingTitle = function () {
+                    const titleSpan = document.getElementById('editor-header-title');
+                    const container = document.getElementById('editor-title-container');
+                    if (!titleSpan || !container) return;
+
+                    const currentTitle = titleSpan.textContent.trim();
+                    // Remove asterisk if present
+                    const cleanTitle = currentTitle.replace(/\s*\*\s*$/, '');
+
+                    // Create input element
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.id = 'editor-title-input';
+                    input.value = cleanTitle;
+                    input.className = 'header-title';
+
+                    // Replace span with input
+                    container.replaceChild(input, titleSpan);
+                    input.focus();
+                    input.select();
+
+                    // Handle Enter key
+                    input.addEventListener('keydown', function (e) {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            finishEditingTitle(input, titleSpan);
+                        } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            cancelEditingTitle(input, titleSpan);
+                        }
+                    });
+
+                    // Handle blur (click outside)
+                    input.addEventListener('blur', function () {
+                        setTimeout(function () {
+                            finishEditingTitle(input, titleSpan);
+                        }, 100);
+                    });
+                };
+
+                function finishEditingTitle(input, originalSpan) {
+                    const container = document.getElementById('editor-title-container');
+                    if (!container || !input.parentNode) return;
+
+                    const newName = input.value.trim();
+                    if (!newName) {
+                        cancelEditingTitle(input, originalSpan);
+                        return;
+                    }
+
+                    // Send to Python
+                    if (safeBridgeCall('receive_rename_strategy', newName)) {
+                        // Python will call set_strategy_header_title to update the UI
+                        container.replaceChild(originalSpan, input);
+                    } else {
+                        cancelEditingTitle(input, originalSpan);
+                    }
+                }
+
+                function cancelEditingTitle(input, originalSpan) {
+                    const container = document.getElementById('editor-title-container');
+                    if (!container || !input.parentNode) return;
+                    container.replaceChild(originalSpan, input);
+                }
+
+                window.show_rename_error = function (msg) {
+                    appendSystemMessage('Rename failed: ' + msg, true);
                 };
 
                 window.set_chat_input_text = function (text) {

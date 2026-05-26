@@ -1151,6 +1151,14 @@ class ChartTab(QWidget):
 
     def on_tf_changed(self, tf):
         self._cache_key = None
+        # Phase 0.2 (A3) — ensure forming arrays are built for the selected TF
+        # so the chart can render the in-progress candle when switching away
+        # from 1m after a headless run + reset + manual stepping.
+        if hasattr(self.engine, 'set_visible_tf'):
+            self.engine.set_visible_tf(tf)
+        # Reset autorange so the viewport adapts to the new TF's bar count
+        # (e.g. switching 1m→5m: 400 bars → ~80 bars on X axis).
+        self._need_autorange = True
         self.redraw_chart()
 
     def on_step_completed(self, idx, candle):
@@ -1181,9 +1189,11 @@ class ChartTab(QWidget):
         if getattr(self, "_is_roi_dragging", False):
             return
 
-        idx = self.engine.current_idx
-        if idx < 0 or self.engine.df is None:
+        if self.engine.df is None:
             return
+        idx = self.engine.current_idx
+        if idx < 0:
+            idx = 0
         tf = self.visual_tf_cb.currentText().lower()
         tf_min = self._get_tf_minutes()
 
@@ -1193,7 +1203,10 @@ class ChartTab(QWidget):
             res_df = self._cached_res_df
         else:
             if tf != "1m" and hasattr(self.engine, "tf_aggregator"):
-                # Get ALL completed candles for the requested timeframe up to current_idx
+                # Sync tf_aggregator to the current 1m index so forming
+                # candles are visible even before the engine has stepped
+                # (after reset / fresh data load, _current_1m_idx == -1).
+                self.engine.tf_aggregator.advance_to(idx)
                 comp = self.engine.tf_aggregator.get_completed_tail(tf, 9999999)
                 form = self.engine.tf_aggregator.get_forming(tf)
                 agg = comp + ([form] if form else [])
@@ -1205,6 +1218,14 @@ class ChartTab(QWidget):
                 # Pass the ENTIRE history up to the current index. 
                 # OpenGL + LodPyramid will handle the performance automatically.
                 res_df = self.engine.df.iloc[0 : idx + 1].copy()
+
+            # Phase 3 — Cap the render window to avoid lag when idx is at the
+            # end of a huge dataset (e.g. after headless run with 200k+ candles).
+            # We keep a generous buffer beyond the visible area for smooth
+            # scrolling, but never the full history.
+            if len(res_df) > 5_000:
+                tail = res_df.iloc[-5_000:].reset_index(drop=True)
+                res_df = tail
 
             if len(res_df) == 0:
                 return

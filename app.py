@@ -7,10 +7,6 @@ import logging
 import os
 import sys
 
-# Setup root logger FIRST
-logger = logging.getLogger("StrategyTester.app")
-logger.setLevel(logging.DEBUG)
-
 # CRITICAL: Import pandas BEFORE PySide6 to avoid shiboken/dateutil/six conflict
 import numpy  # noqa: F401
 import pandas  # noqa: F401
@@ -55,7 +51,7 @@ def main() -> int:
         configure_gpu_acceleration()
     except Exception:
         # Never block app startup on a chart-only optimisation.
-        logger.exception("configure_gpu_acceleration failed")
+        pass
 
     # --- License Verification ---
     from engine.security.license_manager import verify_license, get_hwid, save_license_key

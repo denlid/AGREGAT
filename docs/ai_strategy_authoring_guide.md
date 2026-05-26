@@ -43,14 +43,31 @@ strategy.period     # → 20 (already int, no casting)
 strategy.risk_pct   # → 1.0 (already float)
 ```
 
-With explicit min/max/label:
+With explicit min/max/label (use `Param` for GUI controls):
 ```python
 from engine.api import Strategy, Param
 
-strategy = Strategy(name="My Strategy",
-                    period=Param(20, "Period", min=5, max=100),
-                    risk_pct=Param(1.0, "Risk %", min=0.1, max=5.0))
+strategy = Strategy(
+    name="My Strategy",
+    period=Param(name="period", label="Period", kind="int", default=20, min=5, max=100),
+    risk_pct=Param(name="risk_pct", label="Risk %", kind="float", default=1.0, min=0.1, max=5.0),
+    use_filter=Param(name="use_filter", label="Use filter", kind="bool", default=True)
+)
 ```
+
+**Param syntax (all arguments must be keywords):**
+```python
+Param(name="param_name", label="Label", kind="int|float|bool|choice", default=value, min=..., max=..., step=..., choices=...)
+```
+- `name`: parameter name (must match the keyword in Strategy constructor)
+- `label`: text shown in GUI
+- `kind`: `"int"`, `"float"`, `"bool"`, or `"choice"`
+- `default`: initial value
+- `min`, `max`: numeric bounds (for int/float)
+- `step`: increment for spinbox (optional)
+- `choices`: list of strings (for "choice" kind)
+
+**Important:** All `Param` arguments must be passed as keywords (e.g., `name=`, `label=`, `kind=`, `default=`).
 
 ---
 
@@ -93,6 +110,7 @@ c.low         # float — last 1m low
 c.open_       # float — last 1m open   (open_ because "open" is a Python builtin)
 c.volume      # float — last 1m volume
 c.time        # datetime — current bar timestamp
+c.candle      # dict — current 1m bar as dict: {time, open, high, low, close, volume}
 ```
 
 ### Arrays (np.ndarray — pass to indicators)
@@ -126,11 +144,14 @@ c.open_htf        # float — last HTF open
 c.close_htf_arr   # np.ndarray — all HTF closes
 c.high_htf_arr    # np.ndarray — all HTF highs
 c.low_htf_arr     # np.ndarray — all HTF lows
+c.open_htf_arr    # np.ndarray — all HTF opens (if needed)
 
 # Previous values:
 c.close_htf_arr[-2]    # previous HTF close
 c.high_htf_arr[-5:]    # last 5 HTF highs
 ```
+
+**Note:** HTF callbacks (`on_15m_close`, `on_1h_close`, `on_1d_close`) are called **before** the main `on_candle()` callback on the same 1m bar when an HTF candle completes.
 
 ### State
 

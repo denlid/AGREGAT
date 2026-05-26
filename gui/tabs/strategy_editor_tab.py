@@ -87,6 +87,7 @@ class StrategyEditorTab(QWidget):
         self.editor.bridge.attachment_requested.connect(self.on_attachment_requested)
         self.editor.bridge.ready.connect(self._on_editor_web_ready)
         self.editor.bridge.editor_model_changed.connect(self._on_editor_model_changed)
+        self.editor.bridge.rename_strategy_requested.connect(self.on_rename_strategy)
 
     def _on_editor_model_changed(self) -> None:
         self._editor_dirty = True
@@ -469,3 +470,54 @@ class StrategyEditorTab(QWidget):
             return
         payload = {"kind": kind, "name": os.path.basename(path), "path": path}
         self.editor.set_attachment(payload)
+
+    def on_rename_strategy(self, new_name: str):
+        """Rename the currently bound strategy file."""
+        # Check if a file is bound
+        if not self._strategy_file_path or not os.path.isfile(self._strategy_file_path):
+            self.editor.show_rename_error("No strategy file is currently open")
+            return
+
+        # Validate new name
+        new_name = new_name.strip()
+        if not new_name:
+            self.editor.show_rename_error("File name cannot be empty")
+            return
+
+        # Check for invalid characters
+        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+        for char in invalid_chars:
+            if char in new_name:
+                self.editor.show_rename_error(f"File name cannot contain: {' '.join(invalid_chars)}")
+                return
+
+        # Ensure .py extension
+        if not new_name.endswith('.py'):
+            new_name += '.py'
+
+        # Build new path
+        old_path = self._strategy_file_path
+        directory = os.path.dirname(old_path)
+        new_path = os.path.join(directory, new_name)
+        new_path = os.path.normpath(os.path.abspath(new_path))
+
+        # Check if already same name
+        if old_path == new_path:
+            return
+
+        # Check if target file already exists
+        if os.path.exists(new_path):
+            self.editor.show_rename_error(f"File '{new_name}' already exists")
+            return
+
+        # Attempt rename
+        try:
+            os.rename(old_path, new_path)
+            self._strategy_file_path = new_path
+            # Update last_strat in settings
+            self.pw._settings_ctrl.save("last_strat", new_path)
+            # Update header title
+            self._refresh_header_title()
+            self.editor.show_system_message(f"Renamed to {new_name}")
+        except OSError as e:
+            self.editor.show_rename_error(f"Rename failed: {e}")
