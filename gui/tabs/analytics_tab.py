@@ -112,7 +112,11 @@ class AnalyticsTab(QWidget):
         self.engine = engine
         self._refresh_active = True
         self._last_trade_key = None
+        self._light_trade_key = None
         self._eq_has_data = False  # 🛡️ INIT: prevent AttributeError on first refresh
+        self._period_kind: str = "ALL"
+        self._period_start = None
+        self._period_end = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -904,18 +908,12 @@ class AnalyticsTab(QWidget):
         dialog.exec()
 
     def refresh_all(self, force: bool = False) -> None:
-        """Refresh all analytics widgets in a single pass.
-
-        First checks the dirty key; if unchanged, skips entirely.
-        All panels run synchronously except heatmaps (background thread).
-        """
         if not self._is_safe_for_refresh():
             return
         trades = list(getattr(self.engine, "trades", []) or [])
         key = _trade_cache_key(trades, float(getattr(self.engine, "initial_equity", 0.0) or 0.0))
-        if not force and key == self._last_trade_key:
+        if not force and hasattr(self, "_last_trade_key") and key == self._last_trade_key:
             return
-        self._last_trade_key = key
 
         self._spinner.start()
 
@@ -926,19 +924,18 @@ class AnalyticsTab(QWidget):
         self._safe_update("calendar_heatmap", self._update_calendar_heatmap, "cal_plot")
         self._safe_update("trade_timeline", self._update_trade_timeline, "timeline_plot")
 
-        # Medium panels
+        # Medium/heavy panels
         pnl_arr = np.array([t.pnl for t in trades], dtype=float) if trades else None
         self._safe_update("advanced_stats", lambda: self._update_advanced_stats(pnl_arr), "dist_plot")
         self._safe_update("extended_metrics", lambda: self._update_extended_metrics(pnl_arr), "duration_plot")
         self._safe_update("rolling_metrics", self._update_rolling_metrics, "roll_sharpe_plot")
         self._safe_update("attribution", self._update_attribution, "_dd_model")
         self._safe_update("slippage", self._update_slippage, "slip_plot")
-
-        # Heavy panels (heatmap uses worker thread)
         self._safe_update("mae_mfe", self._update_mae_mfe, "mae_mfe_plot")
         self._safe_update("r_multiples", self._update_r_multiples, "r_hist")
         self._safe_update("heatmaps", self._update_heatmaps)
 
+        self._last_trade_key = key
         self._spinner.stop()
 
     def _is_safe_for_refresh(self) -> bool:
@@ -959,18 +956,24 @@ class AnalyticsTab(QWidget):
         """Lightweight refresh used during live backtest.
 
         Updates only fast panels; skips histograms, heatmaps, MC.
+        Uses separate key so it does NOT block full refresh_all.
         """
         trades = list(getattr(self.engine, "trades", []) or [])
         key = _trade_cache_key(trades, float(getattr(self.engine, "initial_equity", 0.0) or 0.0))
-        if not force and key == self._last_trade_key:
+        light_key = getattr(self, "_light_trade_key", None)
+        if not force and key == light_key:
             return
-        self._last_trade_key = key
+        if self._spinner is not None and self.isVisible():
+            self._spinner.start("Updating analytics\u2026")
         self._safe_update("equity_curve", self._update_equity_curve)
         self._safe_update("session_matrix", self._update_session_matrix, "session_plot")
         self._safe_update("streak_tracker", self._update_streak_tracker, "str_card_maxw")
         self._safe_update("calendar_heatmap", self._update_calendar_heatmap, "cal_plot")
         self._safe_update("trade_timeline", self._update_trade_timeline, "timeline_plot")
         self._safe_update("attribution", self._update_attribution, "_dd_model")
+        self._light_trade_key = key
+        if self._spinner is not None:
+            self._spinner.stop()
 
     def _sorted_trades(self):
         cache = getattr(self.engine, "_shared_cache", None)
@@ -2538,3 +2541,13 @@ class AnalyticsTab(QWidget):
             f"({res.avg_slip_per_trade:.2f}$ \u00d7 {res.base_pnls.size} trades)"
         )
         self.slip_plot.autoRange()
+
+    def sync_period(self, kind: str, start, end) -> None:
+        """Cross-tab period sync — record period and refresh panels."""
+        self._period_kind = kind
+        self._period_start = start
+        self._period_end = end
+        try:
+            self.refresh_all(force=True)
+        except Exception:
+            pass

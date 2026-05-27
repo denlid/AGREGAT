@@ -10,13 +10,15 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from PySide6.QtCore import QPointF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import QPointF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPolygonF
+from PySide6.QtWidgets import QToolTip, QWidget
 
 
 class SparklineWidget(QWidget):
     """Renders a tiny line chart of recent equity values."""
+
+    hovered = Signal(int, float)  # index, value
 
     def __init__(self, width: int = 140, height: int = 22, parent: QWidget | None = None):
         super().__init__(parent)
@@ -27,6 +29,7 @@ class SparklineWidget(QWidget):
         self._green = QColor("#26A69A")
         self._red = QColor("#EF5350")
         self._neutral = QColor("#5A5A6E")
+        self.setMouseTracking(True)
 
     def sizeHint(self) -> QSize:  # noqa: D401 — Qt API
         return QSize(self._w, self._h)
@@ -39,6 +42,22 @@ class SparklineWidget(QWidget):
     def clear(self) -> None:
         self._values = []
         self.update()
+
+    def _value_at_x(self, x: float) -> tuple[int, float] | None:
+        n = len(self._values)
+        if n < 2:
+            return None
+        idx = max(0, min(int(round(x / max(1, self._w - 1) * (n - 1))), n - 1))
+        return idx, self._values[idx]
+
+    def mouseMoveEvent(self, ev: QMouseEvent) -> None:
+        result = self._value_at_x(float(ev.pos().x()))
+        if result is not None:
+            idx, val = result
+            self.hovered.emit(idx, val)
+            gp = self.mapToGlobal(ev.pos())
+            QToolTip.showText(gp, f"{val:+,.2f}", self)
+        super().mouseMoveEvent(ev)
 
     def paintEvent(self, _ev) -> None:  # type: ignore[override]
         p = QPainter(self)

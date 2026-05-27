@@ -411,13 +411,13 @@ class TradesTableModel(QAbstractTableModel):
         # Phase 6.3 — drill-down cache arrays for heatmap filtering
         # Entry hour (0-23), weekday (0=Mon..6=Sun), year, month
         try:
-            # Fast path: use pre-cached numpy timestamps when available to avoid
-            # expensive string parsing on large trade sets (60k+).
             et_np_arr = None
-            if et_np and all(v is not None for v in et_np):
-                et_np_arr = np.asarray(et_np, dtype="datetime64[ns]")
-            if et_np_arr is None:
-                # Fallback: parse strings (slower, but robust).
+            if et_np:
+                try:
+                    et_np_arr = np.asarray(et_np, dtype="datetime64[ns]")
+                except Exception:
+                    et_np_arr = None
+            if et_np_arr is None or not np.any(et_np_arr):
                 et_np_arr = pd.to_datetime([t.entry_time for t in ts]).to_numpy(dtype="datetime64[ns]")
 
             dt = pd.DatetimeIndex(et_np_arr)
@@ -913,8 +913,6 @@ class TradesFilterProxy(QAbstractTableModel):
             self._rebuild_mapping()
 
     def set_date_range(self, d_from: Optional[QDate], d_to: Optional[QDate]) -> None:
-        # Custom Date is intuitively day-inclusive on both ends, so
-        # bump ``d_to`` to the end of its day.
         a = pd.Timestamp(d_from.toPython()).to_datetime64() if d_from else None
         if d_to is not None:
             end_ts = (
@@ -928,6 +926,43 @@ class TradesFilterProxy(QAbstractTableModel):
         self._date_from = a
         self._date_to = b
         self._rebuild_mapping()
+
+    def apply_filters(
+        self,
+        *,
+        filter_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        d_from: Optional[QDate] = None,
+        d_to: Optional[QDate] = None,
+    ) -> None:
+        changed = False
+        if filter_type is not None and filter_type != self._filter_type:
+            self._filter_type = filter_type
+            changed = True
+        if search_text is not None:
+            v = search_text.lower()
+            if v != self._search_text:
+                self._search_text = v
+                changed = True
+        d_from_dt: Any = None
+        if d_from is not None:
+            d_from_dt = pd.Timestamp(d_from.toPython()).to_datetime64()
+            if d_from_dt != self._date_from:
+                self._date_from = d_from_dt
+                changed = True
+        d_to_dt: Any = None
+        if d_to is not None:
+            end_ts = (
+                pd.Timestamp(d_to.toPython())
+                + pd.Timedelta(days=1)
+                - pd.Timedelta(nanoseconds=1)
+            )
+            d_to_dt = end_ts.to_datetime64()
+            if d_to_dt != self._date_to:
+                self._date_to = d_to_dt
+                changed = True
+        if changed:
+            self._rebuild_mapping()
 
     # ------------------------------------------------------------------
     # Phase 6.3 — heatmap drill-down filter setters

@@ -559,7 +559,6 @@ class SettingsTab(QWidget):
             self.spread_spin,
             self.commission_spin,
             self.slippage_spin,
-            self.ai_max_tokens_spin,  # ← was missing, now added!
         ]
         widgets_toggle = [
             self.fast_mode_cb,
@@ -1213,5 +1212,4 @@ class SettingsTab(QWidget):
         self.ai_custom_extra_body_le.clear()
         self._update_ai_custom_visibility()
         self.ai_api_key_le.clear()
-        self.ai_max_tokens_spin.setValue(16384)  # ← was missing, now added!
         logger.info("🔄 Settings reset to defaults")

@@ -112,6 +112,7 @@ class SharedTradesCache:
             if et is None:
                 et = np.datetime64("1970-01-01")
                 miss = 1
+                logger.warning("SharedTradesCache: trade %r has null entry_time — using epoch fallback", getattr(t, "id", None))
             else:
                 miss = 0
             try:

@@ -32,9 +32,10 @@ from PySide6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
     Qt,
+    QTimer,
     Signal,
 )
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
+from PySide6.QtGui import QAction, QColor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -258,6 +259,23 @@ class MetricCard(QFrame):
             unregister_theme_listener(self._apply_theme)
             self._theme_registered = False
 
+    def _flash_border(self, flash_color: str = "#4CAF50") -> None:
+        """Briefly flash the card border, then fade back to normal."""
+        t = get_theme()
+        flash = (
+            "QFrame#metricCard {"
+            f"  background: {sh.c(t, 'surface')};"
+            f"  border: 2px solid {flash_color};"
+            "  border-radius: 10px;"
+            "}"
+            "QFrame#metricCard:hover {"
+            f"  border-color: {sh.c(t, 'accent')};"
+            f"  background: {sh.c(t, 'elevated')};"
+            "}"
+        )
+        self.setStyleSheet(flash)
+        QTimer.singleShot(400, self._apply_theme)
+
     def mousePressEvent(self, ev):  # type: ignore[override]
         if ev.button() == Qt.MouseButton.LeftButton:
             if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -324,12 +342,16 @@ class MetricCard(QFrame):
 
     def update(self, value: str, color: Optional[str] = None, sub: Optional[str] = None):  # type: ignore[override]
         """Legacy update entry-point. Sets value text directly."""
+        prev_text = self._value_lbl.text()
         self._value_lbl.setText(value)
         if color:
             self._color = color
         if sub is not None and self._sub_lbl is not None:
             self._sub_lbl.setText(sub)
         self._apply_theme()
+        if prev_text != value:
+            flash_col = "#4CAF50" if color in ("g", "green", "gain") else "#F44336" if color in ("r", "red", "loss") else "#888888"
+            self._flash_border(flash_col)
 
     def set_metric(
         self,
@@ -381,6 +403,9 @@ class MetricCard(QFrame):
             self._animate_to(prev_raw, raw_value, formatted)
         elif formatted is not None:
             self._value_lbl.setText(formatted)
+        if animate and prev_raw is not None and prev_raw != raw_value:
+            flash_col = "#4CAF50" if raw_value is not None and raw_value > prev_raw else "#F44336" if raw_value is not None and raw_value < prev_raw else "#888888"
+            self._flash_border(flash_col)
 
     # Backwards-compatible alias used by older call-sites (e.g. ``MiniCard``).
     def set_value(self, value: str, color: Optional[str] = None, sub: Optional[str] = None) -> None:
@@ -422,6 +447,13 @@ class MetricCard(QFrame):
             self._fade_to(text)
         else:
             self._value_lbl.setText(text)
+        if animate and prev_text != text:
+            flash_col = "#888888"
+            if color in ("g", "green", "gain", "profit") or (color and "green" in str(color).lower()):
+                flash_col = "#4CAF50"
+            elif color in ("r", "red", "loss", "danger") or (color and "red" in str(color).lower()):
+                flash_col = "#F44336"
+            self._flash_border(flash_col)
 
     # Qt property used by the tween animation.
     def _get_tween(self) -> float:

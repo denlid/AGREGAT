@@ -96,13 +96,10 @@ class SettingsController:
         h = self._host
         if key:
             self.settings[key] = value
-        # Read ALL settings from the live SettingsTab to avoid losing keys
-        # that another writer (settings_persist) may have written earlier.
-        st = h.settings_tab
         self.settings.update(
             {
                 "asset": h.asset_cb.currentText(),
-                "initial_equity": st.equity_spin.value(),
+                "initial_equity": h.settings_tab.equity_spin.value(),
                 "timeframe": h.chart_tab.visual_tf_cb.currentText(),
                 "chart_mode": h.chart_tab.chart_mode_cb.currentText(),
                 "show_markers": h.chart_tab.show_markers_cb.isChecked(),
@@ -112,35 +109,14 @@ class SettingsController:
                 # Preserve last loaded CSV/strategy paths so they survive restart
                 "last_csv": self.settings.get("last_csv", ""),
                 "last_strat": self.settings.get("last_strat", ""),
-                # ── All settings_tab values (mirrors _capture_settings) ──
-                "theme": st.theme_cb.currentText(),
-                "chart_scheme": st.colors_cb.currentText(),
-                "font_size": st.font_size_spin.value(),
-                "risk_pct": st.risk_pct_spin.value(),
-                "max_lots_per_100k": st.max_lots_spin.value(),
-                "timezone": st.tz_spin.value(),
-                "render_window": st.render_win.value(),
-                "cache_size": st.cache_size_spin.value(),
-                "batch_size": st.batch_size_spin.value(),
-                "log_level": st.log_level_cb.currentText(),
-                "fast_mode": st.fast_mode_cb.isChecked(),
-                "auto_save_logs": st.auto_save_logs_cb.isChecked(),
-                "max_log_lines": st.max_log_lines_spin.value(),
-                "show_grid": st.show_grid_cb.isChecked(),
-                "crosshair": st.crosshair_cb.isChecked(),
-                "autofit_y": st.autofit_y_cb.isChecked(),
-                "show_volume": False,  # not wired in UI, keep default
-                "exec_profile": st.exec_profile_cb.currentText(),
-                "exec_spread_points": st.spread_spin.value(),
-                "exec_commission_per_lot": st.commission_spin.value(),
-                "exec_slippage_points": st.slippage_spin.value(),
-                # AI fields — live from UI
-                "ai_provider": st.ai_provider_cb.currentText(),
-                "ai_model": st.ai_model_cb.currentText(),
-                "ai_api_key": st.ai_api_key_le.text(),
-                "ai_custom_base_url": st.ai_custom_base_url_le.text(),
-                "ai_custom_extra_body": st.ai_custom_extra_body_le.text(),
-                "ai_max_tokens": st.ai_max_tokens_spin.value(),
+                # Always read AI fields from the live UI so a session-switch
+                # of provider/key is not overwritten by the stale value that
+                # was loaded from disk at startup.
+                "ai_provider": h.settings_tab.ai_provider_cb.currentText(),
+                "ai_model": h.settings_tab.ai_model_cb.currentText(),
+                "ai_api_key": h.settings_tab.ai_api_key_le.text(),
+                "ai_custom_base_url": h.settings_tab.ai_custom_base_url_le.text(),
+                "ai_custom_extra_body": h.settings_tab.ai_custom_extra_body_le.text(),
             }
         )
         try:

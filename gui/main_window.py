@@ -17,7 +17,7 @@ import logging
 import os
 import json
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -177,16 +177,30 @@ class MainWindow(QMainWindow):
         self.chart_splitter.setSizes([920, 0])
         cp.addWidget(self.chart_splitter, stretch=1)
 
-        for w, name in (
-            (chart_page, "Chart"),
-            (self.stats_tab, "Stats"),
-            (self.trades_tab, "Trades"),
-            (self.analytics_tab, "Analytics"),
-            (self.log_console, "Logs"),
-            (self.strategy_editor_tab, "Editor"),
-            (self.settings_tab, "Settings"),
-        ):
-            self.tabs.addTab(w, name)
+        from gui.components.error_boundary import ErrorBoundary
+
+        tab_pages = [
+            ("Chart", chart_page),
+            ("Stats", self.stats_tab),
+            ("Trades", self.trades_tab),
+            ("Analytics", self.analytics_tab),
+            ("Logs", self.log_console),
+            ("Editor", self.strategy_editor_tab),
+            ("Settings", self.settings_tab),
+        ]
+        self._tab_boundaries: dict[str, ErrorBoundary] = {}
+        for name, page in tab_pages:
+            eb = ErrorBoundary(page, fallback_text=f"{name} tab encountered an error. Click Retry to reload.")
+            self.tabs.addTab(eb, name)
+            self._tab_boundaries[name] = eb
+        # Wire retry → refresh for data-driven tabs
+        retry_map = {
+            "Stats": lambda: self.stats_tab._recalc(),
+            "Trades": lambda: self.trades_tab._apply_filter(),
+            "Analytics": lambda: self.analytics_tab.refresh_all(),
+        }
+        for name, fn in retry_map.items():
+            self._tab_boundaries[name].retry.connect(fn)
         self.tabs.currentChanged.connect(self._on_tab)
         root.addWidget(self.tabs)
 
@@ -203,6 +217,7 @@ class MainWindow(QMainWindow):
         e.data_loaded.connect(self._replay_ctrl.on_data_loaded)
         e.position_changed.connect(self.chart_tab.on_position_changed)
         e.simulation_finished.connect(self._replay_ctrl.on_simulation_finished)
+        e.simulation_finished.connect(self._on_simulation_finished)
         # Invalidate shared cache on data/trade changes
         self._on_trade_for_cache = lambda *_: self.shared_cache.invalidate()
         self._on_data_for_cache = lambda *_: self.shared_cache.invalidate()
@@ -221,6 +236,13 @@ class MainWindow(QMainWindow):
         self.global_ai_panel.bridge.chart_selection_requested.connect(self._on_chart_selection_requested)
         self.global_ai_panel.bridge.attachment_requested.connect(self._on_ai_attachment_requested)
         self.chart_tab.sigAreaSelected.connect(self._on_chart_area_selected)
+
+        # Cross-tab period sync
+        try:
+            self.stats_tab.sigPeriodChanged.connect(self.trades_tab.sync_period)
+            self.stats_tab.sigPeriodChanged.connect(self.analytics_tab.sync_period)
+        except Exception:
+            pass
 
     def _unwire_signals(self) -> None:
         e = self.engine
@@ -363,15 +385,55 @@ class MainWindow(QMainWindow):
         self._prev_tab_idx = idx
         # Leaving Editor → Chart: push Monaco code into engine (see StrategyEditorTab.sync_engine_from_editor).
         if idx == 0 and prev == self._strategy_editor_tab_index and self.strategy_editor_tab.should_sync_editor_to_engine():
-            self.strategy_editor_tab.sync_engine_from_editor()
+            try:
+                self.strategy_editor_tab.sync_engine_from_editor()
+            except Exception:
+                logger.exception("sync_engine_from_editor failed")
 
         # 0=Chart, 1=Stats, 2=Trades, 3=Analytics, 4=Logs, 5=Editor, 6=Settings
         if idx == 1:
-            self.stats_tab._recalc()
+            try:
+                self.stats_tab._recalc()
+            except Exception as e:
+                logger.exception("Stats tab refresh failed")
+                self._show_tab_fallback("Stats", str(e))
         elif idx == 2:
-            self.trades_tab._apply_filter()
+            try:
+                self.trades_tab._apply_filter()
+            except Exception as e:
+                logger.exception("Trades tab refresh failed")
+                self._show_tab_fallback("Trades", str(e))
         elif idx == 3:
-            self.analytics_tab.refresh_all()
+            try:
+                self.analytics_tab.refresh_all()
+            except Exception as e:
+                logger.exception("Analytics tab refresh failed")
+                self._show_tab_fallback("Analytics", str(e))
+
+    def _show_tab_fallback(self, tab_name: str, error_msg: str = "") -> None:
+        eb = self._tab_boundaries.get(tab_name)
+        if eb is not None:
+            eb.show_fallback(error_msg)
+
+    def _on_simulation_finished(self) -> None:
+        QTimer.singleShot(0, lambda: self._refresh_tabs_after_sim())
+
+    def _refresh_tabs_after_sim(self) -> None:
+        if hasattr(self, "trades_tab") and self.trades_tab is not None:
+            try:
+                self.trades_tab._apply_filter()
+            except Exception:
+                logger.exception("trades_tab refresh failed")
+        if hasattr(self, "stats_tab") and self.stats_tab is not None:
+            try:
+                self.stats_tab._recalc()
+            except Exception:
+                logger.exception("stats_tab refresh failed")
+        if hasattr(self, "analytics_tab") and self.analytics_tab is not None:
+            try:
+                self.analytics_tab.refresh_all()
+            except Exception:
+                logger.exception("analytics_tab refresh failed")
 
     def on_export_report(self) -> None:
         from gui.persistence.report_export import export_report_dialog

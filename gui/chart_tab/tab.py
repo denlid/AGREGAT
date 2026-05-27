@@ -6,7 +6,7 @@ import time
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PySide6.QtCore import QPointF, Qt, QTimer, Signal, QRectF
+from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QVariantAnimation, Qt, QTimer, Signal, QRectF
 from PySide6.QtGui import QColor, QPainterPath, QCursor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -141,11 +141,13 @@ class ChartTab(QWidget):
         left_axis.setWidth(62)
         left_axis.setStyle(tickLength=-4)
 
-        # Custom mouse-drag handler to scale price axis
+        # Custom mouse-drag handler to scale price axis.
+        # pyqtgraph binds LMB to zoom (scale) and RMB to pan on axes by default,
+        # but the PlotWidget ViewBox uses the opposite convention (LMB=pan, RMB=zoom).
+        # We swap the buttons here so the price axis zoom behavior matches the
+        # main plot area: RMB drag = zoom Y, LMB double-click = auto-range Y.
         def price_mouseDragEvent(ev):
             if hasattr(ev, "button"):
-                from PySide6.QtCore import Qt
-
                 btn = ev.button()
                 if btn == Qt.MouseButton.LeftButton:
                     ev.button = lambda: Qt.MouseButton.RightButton
@@ -154,8 +156,6 @@ class ChartTab(QWidget):
             pg.AxisItem.mouseDragEvent(left_axis, ev)
 
         def price_mouseDoubleClickEvent(ev):
-            from PySide6.QtCore import Qt
-
             if ev.button() == Qt.MouseButton.LeftButton and left_axis.linkedView():
                 left_axis.linkedView().enableAutoRange(y=True)
                 ev.accept()
@@ -221,7 +221,12 @@ class ChartTab(QWidget):
         # :class:`CandlestickItem` is used. The two share the same
         # public surface (set_data / set_view / set_pyramid / …) so the
         # rest of ChartTab is backend-agnostic.
-        self.candlestick_item = make_candlestick_item()
+        try:
+            self.candlestick_item = make_candlestick_item()
+        except Exception:
+            logger.warning("GLCandlestickItem init failed; falling back to CandlestickItem")
+            from gui.chart_tab.items import CandlestickItem
+            self.candlestick_item = CandlestickItem()
         self.candlestick_item.bull_color = "#26A69A"
         self.candlestick_item.bear_color = "#EF5350"
         self.plot_widget.addItem(self.candlestick_item)
@@ -293,6 +298,28 @@ class ChartTab(QWidget):
         )
 
         main_layout.addWidget(self.plot_widget, stretch=1)
+
+        # Trade focus breadcrumb overlay (hidden by default)
+        self._focus_bar = QWidget(self.plot_widget)
+        self._focus_bar.setVisible(False)
+        focus_layout = QHBoxLayout(self._focus_bar)
+        focus_layout.setContentsMargins(8, 2, 8, 2)
+        self._focus_label = QLabel("", self._focus_bar)
+        self._focus_label.setStyleSheet(
+            "color: #FFD54F; font-weight: bold; font-size: 12px; background: rgba(20,20,30,180);"
+            " padding: 2px 8px; border-radius: 3px;"
+        )
+        self._focus_clear_btn = QPushButton("\u2716 Clear Focus", self._focus_bar)
+        self._focus_clear_btn.setFixedHeight(22)
+        self._focus_clear_btn.setStyleSheet(
+            "QPushButton { color: #B0B0C0; background: rgba(40,40,55,200); border: 1px solid #4A4A5A;"
+            " border-radius: 3px; padding: 0 8px; font-size: 11px; }"
+            "QPushButton:hover { background: rgba(60,60,80,220); color: #FFFFFF; }"
+        )
+        self._focus_clear_btn.clicked.connect(self._clear_trade_focus_highlight)
+        focus_layout.addWidget(self._focus_label)
+        focus_layout.addWidget(self._focus_clear_btn)
+        self.plot_widget.installEventFilter(self)
 
         # State
         self.current_tool = "None"
@@ -1200,7 +1227,7 @@ class ChartTab(QWidget):
         tf_min = self._get_tf_minutes()
 
         t0 = _time.perf_counter()
-        ck = (idx, tf)
+        ck = (idx, tf, id(self.engine.df))
         if ck == self._cache_key and self._cached_res_df is not None:
             res_df = self._cached_res_df
         else:
@@ -1675,13 +1702,29 @@ class ChartTab(QWidget):
     # ==============================
     # Trade focus navigation
     # ==============================
-    def focus_trade(self, trade, pad_bars: int = 60) -> None:
+    def _animate_view_range(self, vb: pg.ViewBox, x1: float, x2: float, duration_ms: int = 300) -> None:
+        cur = vb.viewRange()[0]
+        anim = QVariantAnimation(self)
+        anim.setDuration(duration_ms)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        def _update(t: float) -> None:
+            xl = cur[0] + (x1 - cur[0]) * t
+            xr = cur[1] + (x2 - cur[1]) * t
+            vb.setRange(xRange=(xl, xr), padding=0.0)
+        anim.valueChanged.connect(_update)
+        anim.finished.connect(lambda: vb.setRange(xRange=(x1, x2), padding=0.02))
+        anim.start(QVariantAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def focus_trade(self, trade: object, pad_bars: int = 60, force: bool = False) -> None:
         """Best-effort: pan/zoom chart to a trade's entry/exit window.
 
         Intended for navigation from Trades tab popups; must never raise.
+        If *force* is True, re-navigate even if the same trade was already focused.
         """
         trade_id = getattr(trade, "id", None)
-        if hasattr(self, "_last_focused_trade") and self._last_focused_trade == trade_id:
+        if not force and hasattr(self, "_last_focused_trade") and self._last_focused_trade == trade_id:
             return
         self._last_focused_trade = trade_id
 
@@ -1741,7 +1784,7 @@ class ChartTab(QWidget):
                 return
 
             try:
-                vb.setRange(xRange=(x1, x2), padding=0.02)
+                self._animate_view_range(vb, x1, x2)
             except Exception as e:
                 logger.debug(f"focus_trade: setRange failed: {e}")
                 return
@@ -1802,6 +1845,15 @@ class ChartTab(QWidget):
             except Exception:
                 pass
 
+            # Show breadcrumb overlay
+            try:
+                trade_label = getattr(trade, "id", None) or getattr(trade, "label", str(trade))
+                self._focus_label.setText(f"Focused: Trade #{trade_label}")
+                self._focus_bar.setVisible(True)
+                self._reposition_focus_bar()
+            except Exception:
+                pass
+
             # Auto-clear after short delay (keeps chart clean)
             try:
                 if not hasattr(self, "_trade_focus_clear_timer"):
@@ -1812,11 +1864,27 @@ class ChartTab(QWidget):
                     )
                 elif self._trade_focus_clear_timer is not None and not self._chart_alive:
                     return
-                self._trade_focus_clear_timer.start(8000)
+                self._trade_focus_clear_timer.start(10000)
             except Exception:
                 pass
         except Exception:
             logger.exception("focus_trade failed")
+
+    def _reposition_focus_bar(self) -> None:
+        """Keep focus breadcrumb in top-right corner of the plot viewport."""
+        if not self._chart_alive:
+            return
+        try:
+            pw = self.plot_widget.width()
+            fw = self._focus_bar.sizeHint().width()
+            self._focus_bar.setGeometry(pw - fw - 8, 4, fw, 26)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj: object, event: QEvent) -> bool:
+        if obj is self.plot_widget and event.type() == QEvent.Type.Resize:
+            self._reposition_focus_bar()
+        return super().eventFilter(obj, event)
 
     def _clear_trade_focus_highlight(self) -> None:
         """Remove trade focus region/lines (best-effort)."""
@@ -1837,5 +1905,7 @@ class ChartTab(QWidget):
                         pass
                 self._trade_focus_lines = []
             self._last_focused_trade = None
+            if hasattr(self, "_focus_bar") and self._focus_bar is not None:
+                self._focus_bar.setVisible(False)
         except Exception:
             pass

@@ -4,7 +4,7 @@ import logging
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -172,6 +172,8 @@ class SectionHeader(QWidget):
 # Stats Tab
 # ─────────────────────────────────────────────
 class StatsTab(QWidget):
+    sigPeriodChanged = Signal(str, object, object)  # kind, start, end — cross-tab sync
+
     def __init__(self, engine):
         super().__init__()
         self.engine = engine
@@ -316,10 +318,14 @@ class StatsTab(QWidget):
             logger.exception("StatsTab signal handler failed")
 
     def _on_period_changed(self, kind: str, start, end) -> None:
-        """Slot for :class:`PeriodSelector` — record state and re-calc."""
+        """Slot for :class:`PeriodSelector` — record state, re-calc, and sync other tabs."""
         self._period_kind = kind
         self._period_start = start
         self._period_end = end
+        try:
+            self.sigPeriodChanged.emit(kind, start, end)
+        except Exception:
+            pass
         try:
             self._recalc_debounce.start()
         except Exception:
@@ -382,21 +388,31 @@ class StatsTab(QWidget):
             return trades
 
         n = len(trades)
-        et_np_raw = np.array([getattr(t, "entry_time_np", None) for t in trades], dtype=object)
-        has_np = np.vectorize(lambda x: x is not None)(et_np_raw)
-        et_arr = np.empty(n, dtype="datetime64[ns]")
-        if has_np.any():
-            for i in np.where(has_np)[0]:
-                et_arr[i] = et_np_raw[i]
-        missing = np.where(~has_np)[0]
-        if missing.size > 0:
-            try:
-                fallback = pd.to_datetime([trades[i].entry_time for i in missing]).to_numpy(dtype="datetime64[ns]")
-                et_arr[missing] = fallback
-            except Exception:
-                et_arr[missing] = np.datetime64("1970-01-01")
+        et_arr = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
+        try:
+            for i, t in enumerate(trades):
+                v = getattr(t, "entry_time_np", None)
+                if v is not None:
+                    et_arr[i] = v
+        except Exception:
+            pass
 
-        mask = (et_arr >= start) & (et_arr < end)
+        valid = et_arr != np.datetime64("NaT")
+        if not valid.all():
+            try:
+                for i in np.where(~valid)[0]:
+                    v = getattr(trades[i], "entry_time", None)
+                    if v is not None:
+                        ts = pd.to_datetime(v, errors="coerce")
+                        if pd.notna(ts):
+                            et_arr[i] = ts
+                            valid[i] = True
+            except Exception:
+                pass
+
+        if not valid.any():
+            return trades
+        mask = (et_arr >= start) & (et_arr < end) & valid
         return [trades[i] for i in np.where(mask)[0]]
 
     def _recalc(self):
@@ -420,7 +436,6 @@ class StatsTab(QWidget):
                     self._show_empty_state()
                     return
                 self._build_static_layout()
-                self._last_recalc_key = key
             elif self._has_data != has_data:
                 self._has_data = has_data
                 self._destroy_layout()
@@ -428,14 +443,12 @@ class StatsTab(QWidget):
                     self._show_empty_state()
                     return
                 self._build_static_layout()
-                self._last_recalc_key = key
 
             if not has_data:
                 return
 
-            if key == self._last_recalc_key and hasattr(self, "_last_recalc_key") and not first_compute:
+            if hasattr(self, "_last_recalc_key") and key == self._last_recalc_key and not first_compute:
                 return
-            self._last_recalc_key = key
 
             cache = getattr(self.engine, "_shared_cache", None)
             m = self._stats_calc.compute(trades, self.engine.initial_equity, shared_cache=cache)
@@ -446,6 +459,7 @@ class StatsTab(QWidget):
             self._apply_confidence_badges(trades)
             self._update_insights(m, trades)
             self._check_milestones(trades)
+            self._last_recalc_key = key
         except Exception:
             logger.exception("StatsTab._recalc failed")
         finally:
@@ -479,13 +493,6 @@ class StatsTab(QWidget):
     # ------------------------------------------------------------------
 
     def _apply_confidence_badges(self, trades) -> None:
-        """Tag Sharpe / Sortino / Calmar / K-Ratio with a "?" badge when
-        the daily-return sample is below
-        :data:`MIN_RETURNS_FOR_RATIO`.
-
-        Caches the daily-return count by ``_last_recalc_key`` so the
-        equity curve is not rebuilt every refresh on the same dataset.
-        """
         cache_key = self._last_recalc_key
         cached = getattr(self, "_n_daily_cache", None)
         if cached is not None and cached[0] == cache_key:

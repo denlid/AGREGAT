@@ -2,12 +2,14 @@
 Trades Tab — Professional trade journal with filters, search, and advanced export.
 """
 
+from __future__ import annotations
+
 import csv
 import logging
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PySide6.QtCore import QDate, QEvent, QPoint, Qt, QSortFilterProxyModel, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QModelIndex, QPoint, Qt, QSortFilterProxyModel, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import (
@@ -516,6 +518,10 @@ class TradesTab(QWidget):
         self.bf.clicked.connect(self._apply_filter)
         filt.addWidget(self.bf)
         filt.addStretch()
+        # Period sync state (from cross-tab sync)
+        self._period_kind: str = "ALL"
+        self._period_start = None
+        self._period_end = None
         # Drill-down banner (from Quant heatmaps)
         self._drilldown_payload = None
         self.lbl_drill = QLabel("")
@@ -568,6 +574,7 @@ class TradesTab(QWidget):
         self.table.doubleClicked.connect(self._on_row_double_clicked)
         self._popup = None
         self._popup_visible = False
+        self._popup_in_flight = False
         ly.addWidget(self.table)
 
         # Phase 1 — empty-state placeholder shown when there are no trades at all.
@@ -840,34 +847,47 @@ class TradesTab(QWidget):
         self._popup_debounce.stop()
         self._do_show_trade_popup()
 
-    def _show_trade_popup(self, trade, index):
-        if self._popup_visible:
+    def _show_trade_popup(self, trade: object, index: QModelIndex) -> None:
+        if self._popup_visible or self._popup_in_flight:
             return
-        self._popup_visible = True
+        self._popup_in_flight = True
         vr = self.table.visualRect(index)
         if not vr.isValid():
+            self._popup_in_flight = False
             self._popup_visible = False
             return
         gp = self.table.mapToGlobal(vr.topLeft())
         close_arr = self._get_close_array(trade)
 
-        if self._popup is not None and self._popup._alive:
-            popup = self._popup
-            try:
-                popup.closed.disconnect(self._on_popup_closed)
-            except (RuntimeError, TypeError):
-                pass
-            popup.closed.connect(self._on_popup_closed)
-            popup._reuse(trade, close_arr)
-            popup.show_popup(gp)
-        else:
-            popup = _TradePnlPopup(trade, close_arr, self.table)
-            popup.show_on_chart.connect(self._on_popup_show_on_chart)
-            popup.closed.connect(self._on_popup_closed)
-            popup.show_popup(gp)
-            self._popup = popup
+        try:
+            if self._popup is not None and self._popup._alive:
+                popup = self._popup
+                try:
+                    popup.closed.disconnect(self._on_popup_closed)
+                except (RuntimeError, TypeError):
+                    pass
+                popup.closed.connect(self._on_popup_closed)
+                popup._reuse(trade, close_arr)
+                popup.show_popup(gp)
+            else:
+                popup = _TradePnlPopup(trade, close_arr, self.table)
+                popup.show_on_chart.connect(self._on_popup_show_on_chart)
+                popup.closed.connect(self._on_popup_closed)
+                popup.show_popup(gp)
+                self._popup = popup
+        except Exception:
+            logger.exception("Failed to show trade popup")
+            self._popup_in_flight = False
+            self._popup_visible = False
+            return
 
-    def _find_main_window(self):
+        self._popup_visible = True
+        QTimer.singleShot(200, lambda: self._release_popup_flight())
+
+    def _release_popup_flight(self) -> None:
+        self._popup_in_flight = False
+
+    def _find_main_window(self) -> QWidget | None:
         p = self.parent()
         while p is not None:
             try:
@@ -881,7 +901,7 @@ class TradesTab(QWidget):
                 break
         return None
 
-    def _on_popup_show_on_chart(self, trade):
+    def _on_popup_show_on_chart(self, trade: object) -> None:
         mw = self._find_main_window()
         if mw is None:
             logger.warning("Cannot find main window for chart navigation")
@@ -909,17 +929,19 @@ class TradesTab(QWidget):
             return
 
         try:
-            mw.chart_tab.focus_trade(trade)
+            mw.chart_tab.focus_trade(trade, force=True)
         except Exception as e:
             logger.exception(f"focus_trade failed: {e}")
 
-    def _on_popup_closed(self):
+    def _on_popup_closed(self) -> None:
         self._popup_visible = False
+        self._popup_in_flight = False
 
-    def _dismiss(self):
+    def _dismiss(self) -> None:
         self._pending_popup = None
         self._popup_debounce.stop()
         self._popup_visible = False
+        self._popup_in_flight = False
         if self._popup is not None:
             p = self._popup
             self._popup = None
@@ -972,12 +994,19 @@ class TradesTab(QWidget):
             self._model.append_trades(new_trades)
         elif pc != current_len:
             self._model.set_trades(list(self.engine.trades))
-        self._proxy.set_filter_type(ft)
-        self._proxy.set_search_text(st)
         if ft == "Custom Date":
-            self._proxy.set_date_range(self.d_from.date(),self.d_to.date())
+            from PySide6.QtCore import QDate
+            self._proxy.apply_filters(
+                filter_type=ft, search_text=st,
+                d_from=self.d_from.date(), d_to=self.d_to.date(),
+            )
+        elif self._period_kind not in ("ALL", ""):
+            from PySide6.QtCore import QDate
+            sd = QDate(self._period_start.year, self._period_start.month, self._period_start.day) if self._period_start is not None else QDate(2000, 1, 1)
+            ed = QDate(self._period_end.year, self._period_end.month, self._period_end.day) if self._period_end is not None else QDate.currentDate()
+            self._proxy.apply_filters(filter_type=ft, search_text=st, d_from=sd, d_to=ed)
         else:
-            self._proxy.set_date_range(None,None)
+            self._proxy.apply_filters(filter_type=ft, search_text=st)
         self._update_summary()
 
     def _update_summary(self):
@@ -1017,6 +1046,16 @@ class TradesTab(QWidget):
 
     def _on_step_signal(self, *a):
         self._refresh_skip()
+
+    def sync_period(self, kind: str, start, end) -> None:
+        """Cross-tab period sync — record period and re-apply filter."""
+        self._period_kind = kind
+        self._period_start = start
+        self._period_end = end
+        try:
+            self._apply_filter()
+        except Exception:
+            pass
 
     def _on_new_trade(self, t):
         if not self.isVisible():

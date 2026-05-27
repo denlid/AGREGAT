@@ -37,6 +37,11 @@ CHART_SCHEMES = {
     "Yellow-Blue": {"bull": "#FFD600", "bear": "#2979FF", "line": "#FFD600"},
     "Black-White": {"bull": "#FFFFFF", "bear": "#666666", "line": "#FFFFFF"},
     "Monochrome": {"bull": "#B0BEC5", "bear": "#546E7A", "line": "#90A4AE"},
+    "Neon Pulse": {"bull": "#00E676", "bear": "#FF1744", "line": "#D500F9"},
+    "Ocean Tide": {"bull": "#00BCD4", "bear": "#FF6F00", "line": "#40C4FF"},
+    "Rose Garden": {"bull": "#E91E63", "bear": "#1DE9B6", "line": "#FF80AB"},
+    "Twilight": {"bull": "#CE93D8", "bear": "#FFAB91", "line": "#80CBC4"},
+    "Solar Flare": {"bull": "#FFD740", "bear": "#E040FB", "line": "#FF6E40"},
 }
 
 # ==========================================
