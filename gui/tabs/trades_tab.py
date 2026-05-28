@@ -522,6 +522,10 @@ class TradesTab(QWidget):
         self._period_kind: str = "ALL"
         self._period_start = None
         self._period_end = None
+        self.lbl_period = QLabel("")
+        self.lbl_period.setStyleSheet(sh.summary_label(get_theme()))
+        self.lbl_period.hide()
+        filt.addWidget(self.lbl_period)
         # Drill-down banner (from Quant heatmaps)
         self._drilldown_payload = None
         self.lbl_drill = QLabel("")
@@ -656,17 +660,7 @@ class TradesTab(QWidget):
         if not isinstance(payload, dict):
             return
         self._drilldown_payload = dict(payload)
-        hour = payload.get("hour")
-        weekday = payload.get("weekday")
-        year = payload.get("year")
-        month = payload.get("month")
         try:
-            # Apply on proxy via public API (one rebuild).
-            if hasattr(self._proxy, "apply_drilldown"):
-                self._proxy.apply_drilldown(hour=hour, weekday=weekday, year=year, month=month)
-            else:
-                logger.error("TradesFilterProxy missing apply_drilldown(); drill-down skipped")
-
             # Ensure base filter is "All" (drill-down is orthogonal)
             try:
                 self.filter_cb.blockSignals(True)
@@ -682,13 +676,6 @@ class TradesTab(QWidget):
     def clear_drilldown(self) -> None:
         """Clear active Quant drill-down filters."""
         self._drilldown_payload = None
-        try:
-            if hasattr(self._proxy, "clear_drilldown"):
-                self._proxy.clear_drilldown()
-            else:
-                logger.error("TradesFilterProxy missing clear_drilldown(); clear skipped")
-        except Exception:
-            logger.exception("clear_drilldown failed")
         self._update_drilldown_badge()
         self._apply_filter(force=True)
 
@@ -740,6 +727,8 @@ class TradesTab(QWidget):
         t = get_theme()
         if hasattr(self,"lbl_summary"):
             self.lbl_summary.setStyleSheet(sh.summary_label(t))
+        if hasattr(self, "lbl_period"):
+            self.lbl_period.setStyleSheet(sh.summary_label(t))
         if hasattr(self, "lbl_drill"):
             self.lbl_drill.setStyleSheet(sh.summary_label(t))
         if hasattr(self,"table"):
@@ -751,6 +740,12 @@ class TradesTab(QWidget):
         self._model.set_trades([])
         self._last = None
         self.lbl_summary.setText("")
+        self._period_kind = "ALL"
+        self._period_start = None
+        self._period_end = None
+        self._drilldown_payload = None
+        self._update_period_badge()
+        self._update_drilldown_badge()
         self.search_box.clear()
         if hasattr(self, "_skip_model"):
             self._skip_model.set_skipped([])
@@ -980,9 +975,17 @@ class TradesTab(QWidget):
     def _apply_filter(self, force=False):
         ft = self.filter_cb.currentText()
         st = self.search_box.text()
-        cs = (len(self.engine.trades),ft,st.lower(),
-              self.d_from.date().toPython() if ft == "Custom Date" else None,
-              self.d_to.date().toPython() if ft == "Custom Date" else None)
+        cs = (
+            len(self.engine.trades),
+            ft,
+            st.lower(),
+            self.d_from.date().toPython() if ft == "Custom Date" else None,
+            self.d_to.date().toPython() if ft == "Custom Date" else None,
+            self._period_kind,
+            self._period_start,
+            self._period_end,
+            tuple(sorted((self._drilldown_payload or {}).items())),
+        )
         prev = getattr(self,"_last",None)
         if not force and prev == cs:
             return
@@ -994,19 +997,33 @@ class TradesTab(QWidget):
             self._model.append_trades(new_trades)
         elif pc != current_len:
             self._model.set_trades(list(self.engine.trades))
+        d_from = None
+        d_to = None
         if ft == "Custom Date":
-            from PySide6.QtCore import QDate
-            self._proxy.apply_filters(
-                filter_type=ft, search_text=st,
-                d_from=self.d_from.date(), d_to=self.d_to.date(),
-            )
+            d_from = self.d_from.date()
+            d_to = self.d_to.date()
         elif self._period_kind not in ("ALL", ""):
-            from PySide6.QtCore import QDate
-            sd = QDate(self._period_start.year, self._period_start.month, self._period_start.day) if self._period_start is not None else QDate(2000, 1, 1)
-            ed = QDate(self._period_end.year, self._period_end.month, self._period_end.day) if self._period_end is not None else QDate.currentDate()
-            self._proxy.apply_filters(filter_type=ft, search_text=st, d_from=sd, d_to=ed)
+            d_from = QDate(self._period_start.year, self._period_start.month, self._period_start.day) if self._period_start is not None else QDate(2000, 1, 1)
+            d_to = QDate(self._period_end.year, self._period_end.month, self._period_end.day) if self._period_end is not None else QDate.currentDate()
+        p = self._drilldown_payload or {}
+        if hasattr(self._proxy, "apply_all_filters"):
+            self._proxy.apply_all_filters(
+                filter_type=ft,
+                search_text=st,
+                d_from=d_from,
+                d_to=d_to,
+                hour=p.get("hour"),
+                weekday=p.get("weekday"),
+                year=p.get("year"),
+                month=p.get("month"),
+            )
         else:
-            self._proxy.apply_filters(filter_type=ft, search_text=st)
+            self._proxy.apply_filters(filter_type=ft, search_text=st, d_from=d_from, d_to=d_to)
+        try:
+            self.table.scrollToTop()
+        except Exception:
+            pass
+        self._update_period_badge()
         self._update_summary()
 
     def _update_summary(self):
@@ -1056,6 +1073,15 @@ class TradesTab(QWidget):
             self._apply_filter()
         except Exception:
             pass
+
+    def _update_period_badge(self) -> None:
+        if not hasattr(self, "lbl_period"):
+            return
+        if self._period_kind in ("ALL", ""):
+            self.lbl_period.hide()
+            return
+        self.lbl_period.setText(f"Period: {self._period_kind}")
+        self.lbl_period.show()
 
     def _on_new_trade(self, t):
         if not self.isVisible():

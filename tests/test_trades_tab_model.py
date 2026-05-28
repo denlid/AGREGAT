@@ -137,6 +137,17 @@ def test_model_raw_role_returns_floats_for_sort(qapp: QApplication) -> None:
     assert isinstance(raw_id, int)
 
 
+def test_model_caches_tolerate_missing_vectorized_time_attrs(qapp: QApplication) -> None:
+    trades = _make_trades(3)
+    for t in trades:
+        delattr(t, "entry_time_np")
+        t.exit_time_np = None
+    m = TradesTableModel()
+    m.set_trades(trades)
+    assert m.rowCount() == 3
+    assert m.datetime_sort_key(0, 2) is not None
+
+
 def test_proxy_filter_wins_only(qapp: QApplication) -> None:
     m = TradesTableModel()
     m.set_trades(_make_trades(50))

@@ -188,6 +188,30 @@ def _format_duration(minutes: int) -> str:
     return f"{minutes} min"
 
 
+def _safe_float(trade: Any, attr: str, default: float = 0.0) -> float:
+    try:
+        value = getattr(trade, attr, default)
+        return float(value if value is not None else default)
+    except (TypeError, ValueError, AttributeError):
+        return default
+
+
+def _safe_int(trade: Any, attr: str, default: int = 0) -> int:
+    try:
+        value = getattr(trade, attr, default)
+        return int(value if value is not None else default)
+    except (TypeError, ValueError, AttributeError):
+        return default
+
+
+def _safe_str(trade: Any, attr: str, default: str = "") -> str:
+    try:
+        value = getattr(trade, attr, default)
+        return str(value if value is not None else default)
+    except AttributeError:
+        return default
+
+
 # Custom Qt roles — proxy uses ``RawValueRole`` for sort comparisons
 # and the type-filter checks pull through ``Qt.UserRole``.
 RawValueRole = Qt.ItemDataRole.UserRole + 1
@@ -275,27 +299,27 @@ class TradesTableModel(QAbstractTableModel):
             return np.fromiter(getter, dtype=float, count=n)
         for col, arr in self._numeric_keys.items():
             if col == COL_ID:
-                ext = _arr(int(getattr(t, "id", 0) or 0) for t in ts)
+                ext = _arr(_safe_int(t, "id") for t in ts)
             elif col == COL_ENTRY_PRICE:
-                ext = _arr(float(t.entry_price) for t in ts)
+                ext = _arr(_safe_float(t, "entry_price") for t in ts)
             elif col == COL_EXIT_PRICE:
-                ext = _arr(float(t.exit_price) for t in ts)
+                ext = _arr(_safe_float(t, "exit_price") for t in ts)
             elif col == COL_PNL_POINTS:
-                ext = _arr(float(t.pnl_points) for t in ts)
+                ext = _arr(_safe_float(t, "pnl_points") for t in ts)
             elif col == COL_PNL_DOLLARS:
-                ext = _arr(float(t.pnl) for t in ts)
+                ext = _arr(_safe_float(t, "pnl") for t in ts)
             elif col == COL_VOLUME:
-                ext = _arr(float(t.volume) for t in ts)
+                ext = _arr(_safe_float(t, "volume") for t in ts)
             elif col == COL_DURATION:
-                ext = _arr(int(t.duration_minutes) for t in ts)
+                ext = _arr(_safe_int(t, "duration_minutes") for t in ts)
             elif col == COL_MAE:
-                ext = _arr(float(t.mae) for t in ts)
+                ext = _arr(_safe_float(t, "mae") for t in ts)
             elif col == COL_MFE:
-                ext = _arr(float(t.mfe) for t in ts)
+                ext = _arr(_safe_float(t, "mfe") for t in ts)
             elif col == COL_MAE_DOLLARS:
-                ext = _arr(float(getattr(t, "mae_dollars", 0.0)) for t in ts)
+                ext = _arr(_safe_float(t, "mae_dollars") for t in ts)
             elif col == COL_MFE_DOLLARS:
-                ext = _arr(float(getattr(t, "mfe_dollars", 0.0)) for t in ts)
+                ext = _arr(_safe_float(t, "mfe_dollars") for t in ts)
             elif col == COL_MAE_PCT:
                 ext = _arr(self._mae_pct(t) for t in ts)
             elif col == COL_MFE_PCT:
@@ -305,9 +329,9 @@ class TradesTableModel(QAbstractTableModel):
             else:
                 continue
             self._numeric_keys[col] = np.concatenate([arr, ext])
-        self._string_keys[COL_DIRECTION].extend(str(t.direction).upper() for t in ts)
-        self._string_keys[COL_EXIT_REASON].extend(str(t.exit_reason) for t in ts)
-        self._string_keys[COL_SESSION].extend(str(t.session) for t in ts)
+        self._string_keys[COL_DIRECTION].extend(_safe_str(t, "direction").upper() for t in ts)
+        self._string_keys[COL_EXIT_REASON].extend(_safe_str(t, "exit_reason") for t in ts)
+        self._string_keys[COL_SESSION].extend(_safe_str(t, "session") for t in ts)
         et_np = [getattr(t, "entry_time_np", None) for t in ts]
         xt_np = [getattr(t, "exit_time_np", None) for t in ts]
         for key, items in [(COL_ENTRY_TIME, et_np), (COL_EXIT_TIME, xt_np)]:
@@ -317,7 +341,11 @@ class TradesTableModel(QAbstractTableModel):
                 ext[i] = v if v is not None else np.datetime64("NaT")
             self._datetime_keys[key] = np.concatenate([arr, ext])
         self._search_blobs.extend(
-            f"{t.id} {t.direction} {t.exit_reason} {t.session} {t.entry_time} {t.exit_time}".lower()
+            (
+                f"{_safe_str(t, 'id')} {_safe_str(t, 'direction')} "
+                f"{_safe_str(t, 'exit_reason')} {_safe_str(t, 'session')} "
+                f"{_safe_str(t, 'entry_time')} {_safe_str(t, 'exit_time')}"
+            ).lower()
             for t in ts
         )
         if hasattr(self, "_drill_hour"):
@@ -338,7 +366,7 @@ class TradesTableModel(QAbstractTableModel):
                 self._drill_weekday = np.concatenate([self._drill_weekday, np.zeros(pad_n, dtype=np.int8)])
                 self._drill_year = np.concatenate([self._drill_year, np.zeros(pad_n, dtype=np.int16)])
                 self._drill_month = np.concatenate([self._drill_month, np.zeros(pad_n, dtype=np.int8)])
-        dir_ext = [str(t.direction).upper() for t in ts]
+        dir_ext = [_safe_str(t, "direction").upper() for t in ts]
         if dir_ext:
             dir_arr = np.asarray(dir_ext, dtype=object)
             self._is_long = np.concatenate([self._is_long, dir_arr == "LONG"])
@@ -366,17 +394,17 @@ class TradesTableModel(QAbstractTableModel):
             return np.fromiter(getter, dtype=float, count=n)
 
         self._numeric_keys = {
-            COL_ID: _arr(int(getattr(t, "id", 0) or 0) for t in ts),
-            COL_ENTRY_PRICE: _arr(float(t.entry_price) for t in ts),
-            COL_EXIT_PRICE: _arr(float(t.exit_price) for t in ts),
-            COL_PNL_POINTS: _arr(float(t.pnl_points) for t in ts),
-            COL_PNL_DOLLARS: _arr(float(t.pnl) for t in ts),
-            COL_VOLUME: _arr(float(t.volume) for t in ts),
-            COL_DURATION: _arr(int(t.duration_minutes) for t in ts),
-            COL_MAE: _arr(float(t.mae) for t in ts),
-            COL_MFE: _arr(float(t.mfe) for t in ts),
-            COL_MAE_DOLLARS: _arr(float(getattr(t, "mae_dollars", 0.0)) for t in ts),
-            COL_MFE_DOLLARS: _arr(float(getattr(t, "mfe_dollars", 0.0)) for t in ts),
+            COL_ID: _arr(_safe_int(t, "id") for t in ts),
+            COL_ENTRY_PRICE: _arr(_safe_float(t, "entry_price") for t in ts),
+            COL_EXIT_PRICE: _arr(_safe_float(t, "exit_price") for t in ts),
+            COL_PNL_POINTS: _arr(_safe_float(t, "pnl_points") for t in ts),
+            COL_PNL_DOLLARS: _arr(_safe_float(t, "pnl") for t in ts),
+            COL_VOLUME: _arr(_safe_float(t, "volume") for t in ts),
+            COL_DURATION: _arr(_safe_int(t, "duration_minutes") for t in ts),
+            COL_MAE: _arr(_safe_float(t, "mae") for t in ts),
+            COL_MFE: _arr(_safe_float(t, "mfe") for t in ts),
+            COL_MAE_DOLLARS: _arr(_safe_float(t, "mae_dollars") for t in ts),
+            COL_MFE_DOLLARS: _arr(_safe_float(t, "mfe_dollars") for t in ts),
             COL_MAE_PCT: _arr(self._mae_pct(t) for t in ts),
             COL_MFE_PCT: _arr(self._mfe_pct(t) for t in ts),
             COL_RR: _arr(_calc_rr(t) for t in ts),
@@ -384,9 +412,9 @@ class TradesTableModel(QAbstractTableModel):
 
         # String columns
         self._string_keys = {
-            COL_DIRECTION: [str(t.direction).upper() for t in ts],
-            COL_EXIT_REASON: [str(t.exit_reason) for t in ts],
-            COL_SESSION: [str(t.session) for t in ts],
+            COL_DIRECTION: [_safe_str(t, "direction").upper() for t in ts],
+            COL_EXIT_REASON: [_safe_str(t, "exit_reason") for t in ts],
+            COL_SESSION: [_safe_str(t, "session") for t in ts],
         }
 
         # Datetime columns — use partial availability (NaT for missing).
@@ -404,7 +432,11 @@ class TradesTableModel(QAbstractTableModel):
 
         # Lowercased search blob per row — includes entry/exit time strings.
         self._search_blobs = [
-            f"{t.id} {t.direction} {t.exit_reason} {t.session} {t.entry_time} {t.exit_time}".lower()
+            (
+                f"{_safe_str(t, 'id')} {_safe_str(t, 'direction')} "
+                f"{_safe_str(t, 'exit_reason')} {_safe_str(t, 'session')} "
+                f"{_safe_str(t, 'entry_time')} {_safe_str(t, 'exit_time')}"
+            ).lower()
             for t in ts
         ]
 
@@ -628,13 +660,15 @@ class TradesTableModel(QAbstractTableModel):
 
     @staticmethod
     def _mae_pct(trade: Any) -> float:
-        ep = getattr(trade, "entry_price", 0.0) or 0.0
-        return (trade.mae / ep * 100) if ep > 0 else 0.0
+        ep = _safe_float(trade, "entry_price")
+        mae = _safe_float(trade, "mae")
+        return (mae / ep * 100) if ep > 0 else 0.0
 
     @staticmethod
     def _mfe_pct(trade: Any) -> float:
-        ep = getattr(trade, "entry_price", 0.0) or 0.0
-        return (trade.mfe / ep * 100) if ep > 0 else 0.0
+        ep = _safe_float(trade, "entry_price")
+        mfe = _safe_float(trade, "mfe")
+        return (mfe / ep * 100) if ep > 0 else 0.0
 
     def _display(self, trade: Any, col: int) -> str:
         """Formatted text for ``Qt.DisplayRole``. Identical layout to the
@@ -961,6 +995,59 @@ class TradesFilterProxy(QAbstractTableModel):
             if d_to_dt != self._date_to:
                 self._date_to = d_to_dt
                 changed = True
+        if changed:
+            self._rebuild_mapping()
+
+    def apply_all_filters(
+        self,
+        *,
+        filter_type: Optional[str] = None,
+        search_text: Optional[str] = None,
+        d_from: Optional[QDate] = None,
+        d_to: Optional[QDate] = None,
+        hour: Optional[int] = None,
+        weekday: Optional[int] = None,
+        year: Optional[int] = None,
+        month: Optional[int] = None,
+    ) -> None:
+        changed = False
+        if filter_type is not None and filter_type != self._filter_type:
+            self._filter_type = filter_type
+            changed = True
+        if search_text is not None:
+            v = search_text.lower()
+            if v != self._search_text:
+                self._search_text = v
+                changed = True
+        d_from_dt: Any = None
+        if d_from is not None:
+            d_from_dt = pd.Timestamp(d_from.toPython()).to_datetime64()
+        if d_from_dt != self._date_from:
+            self._date_from = d_from_dt
+            changed = True
+        d_to_dt: Any = None
+        if d_to is not None:
+            end_ts = (
+                pd.Timestamp(d_to.toPython())
+                + pd.Timedelta(days=1)
+                - pd.Timedelta(nanoseconds=1)
+            )
+            d_to_dt = end_ts.to_datetime64()
+        if d_to_dt != self._date_to:
+            self._date_to = d_to_dt
+            changed = True
+        if hour != self._filter_hour:
+            self._filter_hour = hour
+            changed = True
+        if weekday != self._filter_weekday:
+            self._filter_weekday = weekday
+            changed = True
+        if year != self._filter_year:
+            self._filter_year = year
+            changed = True
+        if month != self._filter_month:
+            self._filter_month = month
+            changed = True
         if changed:
             self._rebuild_mapping()
 

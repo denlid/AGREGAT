@@ -1,6 +1,7 @@
 """Stats Tab — Premium statistics dashboard."""
 
 import logging
+import time
 
 import numpy as np
 import pandas as pd
@@ -184,8 +185,12 @@ class StatsTab(QWidget):
         self._avg_rr_breakdown: dict = {"pos_avg": 0.0, "pos_count": 0, "neg_avg": 0.0, "neg_count": 0}
         self._ui_built: bool = False
         self._has_data: bool = False
+        self._state: str = "empty"
         self._stats_calc = StatsCalculator()
         self._last_recalc_key = None
+        self._last_sparkline_update_ts = 0.0
+        self._date_filter_warning: str | None = None
+        self._period_warning_label: QLabel | None = None
         # Phase 2 EPIC 2.2 — auto-insights state.
         self._insight_container: QWidget | None = None
         self._insight_layout: QVBoxLayout | None = None
@@ -375,6 +380,7 @@ class StatsTab(QWidget):
         return start, end
 
     def _get_filtered_trades(self):
+        self._date_filter_warning = None
         cache = getattr(self.engine, "_shared_cache", None)
         if cache is not None:
             trades = cache.get_sorted_trades()
@@ -395,7 +401,7 @@ class StatsTab(QWidget):
                 if v is not None:
                     et_arr[i] = v
         except Exception:
-            pass
+            logger.exception("StatsTab entry_time_np preload failed")
 
         valid = et_arr != np.datetime64("NaT")
         if not valid.all():
@@ -408,62 +414,100 @@ class StatsTab(QWidget):
                             et_arr[i] = ts
                             valid[i] = True
             except Exception:
-                pass
+                logger.exception("StatsTab entry_time fallback parsing failed")
 
         if not valid.any():
+            msg = (
+                "Date filter could not be applied: trades do not have usable entry timestamps."
+            )
+            self._date_filter_warning = msg
+            logger.warning("StatsTab %s period=%s", msg, self._period_kind)
             return trades
+        missing = int((~valid).sum())
+        if missing:
+            self._date_filter_warning = (
+                f"Date filter applied partially: {missing} trades have no usable entry timestamp."
+            )
+            logger.warning(
+                "StatsTab date filter applied partially: %s/%s trades missing timestamps for period %s",
+                missing,
+                n,
+                self._period_kind,
+            )
         mask = (et_arr >= start) & (et_arr < end) & valid
         return [trades[i] for i in np.where(mask)[0]]
+
+    def _make_recalc_key(self, trades) -> tuple:
+        return (
+            len(trades),
+            id(trades[-1]) if trades else None,
+            self._period_kind,
+            str(self._period_start) if self._period_start is not None else None,
+            str(self._period_end) if self._period_end is not None else None,
+        )
 
     def _recalc(self):
         try:
             trades = self._get_filtered_trades()
             has_data = bool(trades)
-            key = (len(trades), id(trades[-1]) if trades else None)
+            key = self._make_recalc_key(trades)
 
-            # Show a loading overlay only on the first compute and only
-            # if there's data to crunch. Subsequent recalcs are typically
-            # ≤ 10 ms; flashing the overlay would be more distracting
-            # than helpful.
             first_compute = (not self._ui_built) and has_data
             if first_compute:
                 self._show_spinner("Loading statistics…")
 
-            if not self._ui_built:
-                self._ui_built = True
-                self._has_data = has_data
-                if not has_data:
-                    self._show_empty_state()
-                    return
-                self._build_static_layout()
-            elif self._has_data != has_data:
-                self._has_data = has_data
-                self._destroy_layout()
-                if not has_data:
-                    self._show_empty_state()
-                    return
-                self._build_static_layout()
-
-            if not has_data:
+            if hasattr(self, "_last_recalc_key") and key == self._last_recalc_key and not first_compute:
+                logger.debug("StatsTab _recalc skip key=%r state=%s", key, self._state)
                 return
 
-            if hasattr(self, "_last_recalc_key") and key == self._last_recalc_key and not first_compute:
+            if has_data:
+                if (not self._ui_built) or (not self._has_data):
+                    self._destroy_layout()
+                    self._build_static_layout()
+                    self._ui_built = True
+                    self._has_data = True
+                    self._state = "data"
+            else:
+                if (not self._ui_built) or self._has_data:
+                    self._destroy_layout()
+                    self._show_empty_state(error=False)
+                    self._ui_built = True
+                    self._has_data = False
+                    self._state = "empty"
+                self._last_recalc_key = key
                 return
 
             cache = getattr(self.engine, "_shared_cache", None)
             m = self._stats_calc.compute(trades, self.engine.initial_equity, shared_cache=cache)
             self._avg_rr_breakdown = m.get("avg_rr_breakdown", {})
             G, R, A, W = "green", "red", "amber", "text"
-            self._update_cards(m, G=G, R=R, A=A, W=W)
-            self._update_card_sparklines(trades)
-            self._apply_confidence_badges(trades)
-            self._update_insights(m, trades)
-            self._check_milestones(trades)
-            self._last_recalc_key = key
+            self._safe_section("period_warning", self._update_period_warning)
+            cards_ok = self._safe_section("cards", self._update_cards, m, G=G, R=R, A=A, W=W)
+            self._safe_section("sparklines", self._update_card_sparklines, trades)
+            self._safe_section("confidence_badges", self._apply_confidence_badges, trades)
+            self._safe_section("insights", self._update_insights, m, trades)
+            self._safe_section("milestones", self._check_milestones, trades)
+            if cards_ok:
+                self._last_recalc_key = key
+            else:
+                logger.warning("StatsTab refresh not cached because card update failed key=%r", key)
         except Exception:
             logger.exception("StatsTab._recalc failed")
+            self._destroy_layout()
+            self._show_empty_state(error=True)
+            self._ui_built = True
+            self._has_data = False
+            self._state = "error"
         finally:
             self._hide_spinner()
+
+    def _safe_section(self, name: str, fn, *args, **kwargs) -> bool:
+        try:
+            fn(*args, **kwargs)
+            return True
+        except Exception:
+            logger.exception("StatsTab section %r failed", name)
+            return False
 
     # ------------------------------------------------------------------
     # Loading spinner helpers (Polish pass)
@@ -493,7 +537,7 @@ class StatsTab(QWidget):
     # ------------------------------------------------------------------
 
     def _apply_confidence_badges(self, trades) -> None:
-        cache_key = self._last_recalc_key
+        cache_key = self._make_recalc_key(trades)
         cached = getattr(self, "_n_daily_cache", None)
         if cached is not None and cached[0] == cache_key:
             n_daily = cached[1]
@@ -550,7 +594,6 @@ class StatsTab(QWidget):
     def _update_insights(self, m: dict, trades) -> None:
         if self._insight_layout is None or self._insight_container is None:
             return
-        # Clear previous cards.
         while self._insight_layout.count():
             item = self._insight_layout.takeAt(0)
             if item is not None and item.widget() is not None:
@@ -558,8 +601,11 @@ class StatsTab(QWidget):
         self._insight_cards.clear()
 
         bundle = self._build_metrics_bundle(m)
-        insights = generate_insights(bundle, trades)
-        # Drop user-dismissed insights.
+        try:
+            insights = generate_insights(bundle, trades)
+        except Exception:
+            logger.exception("StatsTab insights generation failed")
+            insights = []
         insights = [i for i in insights if i.rule_id not in self._dismissed_insights]
         if not insights:
             self._insight_container.setVisible(False)
@@ -569,9 +615,13 @@ class StatsTab(QWidget):
         if self._insight_section_header is not None:
             self._insight_section_header.setVisible(True)
         self._insight_container.setVisible(True)
-        for ins in insights[:6]:  # cap so the section never overwhelms the dashboard
+        for ins in insights[:6]:
             card = InsightCard(ins, parent=self._insight_container)
             card.dismissed.connect(self._on_insight_dismissed)
+            try:
+                card.setWordWrap(True)
+            except Exception:
+                logger.debug("InsightCard word-wrap unavailable", exc_info=True)
             self._insight_layout.addWidget(card)
             self._insight_cards.append(card)
 
@@ -621,22 +671,26 @@ class StatsTab(QWidget):
         """Recompute and attach sparklines for the cards listed in ``_CARD_SPARK_KIND``."""
         if not trades:
             return
+        now = time.monotonic()
+        if now - getattr(self, "_last_sparkline_update_ts", 0.0) < 0.12:
+            return
         try:
             pnl_np = np.asarray([float(t.pnl) for t in trades], dtype=np.float64)
         except Exception:
             return
         if pnl_np.size == 0:
             return
+
         initial_equity = float(getattr(self.engine, "initial_equity", 0.0) or 0.0)
         pos = pnl_np[pnl_np > 0]
-        neg = pnl_np[pnl_np < 0]
+        neg = np.abs(pnl_np[pnl_np < 0])
 
-        def _series_for(kind: str) -> list[float]:
+        def _series_for(kind: str):
             try:
                 if kind == "cumulative":
-                    return spk.cumulative_equity(pnl_np, initial_equity)
+                    return spk.cumulative_curve(pnl_np, initial_equity=initial_equity)
                 if kind == "underwater":
-                    return spk.underwater_curve(pnl_np, initial_equity)
+                    return spk.underwater_curve(pnl_np, initial_equity=initial_equity)
                 if kind == "roll_wr":
                     return spk.rolling_win_rate(pnl_np)
                 if kind == "roll_ret":
@@ -663,21 +717,23 @@ class StatsTab(QWidget):
                 card.set_sparkline(_series_for(kind))
             except Exception:
                 logger.exception("set_sparkline failed for %s", title)
+        self._last_sparkline_update_ts = now
 
-    def _show_empty_state(self):
+    def _show_empty_state(self, error: bool = False):
         while self.main_layout.count():
             item = self.main_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self._cards.clear()
         empty = EmptyState(
-            icon="\U0001F4CA",
-            headline="No trades yet",
-            subtitle="Load data and run a strategy",
+            icon="⚠" if error else "\U0001F4CA",
+            headline="Statistics unavailable" if error else "No trades yet",
+            subtitle="An error occurred while calculating statistics" if error else "Load data and run a strategy",
             cta_text="",
             parent=self._content,
         )
         self.main_layout.addWidget(empty, stretch=1)
+        self._period_warning_label = None
 
     def _destroy_layout(self):
         while self.main_layout.count():
@@ -685,6 +741,7 @@ class StatsTab(QWidget):
             if item.widget():
                 item.widget().deleteLater()
         self._cards.clear()
+        self._period_warning_label = None
 
     def _build_static_layout(self) -> None:
         """Build the card layout once. Subsequent refreshes update values in-place."""
@@ -699,6 +756,11 @@ class StatsTab(QWidget):
         self._insight_layout.setContentsMargins(0, 0, 0, 4)
         self._insight_container.setVisible(False)
         self.main_layout.addWidget(self._insight_container)
+
+        self._period_warning_label = QLabel("")
+        self._period_warning_label.setWordWrap(True)
+        self._period_warning_label.hide()
+        self.main_layout.addWidget(self._period_warning_label)
 
         # ── Section: Overview ─────────────────
         self.main_layout.addWidget(SectionHeader("Overview"))
@@ -799,6 +861,22 @@ class StatsTab(QWidget):
         self.main_layout.addWidget(self._grid5)
 
         self.main_layout.addStretch()
+
+    def _update_period_warning(self) -> None:
+        label = self._period_warning_label
+        if label is None:
+            return
+        msg = self._date_filter_warning
+        if not msg:
+            label.hide()
+            return
+        t = get_theme()
+        label.setText(msg)
+        label.setStyleSheet(
+            f"color: {sh.c(t, 'amber')}; background: transparent; "
+            "font-size: 11px; padding: 2px 0 6px 0;"
+        )
+        label.show()
 
     def _update_cards(self, m: dict, *, G: str, R: str, A: str, W: str) -> None:
         """Update values/colors for pre-built cards."""
@@ -980,6 +1058,11 @@ class StatsTab(QWidget):
             formula=formula,
             explanation=explanation,
         )
+        try:
+            card.setMinimumWidth(180)
+            card.setMaximumWidth(320)
+        except Exception:
+            logger.debug("MetricCard sizing unavailable", exc_info=True)
         if title == "Avg RR":
             bd = self._avg_rr_breakdown
             card.setToolTip(

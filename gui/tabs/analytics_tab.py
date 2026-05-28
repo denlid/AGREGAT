@@ -4,6 +4,7 @@ session matrix, streak tracker, custom range WR, advanced stats.
 """
 
 import logging
+import threading
 
 import numpy as np
 import pandas as pd
@@ -164,6 +165,7 @@ class AnalyticsTab(QWidget):
         self._summary_labels: list = []
         self._heatmap_worker = None
         self._heatmap_gen = 0
+        self._heatmap_lock = threading.Lock()
 
         # Lazy tab factories — only create heavy content on first activation
         self._tab_factories: dict = {}
@@ -188,10 +190,16 @@ class AnalyticsTab(QWidget):
             placeholder = QWidget()
             ph_layout = QVBoxLayout(placeholder)
             ph_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            ph_label = QLabel(f"Select {name} tab to load")
+            ph_layout.setSpacing(8)
+            ph_label = QLabel("Натисніть для завантаження…")
             ph_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ph_label.setProperty("lazyPlaceholder", True)
             ph_label.setStyleSheet("color: #666; font-size: 13px;")
+            ph_hint = QLabel(f"{name} will load on first open")
+            ph_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ph_hint.setStyleSheet("color: #666; font-size: 11px;")
             ph_layout.addWidget(ph_label)
+            ph_layout.addWidget(ph_hint)
             self.sub_tabs.addTab(placeholder, name)
             self._tab_factories[name] = factory
 
@@ -222,18 +230,23 @@ class AnalyticsTab(QWidget):
         tab_name = self.sub_tabs.tabText(index)
         if tab_name in self._loaded_tabs:
             return
+        placeholder_label = widget.findChild(QLabel)
+        if placeholder_label is not None:
+            placeholder_label.setText("Loading…")
         self._loaded_tabs.add(tab_name)
         factory = self._tab_factories.get(tab_name)
         if factory is None:
             return
-        # Replace placeholder with real content
         real_tab = factory()
         self.sub_tabs.removeTab(index)
         self.sub_tabs.insertTab(index, real_tab, tab_name)
         self.sub_tabs.setCurrentIndex(index)
         self._panel_widgets.append(real_tab)
-        # Re-apply theme so newly created plot widgets get the correct bg
         self._apply_theme()
+        try:
+            self._refresh_loaded_tab(tab_name)
+        except Exception:
+            logger.exception("Analytics lazy tab refresh failed for %s", tab_name)
 
     def closeEvent(self, e):
         self._refresh_active = False
@@ -913,30 +926,35 @@ class AnalyticsTab(QWidget):
         trades = list(getattr(self.engine, "trades", []) or [])
         key = _trade_cache_key(trades, float(getattr(self.engine, "initial_equity", 0.0) or 0.0))
         if not force and hasattr(self, "_last_trade_key") and key == self._last_trade_key:
+            logger.debug("Analytics refresh_all skip key=%r", key)
             return
 
-        self._spinner.start()
+        if self._spinner is not None and not self._lazy_spinner_active():
+            self._spinner.start()
+        ok = True
+        try:
+            ok &= self._safe_update("equity_curve", self._update_equity_curve)
+            ok &= self._safe_update("session_matrix", self._update_session_matrix, "session_plot")
+            ok &= self._safe_update("streak_tracker", self._update_streak_tracker, "str_card_maxw")
+            ok &= self._safe_update("calendar_heatmap", self._update_calendar_heatmap, "cal_plot")
+            ok &= self._safe_update("trade_timeline", self._update_trade_timeline, "timeline_plot")
 
-        # Fast panels
-        self._safe_update("equity_curve", self._update_equity_curve)
-        self._safe_update("session_matrix", self._update_session_matrix, "session_plot")
-        self._safe_update("streak_tracker", self._update_streak_tracker, "str_card_maxw")
-        self._safe_update("calendar_heatmap", self._update_calendar_heatmap, "cal_plot")
-        self._safe_update("trade_timeline", self._update_trade_timeline, "timeline_plot")
-
-        # Medium/heavy panels
-        pnl_arr = np.array([t.pnl for t in trades], dtype=float) if trades else None
-        self._safe_update("advanced_stats", lambda: self._update_advanced_stats(pnl_arr), "dist_plot")
-        self._safe_update("extended_metrics", lambda: self._update_extended_metrics(pnl_arr), "duration_plot")
-        self._safe_update("rolling_metrics", self._update_rolling_metrics, "roll_sharpe_plot")
-        self._safe_update("attribution", self._update_attribution, "_dd_model")
-        self._safe_update("slippage", self._update_slippage, "slip_plot")
-        self._safe_update("mae_mfe", self._update_mae_mfe, "mae_mfe_plot")
-        self._safe_update("r_multiples", self._update_r_multiples, "r_hist")
-        self._safe_update("heatmaps", self._update_heatmaps)
-
-        self._last_trade_key = key
-        self._spinner.stop()
+            pnl_arr = np.array([t.pnl for t in trades], dtype=float) if trades else None
+            ok &= self._safe_update("advanced_stats", lambda: self._update_advanced_stats(pnl_arr), "dist_plot")
+            ok &= self._safe_update("extended_metrics", lambda: self._update_extended_metrics(pnl_arr), "duration_plot")
+            ok &= self._safe_update("rolling_metrics", self._update_rolling_metrics, "roll_sharpe_plot")
+            ok &= self._safe_update("attribution", self._update_attribution, "_dd_model")
+            ok &= self._safe_update("slippage", self._update_slippage, "slip_plot")
+            ok &= self._safe_update("mae_mfe", self._update_mae_mfe, "mae_mfe_plot")
+            ok &= self._safe_update("r_multiples", self._update_r_multiples, "r_hist")
+            ok &= self._safe_update("heatmaps", self._update_heatmaps)
+            if ok:
+                self._last_trade_key = key
+            else:
+                logger.warning("Analytics refresh_all not cached because a loaded panel failed key=%r", key)
+        finally:
+            if self._spinner is not None:
+                self._spinner.stop()
 
     def _is_safe_for_refresh(self) -> bool:
         try:
@@ -944,13 +962,52 @@ class AnalyticsTab(QWidget):
         except RuntimeError:
             return False
 
-    def _safe_update(self, name: str, fn, guard_attr: str | None = None) -> None:
+    def _safe_update(self, name: str, fn, guard_attr: str | None = None) -> bool:
         if guard_attr is not None and not hasattr(self, guard_attr):
-            return  # sub-tab not yet lazy-loaded
+            return True  # sub-tab not yet lazy-loaded
         try:
             fn()
+            return True
         except Exception:
-            logger.exception("Analytics panel %r failed — skipping", name)
+            logger.exception("Analytics panel %r failed - skipping", name)
+            return False
+
+    def _refresh_loaded_tab(self, tab_name: str) -> None:
+        trades = list(getattr(self.engine, "trades", []) or [])
+        pnl_arr = np.array([t.pnl for t in trades], dtype=float) if trades else None
+        dispatch = {
+            "Rolling": ("rolling_metrics", self._update_rolling_metrics),
+            "Patterns": ("patterns", lambda: (
+                self._update_session_matrix(),
+                self._update_streak_tracker(),
+            )),
+            "Advanced": ("advanced", lambda: (
+                self._update_advanced_stats(pnl_arr),
+                self._update_extended_metrics(pnl_arr),
+            )),
+            "Heatmaps": ("heatmaps", lambda: (
+                self._update_calendar_heatmap(),
+                self._update_heatmaps(),
+            )),
+            "Timeline": ("timeline", self._update_trade_timeline),
+            "MAE / MFE": ("mae_mfe", self._update_mae_mfe),
+            "R-multiples": ("r_multiples", self._update_r_multiples),
+            "Attribution": ("attribution", self._update_attribution),
+            "Slippage": ("slippage", self._update_slippage),
+            "Custom Range": ("custom_range", self.calc_custom_range),
+        }
+        item = dispatch.get(tab_name)
+        if item is None:
+            return
+        name, fn = item
+        self._safe_update(name, fn)
+
+    def _lazy_spinner_active(self) -> bool:
+        sp = getattr(self, "_heatmap_spinner", None)
+        try:
+            return bool(sp is not None and sp.isVisible())
+        except Exception:
+            return sp is not None
 
     def refresh_light(self, force: bool = False) -> None:
         """Lightweight refresh used during live backtest.
@@ -960,20 +1017,26 @@ class AnalyticsTab(QWidget):
         """
         trades = list(getattr(self.engine, "trades", []) or [])
         key = _trade_cache_key(trades, float(getattr(self.engine, "initial_equity", 0.0) or 0.0))
-        light_key = getattr(self, "_light_trade_key", None)
-        if not force and key == light_key:
+        if not force and hasattr(self, "_light_trade_key") and key == self._light_trade_key:
+            logger.debug("Analytics refresh_light skip key=%r", key)
             return
-        if self._spinner is not None and self.isVisible():
-            self._spinner.start("Updating analytics\u2026")
-        self._safe_update("equity_curve", self._update_equity_curve)
-        self._safe_update("session_matrix", self._update_session_matrix, "session_plot")
-        self._safe_update("streak_tracker", self._update_streak_tracker, "str_card_maxw")
-        self._safe_update("calendar_heatmap", self._update_calendar_heatmap, "cal_plot")
-        self._safe_update("trade_timeline", self._update_trade_timeline, "timeline_plot")
-        self._safe_update("attribution", self._update_attribution, "_dd_model")
-        self._light_trade_key = key
-        if self._spinner is not None:
-            self._spinner.stop()
+        if self._spinner is not None and self.isVisible() and not self._lazy_spinner_active():
+            self._spinner.start("Updating analytics...")
+        ok = True
+        try:
+            ok &= self._safe_update("equity_curve", self._update_equity_curve)
+            ok &= self._safe_update("session_matrix", self._update_session_matrix, "session_plot")
+            ok &= self._safe_update("streak_tracker", self._update_streak_tracker, "str_card_maxw")
+            ok &= self._safe_update("calendar_heatmap", self._update_calendar_heatmap, "cal_plot")
+            ok &= self._safe_update("trade_timeline", self._update_trade_timeline, "timeline_plot")
+            ok &= self._safe_update("attribution", self._update_attribution, "_dd_model")
+            if ok:
+                self._light_trade_key = key
+            else:
+                logger.warning("Analytics refresh_light not cached because a loaded panel failed key=%r", key)
+        finally:
+            if self._spinner is not None:
+                self._spinner.stop()
 
     def _sorted_trades(self):
         cache = getattr(self.engine, "_shared_cache", None)
@@ -992,10 +1055,28 @@ class AnalyticsTab(QWidget):
     def _update_equity_curve(self):
         if not self.engine.trades:
             self.equity_curve.setData([], [])
+            self.equity_baseline.setData([], [])
+            self.peak_curve.setData([], [])
             self._dd_overlay_top.setData([], [])
+            self._dd_overlay_bot.setData([], [])
+            self._dd_overlay_fill.setVisible(False)
+            self.eq_win_scatter.setData([], [])
+            self.eq_loss_scatter.setData([], [])
+            for lbl in getattr(self, "_eq_trade_labels", []):
+                try:
+                    self.equity_plot.removeItem(lbl)
+                except RuntimeError:
+                    pass
+            self._eq_trade_labels = []
+            if not hasattr(self, "_empty_eq_label"):
+                self._empty_eq_label = pg.TextItem(anchor=(0.5, 0.5))
+                self.equity_plot.addItem(self._empty_eq_label)
+            self._empty_eq_label.setHtml('<div style="text-align:center; font-size:12px;">No trades data</div>')
+            self._empty_eq_label.setPos(0.5, 0.0)
+            self._empty_eq_label.show()
             for c in [self.eq_card_return, self.eq_card_equity, self.eq_card_maxdd,
                        self.eq_card_sharpe, self.eq_card_calmar, self.eq_card_pf, self.eq_card_trades]:
-                c.set_value("\u2014", "text")
+                c.set_value("—", "text")
             self._eq_has_data = False
             return
 
@@ -1024,6 +1105,9 @@ class AnalyticsTab(QWidget):
             dd_arr_pct = np.where(peak > 0, (peak - eq_all) / peak * 100, 0)
             dd_arr_abs = peak - eq_all
             stats = None
+
+        if hasattr(self, "_empty_eq_label"):
+            self._empty_eq_label.hide()
 
         x_data = np.arange(len(eq_all))
         self.equity_curve.setData(x_data, eq_all)
@@ -2417,8 +2501,9 @@ class AnalyticsTab(QWidget):
             return
         if not self.isVisible():
             return
-        self._heatmap_gen += 1
-        gen = self._heatmap_gen
+        with self._heatmap_lock:
+            self._heatmap_gen += 1
+            gen = self._heatmap_gen
         prev = getattr(self, "_heatmap_worker", None)
         if prev is not None:
             try:
@@ -2445,8 +2530,9 @@ class AnalyticsTab(QWidget):
         worker.start()
 
     def _finalize_heatmaps(self, payload: dict, gen: int) -> None:
-        if gen != self._heatmap_gen:
-            return
+        with self._heatmap_lock:
+            if gen != self._heatmap_gen:
+                return
         if not self.isVisible():
             return
         if hasattr(self, "_heatmap_spinner"):
@@ -2454,8 +2540,11 @@ class AnalyticsTab(QWidget):
         # Guard: heatmap widgets don't exist until the Heatmaps tab is lazy-loaded
         if not hasattr(self, "hw_heatmap") or not hasattr(self, "my_heatmap"):
             return
-        hw = payload["hw"]
-        my = payload["my"]
+        hw = payload.get("hw") if isinstance(payload, dict) else None
+        my = payload.get("my") if isinstance(payload, dict) else None
+        if hw is None or my is None:
+            logger.warning("Heatmap worker returned incomplete payload")
+            return
         try:
             self.hw_heatmap.set_grid(
                 hw.net_pnl,

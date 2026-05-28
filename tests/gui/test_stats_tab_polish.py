@@ -22,6 +22,13 @@ class _DummyEngine:
     trades: list = []
 
 
+class _Trade:
+    id = 1
+    pnl = 10.0
+    entry_time = "2024-01-01"
+    entry_time_np = None
+
+
 @pytest.fixture(scope="module")
 def qapp() -> QApplication:
     return QApplication.instance() or QApplication([])
@@ -46,3 +53,25 @@ def test_hide_without_show_is_noop(qapp: QApplication) -> None:
     tab = StatsTab(_DummyEngine())
     tab._hide_spinner()  # should not raise
     assert tab._spinner_used is False
+
+
+def test_recalc_does_not_cache_when_card_update_fails(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _DummyEngine()
+    engine.trades = [_Trade()]
+    engine.equity = 1010.0
+    tab = StatsTab(engine)
+
+    calls = {"n": 0}
+
+    def fail_once(*_args, **_kwargs) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(tab, "_update_cards", fail_once)
+    tab._recalc()
+    assert tab._last_recalc_key is None
+
+    tab._recalc()
+    assert calls["n"] == 2
+    assert tab._last_recalc_key == tab._make_recalc_key(engine.trades)
