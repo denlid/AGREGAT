@@ -93,6 +93,8 @@ class CandlestickItem(pg.GraphicsObject):
             "bars_culled": 0,
             "paint_time_ms": 0.0,
             "gen_time_ms": 0.0,
+            "data_cache_hit": False,
+            "viewport_cache_hit": False,
         }
         # Phase 2 (GPU plan) — optional LOD pyramid + active-level
         # state. When ``_pyramid`` is set, :py:meth:`_on_range_changed`
@@ -107,6 +109,8 @@ class CandlestickItem(pg.GraphicsObject):
         self._active_tf: Optional[str] = None
         self._active_tf_ratio: float = 1.0
         self._pyramid_max_bars: int = self._max_bars
+        self._visible_slice_cache_key: Optional[Tuple[float, float, int]] = None
+        self._visible_slice_cache_value: Tuple[int, int] = (0, 0)
 
     # ------------------------------------------------------------------
     # ViewBox wiring (Phase 2.1)
@@ -289,11 +293,19 @@ class CandlestickItem(pg.GraphicsObject):
     # ------------------------------------------------------------------
     def set_data(self, data) -> None:  # type: ignore[no-untyped-def]
         # Phase 2: Accept np.ndarray directly to bypass slow tuple lists.
+        # Read-only NumPy payloads are treated as immutable render caches,
+        # so re-feeding the exact same array can skip the expensive wick /
+        # mask / QPicture rebuild entirely.
         if isinstance(data, np.ndarray):
+            if data is self._arr and not data.flags.writeable:
+                self._paint_stats["data_cache_hit"] = True
+                return
+            self._paint_stats["data_cache_hit"] = False
             self._arr = data
             self.data = []  # No longer needed when _arr is populated
             self._raw_data = []
         else:
+            self._paint_stats["data_cache_hit"] = False
             self._raw_data = list(data) if not isinstance(data, list) else data
             if len(self._raw_data) > self._max_bars:
                 self.data = downsample_ohlc(self._raw_data, self._max_bars)
@@ -320,6 +332,8 @@ class CandlestickItem(pg.GraphicsObject):
             self._mask_doji = np.empty(0, dtype=bool)
 
         self._geom_rects = None
+        self._visible_slice_cache_key = None
+        self._visible_slice_cache_value = (0, 0)
         self._update_width()
         self._gen()
         self.informViewBoundsChanged()
@@ -366,18 +380,28 @@ class CandlestickItem(pg.GraphicsObject):
             xr = self._view.viewRange()[0]
         except Exception:
             return 0, n
+        x0 = float(xr[0])
+        x1 = float(xr[1])
+        cache_key = (round(x0, 3), round(x1, 3), n)
+        if cache_key == self._visible_slice_cache_key:
+            self._paint_stats["viewport_cache_hit"] = True
+            return self._visible_slice_cache_value
+        self._paint_stats["viewport_cache_hit"] = False
         # ``self._arr[:, 0]`` is the idx column. It's guaranteed
         # sorted by ``downsample_ohlc`` (bin-order) and by the caller
         # (chart_tab always feeds a monotonic ``range(n)`` — same
         # contract pyqtgraph's PlotCurveItem assumes for setData(x=)).
         xs = self._arr[:, 0]
-        w = float(xr[1]) - float(xr[0])
+        w = x1 - x0
         # Overscan by 1 full screen on each side for TradingView-like smooth panning
-        x_min = float(xr[0]) - w
-        x_max = float(xr[1]) + w
+        x_min = x0 - w
+        x_max = x1 + w
         lo = int(np.searchsorted(xs, x_min, side="left"))
         hi = int(np.searchsorted(xs, x_max, side="right"))
-        return lo, hi
+        out = (lo, hi)
+        self._visible_slice_cache_key = cache_key
+        self._visible_slice_cache_value = out
+        return out
 
     # ------------------------------------------------------------------
     # Phase 2.3 — batched painter
@@ -395,6 +419,7 @@ class CandlestickItem(pg.GraphicsObject):
         self._paint_stats["bars_culled"] = 0
         self._paint_stats["gen_time_ms"] = 0.0
         self._paint_stats["paint_time_ms"] = 0.0
+        self._paint_stats["viewport_cache_hit"] = False
         n_total = self._arr.shape[0]
         if n_total == 0:
             self._paint_stats["gen_time_ms"] = (time.perf_counter() - t0) * 1000.0
@@ -503,7 +528,7 @@ class CandlestickItem(pg.GraphicsObject):
     def set_colors(self, bull, bear) -> None:  # type: ignore[no-untyped-def]
         self.bull_color = bull
         self.bear_color = bear
-        if self.data:
+        if self._arr.shape[0] > 0:
             self._gen()
             self.update()
 

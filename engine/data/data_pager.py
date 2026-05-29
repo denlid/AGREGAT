@@ -253,7 +253,7 @@ class DataPager(QObject):
         self._loader_fn = loader_fn
         self._max_resident = int(max_resident)
         self._max_resident_bytes = max_resident_bytes
-        self._pool = thread_pool or QThreadPool()
+        self._pool = thread_pool or QThreadPool.globalInstance()
 
         # All cache state is guarded by ``_lock``. The mutex is
         # re-entrant so the worker callback (running on a pool
@@ -318,6 +318,7 @@ class DataPager(QObject):
             self._in_flight.clear()
             self._touch_counter = 0
             self._cached_concat = pd.DataFrame()
+            self._cached_sorted_times = None
         # Signals must fire outside the lock to avoid re-entrant
         # slot calls re-acquiring it on the same thread.
         self.chunks_changed.emit(0)
@@ -502,10 +503,14 @@ class DataPager(QObject):
             chunks = [c.df for c in self._resident.values()]
             if not chunks:
                 self._cached_concat = pd.DataFrame()
+                self._cached_sorted_times = None
             else:
                 frame = pd.concat(chunks, ignore_index=True)
                 if "time" in frame.columns:
                     frame = frame.sort_values("time", kind="mergesort").reset_index(drop=True)
+                    self._cached_sorted_times = pd.DatetimeIndex(frame["time"])
+                else:
+                    self._cached_sorted_times = None
                 self._cached_concat = frame
 
         logger.debug(
@@ -550,8 +555,20 @@ class DataPager(QObject):
             return df
         t_min = pd.Timestamp(t_min)
         t_max = pd.Timestamp(t_max)
-        mask = (df["time"] >= t_min) & (df["time"] <= t_max)
-        return df.loc[mask].reset_index(drop=True)
+        if t_min > t_max:
+            t_min, t_max = t_max, t_min
+
+        with self._lock:
+            sorted_times = getattr(self, "_cached_sorted_times", None)
+            if sorted_times is None or len(sorted_times) != len(df):
+                sorted_times = pd.DatetimeIndex(df["time"])
+                self._cached_sorted_times = sorted_times
+
+        left = int(sorted_times.searchsorted(t_min, side="left"))
+        right = int(sorted_times.searchsorted(t_max, side="right"))
+        if right <= left:
+            return df.iloc[0:0].copy()
+        return df.iloc[left:right].reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # Shutdown

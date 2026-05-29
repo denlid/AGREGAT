@@ -27,6 +27,7 @@ from gui.persistence import drawings_persist
 from gui.styling import style_helpers as sh
 from gui.chart_tab.axis import TimeAxisItem
 from gui.chart_tab.gl_candle import make_candlestick_item
+from gui.chart_tab.gpu_config import STATE as GPU_STATE, should_use_gl_candles
 from gui.chart_tab.items import CandlestickItem, FilledRectROI  # noqa: F401 — re-export for callers
 from gui.styling.theme import CHART_SCHEMES, get_theme, register_theme_listener
 
@@ -337,6 +338,10 @@ class ChartTab(QWidget):
         self._tracked_xrange = None  # Our own X-range tracking (bypasses pyqtgraph)
         self._cache_key = None
         self._cached_res_df = None
+        self._cached_chart_arrays_key = None
+        self._cached_chart_arrays = None
+        self._cached_trade_marker_key = None
+        self._cached_trade_marker_payload = None
         self._color_scheme = "Classic"
         self._last_click_pos = None
         self._brush_path = None
@@ -354,6 +359,15 @@ class ChartTab(QWidget):
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(60)
         self._redraw_timer.timeout.connect(self._do_deferred_redraw)
+        self._last_perf_stats = {}
+        self._perf_stats_history = []
+        self._perf_log_threshold_ms = 30.0
+        self._adaptive_lod_enabled = True
+        self._adaptive_lod_threshold_ms = 24.0
+        self._adaptive_lod_cooldown = 0
+        self._render_backend = (
+            "gl" if self.candlestick_item.__class__.__name__ == "GLCandlestickItem" else "painter"
+        )
 
         self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_clicked)
         self.engine.data_loaded.connect(self.on_data_loaded)
@@ -1147,6 +1161,10 @@ class ChartTab(QWidget):
         self._reset_layers()
         self._need_autorange = True
         self._cache_key = None
+        self._cached_chart_arrays_key = None
+        self._cached_chart_arrays = None
+        self._cached_trade_marker_key = None
+        self._cached_trade_marker_payload = None
         self._prev_res_times = None
 
     def _attach_pyramid(self) -> None:
@@ -1179,7 +1197,16 @@ class ChartTab(QWidget):
                 pass
 
     def on_tf_changed(self, tf):
+        tf = str(tf)
+        if self.visual_tf_cb.currentText() != tf:
+            prev_block = self.visual_tf_cb.blockSignals(True)
+            self.visual_tf_cb.setCurrentText(tf)
+            self.visual_tf_cb.blockSignals(prev_block)
         self._cache_key = None
+        self._cached_chart_arrays_key = None
+        self._cached_chart_arrays = None
+        self._cached_trade_marker_key = None
+        self._cached_trade_marker_payload = None
         # Phase 0.2 (A3) — ensure forming arrays are built for the selected TF
         # so the chart can render the in-progress candle when switching away
         # from 1m after a headless run + reset + manual stepping.
@@ -1207,6 +1234,154 @@ class ChartTab(QWidget):
         m = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
         return m.get(self.visual_tf_cb.currentText().lower(), 1)
 
+    def _build_chart_arrays(self, res_df):
+        """Build and cache NumPy chart payload for the current render frame."""
+        key = (id(res_df), len(res_df))
+        cached = self._cached_chart_arrays
+        if self._cached_chart_arrays_key == key and cached is not None:
+            return cached, True
+
+        n = len(res_df)
+        x = np.arange(n, dtype=np.float64)
+        cl = res_df["close"].to_numpy(dtype=np.float64, copy=False)
+        o = res_df["open"].to_numpy(dtype=np.float64, copy=False)
+        l = res_df["low"].to_numpy(dtype=np.float64, copy=False)
+        h = res_df["high"].to_numpy(dtype=np.float64, copy=False)
+        candle_arr = np.column_stack((x, o, cl, l, h))
+        candle_arr.setflags(write=False)
+        chart_arrays = {
+            "x": x,
+            "close": cl,
+            "candle_arr": candle_arr,
+            "open": o,
+            "low": l,
+            "high": h,
+        }
+        self._cached_chart_arrays_key = key
+        self._cached_chart_arrays = chart_arrays
+        return chart_arrays, False
+
+    def _build_trade_marker_payload(self, rt):
+        """Precompute trade-marker arrays once per trade/timeframe state."""
+        key = (
+            id(rt),
+            len(rt),
+            len(self.engine.trades),
+            bool(self.show_connections_cb.isChecked()),
+        )
+        cached = self._cached_trade_marker_payload
+        if self._cached_trade_marker_key == key and cached is not None:
+            return cached, True
+
+        buy_x, buy_y, sell_x, sell_y, close_x, close_y = [], [], [], [], [], []
+        win_x, win_y, loss_x, loss_y = [], [], [], []
+        if len(rt) > 0:
+            for tr in self.engine.trades:
+                try:
+                    ei = max(0, min(int(tr.entry_index), len(rt) - 1))
+                    xi = max(0, min(int(getattr(tr, "exit_index", ei)), len(rt) - 1))
+                    ep = float(tr.entry_price)
+                    xp = float(getattr(tr, "exit_price", ep))
+                    is_long = str(getattr(tr, "direction", getattr(tr, "side", ""))).lower().startswith("l")
+                    if is_long:
+                        buy_x.append(ei)
+                        buy_y.append(ep)
+                    else:
+                        sell_x.append(ei)
+                        sell_y.append(ep)
+                    close_x.append(xi)
+                    close_y.append(xp)
+                    if self.show_connections_cb.isChecked():
+                        target_x = win_x if float(getattr(tr, "pnl", 0.0)) >= 0 else loss_x
+                        target_y = win_y if float(getattr(tr, "pnl", 0.0)) >= 0 else loss_y
+                        target_x.extend([ei, xi, np.nan])
+                        target_y.extend([ep, xp, np.nan])
+                except Exception:
+                    continue
+
+        payload = {
+            "buy_x": np.asarray(buy_x, dtype=np.float64),
+            "buy_y": np.asarray(buy_y, dtype=np.float64),
+            "sell_x": np.asarray(sell_x, dtype=np.float64),
+            "sell_y": np.asarray(sell_y, dtype=np.float64),
+            "close_x": np.asarray(close_x, dtype=np.float64),
+            "close_y": np.asarray(close_y, dtype=np.float64),
+            "win_x": np.asarray(win_x, dtype=np.float64),
+            "win_y": np.asarray(win_y, dtype=np.float64),
+            "loss_x": np.asarray(loss_x, dtype=np.float64),
+            "loss_y": np.asarray(loss_y, dtype=np.float64),
+        }
+        self._cached_trade_marker_key = key
+        self._cached_trade_marker_payload = payload
+        return payload, False
+
+    def _phase5_backend_state(self, bars_hint: int) -> dict:
+        """Return the current backend policy snapshot used by Phase 5 adaptive rendering."""
+        want_gl = should_use_gl_candles(
+            force_gpu=bool(GPU_STATE.get("enabled", False)),
+            bars_hint=bars_hint,
+        )
+        item_name = self.candlestick_item.__class__.__name__
+        is_gl_item = item_name == "GLCandlestickItem"
+        active_backend = str((getattr(self.candlestick_item, "_paint_stats", {}) or {}).get("last_backend", self._render_backend))
+        return {
+            "gpu_enabled": bool(GPU_STATE.get("enabled", False)),
+            "gpu_backend": str(GPU_STATE.get("backend", "software")),
+            "gl_candles_requested": bool(want_gl),
+            "gl_candles_active": bool(is_gl_item),
+            "render_backend": active_backend,
+        }
+
+    def _maybe_adapt_render_budget(self, perf_stats: dict) -> dict:
+        """Phase 5 adaptive rendering guardrail.
+
+        If redraw cost exceeds the frame budget, tighten the candle LOD budget.
+        The change is sticky for a short cooldown so we do not thrash the setting.
+        """
+        decision = {
+            "adaptive_lod_applied": False,
+            "adaptive_lod_prev": int(getattr(self.candlestick_item, "_max_bars", 0)),
+            "adaptive_lod_new": int(getattr(self.candlestick_item, "_max_bars", 0)),
+            "adaptive_reason": "none",
+        }
+        if not self._adaptive_lod_enabled:
+            decision["adaptive_reason"] = "disabled"
+            return decision
+
+        if self._adaptive_lod_cooldown > 0:
+            self._adaptive_lod_cooldown -= 1
+            decision["adaptive_reason"] = "cooldown"
+            return decision
+
+        total_ms = float(perf_stats.get("total_ms", 0.0))
+        prev_budget = max(250, int(getattr(self.candlestick_item, "_max_bars", 2000)))
+        if total_ms <= self._adaptive_lod_threshold_ms:
+            decision["adaptive_reason"] = "within_budget"
+            return decision
+
+        if prev_budget <= 500:
+            decision["adaptive_reason"] = "min_budget_reached"
+            return decision
+
+        new_budget = max(500, int(prev_budget * 0.75))
+        if new_budget == prev_budget:
+            decision["adaptive_reason"] = "unchanged"
+            return decision
+
+        try:
+            self.candlestick_item.set_max_bars(new_budget)
+            self._adaptive_lod_cooldown = 5
+            decision.update(
+                adaptive_lod_applied=True,
+                adaptive_lod_prev=prev_budget,
+                adaptive_lod_new=new_budget,
+                adaptive_reason="frame_budget_exceeded",
+            )
+        except Exception:
+            logger.exception("Phase 5 adaptive LOD update failed")
+            decision["adaptive_reason"] = "error"
+        return decision
+
     # ==============================
     # Main redraw
     # ==============================
@@ -1216,19 +1391,21 @@ class ChartTab(QWidget):
         t_total = _time.perf_counter()
 
         if getattr(self, "_is_roi_dragging", False):
+            self._last_perf_stats = {"skip_reason": "roi_dragging"}
             return
 
         if self.engine.df is None:
+            self._last_perf_stats = {"skip_reason": "no_data"}
             return
         idx = self.engine.current_idx
         if idx < 0:
             idx = 0
         tf = self.visual_tf_cb.currentText().lower()
-        tf_min = self._get_tf_minutes()
 
         t0 = _time.perf_counter()
         ck = (idx, tf, id(self.engine.df))
-        if ck == self._cache_key and self._cached_res_df is not None:
+        cache_hit = ck == self._cache_key and self._cached_res_df is not None
+        if cache_hit:
             res_df = self._cached_res_df
         else:
             if tf != "1m" and hasattr(self.engine, "tf_aggregator"):
@@ -1244,7 +1421,7 @@ class ChartTab(QWidget):
                 else:
                     res_df = pd.DataFrame()
             else:
-                # Pass the ENTIRE history up to the current index. 
+                # Pass the ENTIRE history up to the current index.
                 # OpenGL + LodPyramid will handle the performance automatically.
                 res_df = self.engine.df.iloc[0 : idx + 1].copy()
 
@@ -1257,6 +1434,12 @@ class ChartTab(QWidget):
                 res_df = tail
 
             if len(res_df) == 0:
+                self._last_perf_stats = {
+                    "skip_reason": "empty_res_df",
+                    "cache_hit": cache_hit,
+                    "tf": tf,
+                    "idx": idx,
+                }
                 return
             self._cache_key = ck
             self._cached_res_df = res_df
@@ -1274,17 +1457,23 @@ class ChartTab(QWidget):
         self._prev_res_times = rt
 
         self.res_times = rt
+        t0 = _time.perf_counter()
         # Cache floating point timestamps for instant O(1) lookups during mouse scrolling
         try:
             self._res_ts = pd.DatetimeIndex(rt).view(np.int64) / 10**9
         except Exception:
             self._res_ts = np.array([pd.to_datetime(t).timestamp() for t in rt])
-            
         self.time_axis.set_times(rt)
+        t_axis = _time.perf_counter() - t0
 
         n = len(res_df)
-        x = np.arange(n)
-        cl = res_df["close"].values
+        t0 = _time.perf_counter()
+        chart_arrays, arrays_cache_hit = self._build_chart_arrays(res_df)
+        t_ohlc_pack = _time.perf_counter() - t0
+
+        x = chart_arrays["x"]
+        cl = chart_arrays["close"]
+        candle_arr = chart_arrays["candle_arr"]
 
         vb = self.plot_widget.getViewBox()
         vb.enableAutoRange(x=False, y=False)
@@ -1295,16 +1484,14 @@ class ChartTab(QWidget):
         self.price_hline.setPos(cl[-1])
         self.price_hline.show()
 
-        o = res_df["open"].values
-        c_vals = res_df["close"].values
-        l = res_df["low"].values
-        h = res_df["high"].values
-        cd = list(zip(x, o, c_vals, l, h))
-        self.candlestick_item.set_data(cd)
-        t_candles = _time.perf_counter() - t0
+        t0 = _time.perf_counter()
+        self.candlestick_item.set_data(candle_arr)
+        t_candle_set = _time.perf_counter() - t0
+        t_candles = t_ohlc_pack + t_candle_set
 
         t0 = _time.perf_counter()
-        self._draw_trade_markers(rt)
+        trade_marker_payload, trade_markers_cache_hit = self._build_trade_marker_payload(rt)
+        self._draw_trade_markers(rt, payload=trade_marker_payload)
         t_markers = _time.perf_counter() - t0
 
         t0 = _time.perf_counter()
@@ -1316,25 +1503,28 @@ class ChartTab(QWidget):
         t_user = _time.perf_counter() - t0
 
         t0 = _time.perf_counter()
+        t_autofit = 0.0
         # ── Camera control ──
         cur_x = n - 1
         default_window = 150.0  # Sensible default zoom (number of bars)
-        
+
         if self._need_autorange or self._tracked_xrange is None:
             self._need_autorange = False
-            
+
             # Instead of auto-ranging everything, set a sensible default window
             # focused on the current (latest) candle.
             new_right = cur_x + 5.0
             new_left = max(-0.5, new_right - default_window)
             new_xrange = [new_left, new_right]
-            
+
             vb.setRange(xRange=new_xrange, padding=0)
             self._tracked_xrange = new_xrange
             self._user_zoom_width = default_window
-            
+
             if self.autofit_y:
+                t_fit = _time.perf_counter()
                 self._autofit_y(vb, res_df, n)
+                t_autofit += _time.perf_counter() - t_fit
         else:
             xmin, xmax = self._tracked_xrange
             w = self._user_zoom_width if self._user_zoom_width is not None else (xmax - xmin)
@@ -1346,31 +1536,71 @@ class ChartTab(QWidget):
             # stick to the latest candle.
             # "Near edge" = within 10% of window width from the right.
             follow_threshold = xmax - (w * 0.1)
-            
+
             if cur_x >= follow_threshold:
                 new_right = cur_x + 5.0
                 new_xrange = [new_right - w, new_right]
             else:
                 new_xrange = [xmin, xmax]
-                
+
             vb.setRange(xRange=new_xrange, padding=0)
             self._tracked_xrange = new_xrange
             if self.autofit_y:
+                t_fit = _time.perf_counter()
                 self._autofit_y(vb, res_df, n)
+                t_autofit += _time.perf_counter() - t_fit
         t_camera = _time.perf_counter() - t0
 
+        candle_stats = getattr(self.candlestick_item, "_paint_stats", {}) or {}
+        visible_lo, visible_hi = (0, 0)
+        try:
+            visible_lo, visible_hi = self.candlestick_item._visible_slice()
+        except Exception:
+            pass
+        visible_bars = max(0, int(visible_hi - visible_lo))
         t_all = _time.perf_counter() - t_total
-        if t_all > 0.030:  # Only log when redraw takes > 30ms
-            logger.info(
-                f"⏱ redraw: data={t_data*1000:.1f}ms "
-                f"candles={t_candles*1000:.1f}ms "
-                f"markers={t_markers*1000:.1f}ms "
-                f"strategy={t_strategy*1000:.1f}ms "
-                f"user_draw={t_user*1000:.1f}ms "
-                f"camera={t_camera*1000:.1f}ms "
-                f"TOTAL={t_all*1000:.1f}ms "
-                f"(n={n}, trades={len(self.engine.trades)}, drawings={len(self.engine.drawings)})"
-            )
+        perf_stats = {
+            "tf": tf,
+            "idx": int(idx),
+            "cache_hit": bool(cache_hit),
+            "chart_arrays_cache_hit": bool(arrays_cache_hit),
+            "trade_markers_cache_hit": bool(trade_markers_cache_hit),
+            "bars_total": int(n),
+            "bars_visible": int(visible_bars),
+            "trades_total": int(len(self.engine.trades)),
+            "drawings_total": int(len(self.engine.drawings)),
+            "markers_enabled": bool(self.show_markers_cb.isChecked()),
+            "connections_enabled": bool(self.show_connections_cb.isChecked()),
+            "backend": str(candle_stats.get("last_backend", "painter")),
+            "data_prepare_ms": round(t_data * 1000.0, 3),
+            "axis_prepare_ms": round(t_axis * 1000.0, 3),
+            "ohlc_pack_ms": round(t_ohlc_pack * 1000.0, 3),
+            "candles_set_data_ms": round(t_candle_set * 1000.0, 3),
+            "candles_total_ms": round(t_candles * 1000.0, 3),
+            "markers_ms": round(t_markers * 1000.0, 3),
+            "strategy_ms": round(t_strategy * 1000.0, 3),
+            "user_draw_ms": round(t_user * 1000.0, 3),
+            "camera_ms": round(t_camera * 1000.0, 3),
+            "autofit_ms": round(t_autofit * 1000.0, 3),
+            "candles_gen_ms": round(float(candle_stats.get("gen_time_ms", 0.0)), 3),
+            "candles_paint_ms": round(float(candle_stats.get("paint_time_ms", 0.0)), 3),
+            "candles_draw_lines_calls": int(candle_stats.get("draw_lines_calls", 0)),
+            "candles_draw_rects_calls": int(candle_stats.get("draw_rects_calls", 0)),
+            "candles_bars_drawn": int(candle_stats.get("bars_drawn", 0)),
+            "candles_bars_culled": int(candle_stats.get("bars_culled", 0)),
+            "candles_viewport_cache_hit": bool(candle_stats.get("viewport_cache_hit", False)),
+            "total_ms": round(t_all * 1000.0, 3),
+        }
+        perf_stats.update(self._phase5_backend_state(int(n)))
+        perf_stats.update(self._maybe_adapt_render_budget(perf_stats))
+        self._last_perf_stats = perf_stats
+        hist = self._perf_stats_history
+        hist.append(perf_stats)
+        if len(hist) > 120:
+            del hist[:-120]
+
+        if t_all * 1000.0 > self._perf_log_threshold_ms:
+            logger.info("chart_perf %s", perf_stats)
 
     def _autofit_y(self, vb, res_df, n):
         """Auto-fit Y axis to the high/low range of visible candles."""
@@ -1549,7 +1779,7 @@ class ChartTab(QWidget):
             self.plot_widget.removeItem(item)
         self.trade_graphic_items.clear()
 
-    def _draw_trade_markers(self, rt):
+    def _draw_trade_markers(self, rt, payload=None):
         self._clear_trade_lines()
         show = self.show_markers_cb.isChecked()
         show_l = self.show_connections_cb.isChecked()
@@ -1564,22 +1794,40 @@ class ChartTab(QWidget):
                 p.setData([], [])
             return
 
-        from gui.chart_tab.markers import build_trade_marker_arrays
-
         df = self.engine.df
         pos = self.engine.position
         cp = None
         if pos is not None:
             cp = self.engine.ctx.candle.get("close", pos.entry_price)
 
-        arrays = build_trade_marker_arrays(
-            rt=rt,
-            trades=self.engine.trades,
-            df_len=len(df),
-            position=pos,
-            position_close_price=cp,
-            show_connections=show_l,
-        )
+        if payload is None:
+            from gui.chart_tab.markers import build_trade_marker_arrays
+
+            arrays = build_trade_marker_arrays(
+                rt=rt,
+                trades=self.engine.trades,
+                df_len=len(df),
+                position=pos,
+                position_close_price=cp,
+                show_connections=show_l,
+            )
+        else:
+            arrays = type(
+                "_MarkerPayload",
+                (),
+                {
+                    "bx": payload["buy_x"],
+                    "by": payload["buy_y"],
+                    "sx": payload["sell_x"],
+                    "sy": payload["sell_y"],
+                    "cx": payload["close_x"],
+                    "cy": payload["close_y"],
+                    "win_x": payload["win_x"],
+                    "win_y": payload["win_y"],
+                    "loss_x": payload["loss_x"],
+                    "loss_y": payload["loss_y"],
+                },
+            )()
 
         # Open-position SL line is the only piece of per-position graphics
         # that still goes through ``trade_graphic_items``; everything else
