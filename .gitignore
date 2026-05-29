@@ -10,6 +10,8 @@ htmlcov/
 .ruff_cache/
 saves/
 dist/
+strategies/*
+!strategies/15_1.py
 fclaude.bat
 CLAUDE.md
 .claude/
