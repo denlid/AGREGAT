@@ -568,7 +568,7 @@ class TradesTab(QWidget):
         hv = self.table.horizontalHeader()
         hv.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hv.setStretchLastSection(True)
-        self._core = [COL_ID,COL_DIRECTION,COL_PNL_DOLLARS,COL_DURATION,COL_EXIT_REASON,COL_ENTRY_TIME]
+        self._core = [COL_ID,COL_DIRECTION,COL_PNL_DOLLARS,COL_RR,COL_DURATION,COL_EXIT_REASON,COL_ENTRY_TIME]
         self._all = list(range(len(COLUMNS)))
         self._expanded = False
         self._apply_column_set()
@@ -597,6 +597,7 @@ class TradesTab(QWidget):
         sly.setSpacing(6)
         sh2 = QHBoxLayout()
         self.lbl_skip = QLabel("0 skipped")
+        self.lbl_skip.setStyleSheet(sh.summary_label(get_theme()))
         sh2.addWidget(self.lbl_skip)
         sh2.addStretch()
         sly.addLayout(sh2)
@@ -733,6 +734,10 @@ class TradesTab(QWidget):
             self.lbl_drill.setStyleSheet(sh.summary_label(t))
         if hasattr(self,"table"):
             self.table.setStyleSheet(sh.trades_table(t))
+        if hasattr(self, "st"):
+            self.st.setStyleSheet(sh.trades_table(t))
+        if hasattr(self, "lbl_skip"):
+            self.lbl_skip.setStyleSheet(sh.summary_label(t))
         if hasattr(self,"_model"):
             self._model.refresh_theme()
 

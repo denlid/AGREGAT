@@ -15,6 +15,7 @@
             --text2: #8A8A96;
             --text3: #55555F;
             --red: #EF5350;
+            --green: #26A69A;
         }
 
         * {
@@ -2193,6 +2194,33 @@
                     }
                 };
 
+                window.apply_app_theme = function (theme) {
+                    if (!theme) return;
+                    const root = document.documentElement;
+                    const map = {
+                        bg: '--bg',
+                        surface: '--surface',
+                        elevated: '--elevated',
+                        border: '--border',
+                        accent: '--accent',
+                        accentLight: '--accent-light',
+                        text: '--text',
+                        text2: '--text2',
+                        text3: '--text3',
+                        red: '--red',
+                        green: '--green'
+                    };
+                    Object.keys(map).forEach(function (key) {
+                        if (theme[key]) root.style.setProperty(map[key], theme[key]);
+                    });
+                    if (theme.monacoTheme) {
+                        root.dataset.monacoTheme = theme.monacoTheme;
+                    }
+                    if (window.monaco && editor && theme.monacoTheme) {
+                        monaco.editor.setTheme(theme.monacoTheme);
+                    }
+                };
+
                 function notifyEditorDirty() {
                     if (_suppressEditorDirty) return;
                     if (pyBridge && typeof pyBridge.receive_editor_dirty === 'function') {
@@ -2431,7 +2459,7 @@
                                 '        pass'
                             ].join('\n'),
                             language: 'python',
-                            theme: 'vs-dark',
+                            theme: (document.documentElement.dataset.monacoTheme || 'vs-dark'),
                             automaticLayout: true,
                             minimap: { enabled: true },
                             fontSize: 13,

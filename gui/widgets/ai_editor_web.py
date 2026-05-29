@@ -4,6 +4,8 @@ from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 
+from gui.styling.theme import get_theme, get_theme_name, register_theme_listener, unregister_theme_listener
+
 _WEB_APP_HTML_NAME = "ai_editor_web_app.html"
 
 
@@ -86,6 +88,41 @@ class AIAssistantEditor(QWebEngineView):
 
         # Load bundled HTML next to this module
         self.setHtml(_load_web_app_html())
+        self.bridge.ready.connect(self.apply_theme_to_web)
+        register_theme_listener(self.apply_theme_to_web)
+        self._theme_registered = True
+
+    def closeEvent(self, event):
+        self._teardown_theme()
+        super().closeEvent(event)
+
+    def destroy(self, destroyWindow=True, destroySubWindows=True):
+        self._teardown_theme()
+        super().destroy(destroyWindow, destroySubWindows)
+
+    def _teardown_theme(self) -> None:
+        if getattr(self, "_theme_registered", False):
+            unregister_theme_listener(self.apply_theme_to_web)
+            self._theme_registered = False
+
+    def apply_theme_to_web(self, *_args) -> None:
+        t = get_theme()
+        payload = {
+            "bg": t.get("bg"),
+            "surface": t.get("surface"),
+            "elevated": t.get("elevated"),
+            "border": t.get("border2") or t.get("border"),
+            "accent": t.get("accent"),
+            "accentLight": t.get("accent_light"),
+            "text": t.get("text"),
+            "text2": t.get("text2"),
+            "text3": t.get("text3"),
+            "red": t.get("red"),
+            "green": t.get("green"),
+            "monacoTheme": "vs-light" if get_theme_name() == "light" else "vs-dark",
+        }
+        escaped = json.dumps(payload)
+        self.page().runJavaScript(f"window.apply_app_theme && window.apply_app_theme({escaped});")
 
     def set_mirror_panel(self, panel: 'AIAssistantEditor | None') -> None:
         """Set a twin panel to mirror all chat messages to."""

@@ -86,6 +86,7 @@ class HeatmapWidget(pg.GraphicsLayoutWidget):
         self._y_labels: list[str] = []
         self._lut = None
         self._vmax = 1.0
+        self._currency_symbol = "$"
         self._selected: Optional[tuple[int, int]] = None
         self._tanh_softening = False
         self._diff_mode = False
@@ -156,6 +157,11 @@ class HeatmapWidget(pg.GraphicsLayoutWidget):
         if self._data is not None:
             self._refresh_annotations()
 
+    def set_currency_symbol(self, symbol: str) -> None:
+        self._currency_symbol = (symbol or "$").strip() or "$"
+        if self._data is not None:
+            self.set_grid(self._data, self._x_labels, self._y_labels, extras=self._extras)
+
     def set_extras(self, extras: Optional[HeatmapExtras]) -> None:
         """Attach companion arrays surfaced by the deep tooltip."""
         self._extras = extras
@@ -222,25 +228,25 @@ class HeatmapWidget(pg.GraphicsLayoutWidget):
         self._y_labels = list(y_labels or [])
         self._rows, self._cols = data.shape
 
-        display = self._data
-        if self._tanh_softening:
-            scale = max(1e-9, float(np.percentile(np.abs(finite), 80)))
-            display = np.tanh(self._data / (scale * self.DEFAULT_TANH_SCALE))
-        vmax = max(
-            abs(float(display[np.isfinite(display)].max())),
-            abs(float(display[np.isfinite(display)].min())),
-            1e-9,
-        )
+        finite_nonzero = finite[finite != 0]
+        if finite_nonzero.size:
+            vmax = max(
+                float(np.percentile(np.abs(finite_nonzero), 90)),
+                float(np.min(np.abs(finite_nonzero))),
+                1e-9,
+            )
+        else:
+            vmax = 1.0
         self._vmax = float(vmax)
         t = get_theme()
 
         try:
             if cmap == "theme_div":
-                c0 = QColor(sh.c(t, "red_bright"))
+                c0 = QColor(sh.c(t, "red"))
                 c1 = QColor(sh.c(t, "red"))
-                c2 = QColor(sh.c(t, "surface"))
+                c2 = QColor(sh.c(t, "elevated2"))
                 c3 = QColor(sh.c(t, "green"))
-                c4 = QColor(sh.c(t, "green_bright"))
+                c4 = QColor(sh.c(t, "green"))
                 cmap_obj = pg.ColorMap(
                     pos=np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=float),
                     color=np.array(
@@ -256,9 +262,8 @@ class HeatmapWidget(pg.GraphicsLayoutWidget):
         except Exception:
             lut = pg.colormap.get("viridis").getLookupTable(0.0, 1.0, 256)
         self._lut = lut
-        self._image.setLookupTable(lut)
-        self._image.setLevels((-vmax, vmax))
-        self._image.setImage(np.where(np.isfinite(display), display, 0.0), autoLevels=False)
+        self._image.setLookupTable(None)
+        self._image.setImage(self._build_rgba_image(vmax), autoLevels=False)
         self._image.setRect(QRectF(-0.5, -0.5, float(self._cols), float(self._rows)))
 
         # Premium grid borders — subtle slate lines between cells
@@ -333,13 +338,75 @@ class HeatmapWidget(pg.GraphicsLayoutWidget):
                     if self._diff_mode and mean != 0:
                         text = f"{(val - mean) / abs(mean) * 100:+.0f}%"
                     else:
-                        text = self._fmt_money(float(val)).replace("$", "")
-                    txt = pg.TextItem(text, color=sh.c(t, "text"), anchor=(0.5, 0.5), fill=None)
+                        text = self._fmt_money(float(val)).replace(self._currency_symbol, "")
+                    txt = pg.TextItem(
+                        text,
+                        color=self._label_color(float(val), vmax),
+                        anchor=(0.5, 0.5),
+                        fill=None,
+                    )
                     txt.setPos(c, r)
                     txt.setFont(QFont(font_mono(), font_size, QFont.Weight.Medium))
                     self._view.addItem(txt)
                     self._labels.append(txt)
         self._refresh_annotations()
+
+    def _cell_has_data(self, row: int, col: int) -> bool:
+        if self._data is None or not (0 <= row < self._rows and 0 <= col < self._cols):
+            return False
+        val = self._data[row, col]
+        if not np.isfinite(val):
+            return False
+        if self._extras is not None and self._extras.counts is not None:
+            try:
+                if self._extras.counts.shape == self._data.shape:
+                    return int(self._extras.counts[row, col]) > 0
+            except Exception:
+                pass
+        return float(val) != 0.0
+
+    @staticmethod
+    def _blend_rgb(a: QColor, b: QColor, k: float) -> tuple[int, int, int]:
+        k = max(0.0, min(1.0, float(k)))
+        return (
+            int(a.red() + (b.red() - a.red()) * k),
+            int(a.green() + (b.green() - a.green()) * k),
+            int(a.blue() + (b.blue() - a.blue()) * k),
+        )
+
+    def _intensity(self, val: float, vmax: float) -> float:
+        if not np.isfinite(val) or vmax <= 0:
+            return 0.0
+        raw = abs(float(val))
+        if self._tanh_softening:
+            return float(np.tanh(raw / (vmax * self.DEFAULT_TANH_SCALE)))
+        return min(1.0, raw / vmax) ** 0.82
+
+    def _build_rgba_image(self, vmax: float) -> np.ndarray:
+        t = get_theme()
+        no_data = QColor(sh.c(t, "elevated"))
+        neutral = QColor(sh.c(t, "elevated2"))
+        win = QColor(sh.c(t, "green"))
+        loss = QColor(sh.c(t, "red"))
+        rgba = np.zeros((self._rows, self._cols, 4), dtype=np.ubyte)
+        for r in range(self._rows):
+            for c in range(self._cols):
+                val = float(self._data[r, c]) if self._data is not None else np.nan
+                if not self._cell_has_data(r, c):
+                    rgba[r, c] = [no_data.red(), no_data.green(), no_data.blue(), 210]
+                    continue
+                intensity = self._intensity(val, vmax)
+                target = win if val >= 0 else loss
+                k = 0.08 + 0.92 * intensity
+                rr, gg, bb = self._blend_rgb(neutral, target, k)
+                rgba[r, c] = [rr, gg, bb, 255]
+        return rgba
+
+    def _label_color(self, val: float, vmax: float) -> str:
+        t = get_theme()
+        if self._intensity(val, vmax) >= 0.58:
+            return "#FFFFFF"
+        return sh.c(t, "text")
 
     # ------------------------------------------------------------------
     # Annotations (best / worst)
@@ -366,15 +433,15 @@ class HeatmapWidget(pg.GraphicsLayoutWidget):
             return
         t = get_theme()
         if float(self._data[best_r, best_c]) > 0:
-            star = pg.TextItem(chr(11088), color=sh.c(t, "amber"), anchor=(0.0, 1.0))
-            star.setPos(best_c + 0.32, best_r - 0.32)
-            star.setFont(QFont(font_mono(), 11))
+            star = pg.TextItem(chr(11088), color=sh.c(t, "amber"), anchor=(1.0, 0.0))
+            star.setPos(best_c + 0.43, best_r - 0.43)
+            star.setFont(QFont(font_mono(), 8))
             self._view.addItem(star)
             self._anno_items.append(star)
         if float(self._data[worst_r, worst_c]) < 0:
-            warn = pg.TextItem(chr(9888), color=sh.c(t, "red_bright"), anchor=(0.0, 1.0))
-            warn.setPos(worst_c + 0.32, worst_r - 0.32)
-            warn.setFont(QFont(font_mono(), 11))
+            warn = pg.TextItem(chr(9888), color=sh.c(t, "red"), anchor=(1.0, 0.0))
+            warn.setPos(worst_c + 0.43, worst_r - 0.43)
+            warn.setFont(QFont(font_mono(), 8))
             self._view.addItem(warn)
             self._anno_items.append(warn)
 
@@ -382,16 +449,16 @@ class HeatmapWidget(pg.GraphicsLayoutWidget):
     # Static helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _fmt_money(v: float) -> str:
+    def _fmt_money(self, v: float) -> str:
         av = abs(float(v))
+        sym = self._currency_symbol
         if av >= 1_000_000:
-            return f"${v / 1_000_000:+.1f}M"
+            return f"{sym}{v / 1_000_000:+.1f}M"
         if av >= 10_000:
-            return f"${v / 1_000:+.0f}k"
+            return f"{sym}{v / 1_000:+.0f}k"
         if av >= 1_000:
-            return f"${v:+,.0f}"
-        return f"${v:+.0f}"
+            return f"{sym}{v:+,.0f}"
+        return f"{sym}{v:+.0f}"
 
     def _map_pos_to_cell(self, pos) -> tuple[int, int]:
         col = int(np.floor(float(pos.x()) + 0.5))
@@ -461,13 +528,13 @@ class HeatmapWidget(pg.GraphicsLayoutWidget):
         val: float,
     ) -> tuple:
         t = get_theme()
-        if not np.isfinite(val):
+        if not np.isfinite(val) or not self._cell_has_data(row, col):
             return (
                 f"{y_label} × {x_label}<br>"
-                f"<span style='color:{sh.c(t, 'text3')};'>No data</span>",
+                f"<span style='color:{sh.c(t, 'text3')};'>No trades data</span>",
                 sh.c(t, "surface"),
             )
-        color = sh.c(t, "green_bright") if val >= 0 else sh.c(t, "red_bright")
+        color = sh.c(t, "green") if val >= 0 else sh.c(t, "red")
         header = (
             f"<b>{y_label}</b> × <b>{x_label}</b><br>"
             f"<span style='color:{color};font-weight:bold;font-size:15px;'>"

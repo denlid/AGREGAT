@@ -350,7 +350,8 @@ class MetricCard(QFrame):
             self._sub_lbl.setText(sub)
         self._apply_theme()
         if prev_text != value:
-            flash_col = "#4CAF50" if color in ("g", "green", "gain") else "#F44336" if color in ("r", "red", "loss") else "#888888"
+            t = get_theme()
+            flash_col = sh.c(t, "green") if color in ("g", "green", "gain") else sh.c(t, "red") if color in ("r", "red", "loss") else sh.c(t, "border")
             self._flash_border(flash_col)
 
     def set_metric(
@@ -404,7 +405,8 @@ class MetricCard(QFrame):
         elif formatted is not None:
             self._value_lbl.setText(formatted)
         if animate and prev_raw is not None and prev_raw != raw_value:
-            flash_col = "#4CAF50" if raw_value is not None and raw_value > prev_raw else "#F44336" if raw_value is not None and raw_value < prev_raw else "#888888"
+            t = get_theme()
+            flash_col = sh.c(t, "green") if raw_value is not None and raw_value > prev_raw else sh.c(t, "red") if raw_value is not None and raw_value < prev_raw else sh.c(t, "border")
             self._flash_border(flash_col)
 
     # Backwards-compatible alias used by older call-sites (e.g. ``MiniCard``).
@@ -448,11 +450,12 @@ class MetricCard(QFrame):
         else:
             self._value_lbl.setText(text)
         if animate and prev_text != text:
-            flash_col = "#888888"
+            t = get_theme()
+            flash_col = sh.c(t, "border")
             if color in ("g", "green", "gain", "profit") or (color and "green" in str(color).lower()):
-                flash_col = "#4CAF50"
+                flash_col = sh.c(t, "green")
             elif color in ("r", "red", "loss", "danger") or (color and "red" in str(color).lower()):
-                flash_col = "#F44336"
+                flash_col = sh.c(t, "red")
             self._flash_border(flash_col)
 
     # Qt property used by the tween animation.

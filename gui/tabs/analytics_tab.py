@@ -9,7 +9,7 @@ import threading
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PySide6.QtCore import QDate, QPropertyAnimation, Qt, QTimer, Signal
+from PySide6.QtCore import QDate, QPropertyAnimation, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QComboBox,
@@ -103,6 +103,32 @@ class MiniCard(MetricCard):
 
     def __init__(self, title: str, value: str = "—", color: str = "text", parent=None):
         super().__init__(title, value, color=color, parent=parent)
+        formula, explanation = _ANALYTICS_CARD_HELP.get(title, ("", ""))
+        if formula or explanation:
+            self.set_formula(formula, explanation=explanation)
+
+
+_ANALYTICS_CARD_HELP: dict[str, tuple[str, str]] = {
+    "TOTAL RETURN": ("(final_equity / initial_equity - 1) * 100", "Shows net account growth. Use it with Max Drawdown; high return with deep drawdowns may be hard to trade live."),
+    "FINAL EQUITY": ("initial_equity + cumulative_pnl", "Ending account value after closed trades. Compare with the equity curve shape, not only the final number."),
+    "MAX DRAWDOWN": ("max(peak - equity) / peak * 100", "Worst equity decline from a prior high. Lower is better; large values are both capital and psychological risk."),
+    "SHARPE RATIO": ("mean(returns) / std(returns)", "Risk-adjusted consistency estimate. Needs enough samples; use as directional evidence, not a standalone verdict."),
+    "CALMAR RATIO": ("annualized_return / max_drawdown", "Return per unit of drawdown. Useful for comparing strategies with different volatility profiles."),
+    "PROFIT FACTOR": ("gross_profit / gross_loss", "Above 1 means gross wins exceed gross losses. Watch for a high value caused by too few trades."),
+    "TOTAL TRADES": ("count(closed_trades)", "Sample size. More trades usually makes the other metrics more reliable."),
+    "BEST SESSION": ("max(session_total_pnl)", "Session with strongest net PnL. Use it to find where the strategy has real market fit."),
+    "WORST SESSION": ("min(session_total_pnl)", "Session with weakest net PnL. Consider filtering or reducing risk in this regime."),
+    "MOST ACTIVE": ("argmax(session_trade_count)", "Where the strategy trades most often. Activity without edge can increase costs."),
+    "MAX WIN STREAK": ("max(consecutive winning trades)", "Best run length. Useful for expectation setting, not for extrapolating future wins."),
+    "MAX LOSS STREAK": ("max(consecutive losing trades)", "Worst losing run. Use it for position sizing and psychological tolerance."),
+    "CURRENT STREAK": ("latest consecutive wins/losses", "Current run state. Use it as context, not as a signal to chase or revenge trade."),
+    "AVG WIN STREAK": ("mean(win streak lengths)", "Typical winning sequence length. Helps compare smoothness across strategies."),
+    "AVG LOSS STREAK": ("mean(loss streak lengths)", "Typical losing sequence length. Higher values require lower risk per trade."),
+    "TRADES": ("count(trades in selected range)", "Sample size for the custom range."),
+    "WIN RATE": ("wins / trades * 100", "Win frequency. Pair it with payoff ratio or average PnL."),
+    "TOTAL PnL": ("sum(pnl)", "Net profit/loss for the selected scope."),
+    "AVG PnL": ("mean(pnl)", "Average expectancy in currency. Positive is the minimum viable condition."),
+}
 
 
 class AnalyticsTab(QWidget):
@@ -157,6 +183,7 @@ class AnalyticsTab(QWidget):
         # Track sub-tab background panes so theme switch repaints them.
         self._panel_widgets: list = []
         self._tables_with_overrides: list = []
+        self._separator_frames: list[QFrame] = []
         self._range_result: QLabel | None = None
         self._merged_text_ref: QLabel | None = None
 
@@ -222,6 +249,21 @@ class AnalyticsTab(QWidget):
 
     def _on_any_trade_completed(self, *args):
         self._light_refresh_timer.start()
+
+    def _currency_symbol(self) -> str:
+        asset = getattr(self.engine, "asset_config", None)
+        code = str(getattr(asset, "currency", "USD") or "USD").upper()
+        return {"EUR": "€", "USD": "$", "GBP": "£", "JPY": "¥"}.get(code, "$")
+
+    def _money(self, value: float, decimals: int = 0, compact: bool = False) -> str:
+        sym = self._currency_symbol()
+        v = float(value)
+        av = abs(v)
+        if compact and av >= 1_000_000:
+            return f"{sym}{v / 1_000_000:+.{1 if decimals == 0 else decimals}f}M"
+        if compact and av >= 10_000:
+            return f"{sym}{v / 1_000:+.0f}k"
+        return f"{sym}{v:+,.{decimals}f}"
 
     def _lazy_load_tab(self, index: int) -> None:
         widget = self.sub_tabs.widget(index)
@@ -314,28 +356,11 @@ class AnalyticsTab(QWidget):
         self._section_captions.append(cap_eq)
         l.addWidget(cap_eq)
 
-        # Toolbar row: toggle drawdown + peak overlay
-        eq_tools = QHBoxLayout()
-        eq_tools.setSpacing(8)
-        self.btn_toggle_dd = QPushButton("Show Drawdown")
-        self.btn_toggle_dd.setCheckable(True)
-        self.btn_toggle_dd.setFixedHeight(26)
-        self.btn_toggle_dd.toggled.connect(self._toggle_drawdown)
-        eq_tools.addWidget(self.btn_toggle_dd)
-        self.btn_toggle_peak = QPushButton("Show Peak")
-        self.btn_toggle_peak.setCheckable(True)
-        self.btn_toggle_peak.setChecked(True)
-        self.btn_toggle_peak.setFixedHeight(26)
-        self.btn_toggle_peak.toggled.connect(self._toggle_peak)
-        eq_tools.addWidget(self.btn_toggle_peak)
-        eq_tools.addStretch()
-        l.addLayout(eq_tools)
-
         # Equity plot
         self.equity_plot = pg.PlotWidget()
         self.equity_plot.getAxis("left").setWidth(70)
         self.equity_plot.setLabel("left", "Equity ($)", size="10pt")
-        self.equity_plot.setMinimumHeight(300)
+        self.equity_plot.setMinimumHeight(280)
 
         # Holographic equity curve — 3px gradient stroke + dual-layer glow fill
         self.equity_curve = self.equity_plot.plot()
@@ -360,19 +385,6 @@ class AnalyticsTab(QWidget):
         self._eq_initial_line = pg.InfiniteLine(pos=0, angle=0, pen=None)
         self.equity_plot.addItem(self._eq_initial_line)
 
-        # Drawdown overlay (hidden by default)
-        self._dd_overlay_top = pg.PlotDataItem(pen=None)
-        self._dd_overlay_bot = pg.PlotDataItem(pen=None)
-        self.equity_plot.addItem(self._dd_overlay_top)
-        self.equity_plot.addItem(self._dd_overlay_bot)
-        self._dd_overlay_fill = pg.FillBetweenItem(self._dd_overlay_top, self._dd_overlay_bot)
-        self.equity_plot.addItem(self._dd_overlay_fill)
-        self._dd_overlay_fill.setVisible(False)
-
-        # Trade markers
-        self.eq_win_scatter = self.equity_plot.plot(symbol="t1", symbolSize=8, pen=None)
-        self.eq_loss_scatter = self.equity_plot.plot(symbol="t", symbolSize=8, pen=None)
-
         # Crosshair
         self._eq_cross_v = pg.InfiniteLine(angle=90, movable=False)
         self._eq_cross_v.setZValue(30)
@@ -390,6 +402,19 @@ class AnalyticsTab(QWidget):
         self.equity_plot.scene().sigMouseMoved.connect(self._queue_eq_mouse)
 
         l.addWidget(self.equity_plot)
+
+        self.drawdown_plot = pg.PlotWidget()
+        self.drawdown_plot.getAxis("left").setWidth(70)
+        self.drawdown_plot.setLabel("left", "Drawdown (%)", size="9pt")
+        self.drawdown_plot.setLabel("bottom", "Trade #", size="9pt")
+        self.drawdown_plot.setMinimumHeight(140)
+        self.drawdown_plot.setMaximumHeight(210)
+        self.drawdown_curve = self.drawdown_plot.plot()
+        self.drawdown_zero = pg.PlotDataItem(pen=None)
+        self.drawdown_plot.addItem(self.drawdown_zero)
+        self.drawdown_fill = pg.FillBetweenItem(self.drawdown_curve, self.drawdown_zero)
+        self.drawdown_plot.addItem(self.drawdown_fill)
+        l.addWidget(self.drawdown_plot)
         l.addStretch()
         scroll.setWidget(inner)
         wl = QVBoxLayout(eq_w)
@@ -424,6 +449,8 @@ class AnalyticsTab(QWidget):
             self.str_card_maxw, self.str_card_maxl, self.str_card_cur,
             self.str_card_avgw, self.str_card_avgl,
         ]:
+            c.setMinimumWidth(150)
+            c.setMinimumHeight(88)
             cards.addWidget(c)
         l.addLayout(cards)
 
@@ -463,6 +490,7 @@ class AnalyticsTab(QWidget):
         self.session_table = QTableView()
         self.session_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.session_table.setAlternatingRowColors(True)
+        self.session_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._tables_with_overrides.append(self.session_table)
         self._session_model = SimpleTableModel(
             ["Session", "Trades", "Wins", "Losses", "WR%", "Avg PnL", "Total PnL", "Best Trade"],
@@ -481,6 +509,7 @@ class AnalyticsTab(QWidget):
         self.streak_table = QTableView()
         self.streak_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.streak_table.setAlternatingRowColors(True)
+        self.streak_table.setMaximumHeight(220)
         self._tables_with_overrides.append(self.streak_table)
 
         def _streak_style(r: int, c: int, v: str) -> dict:
@@ -516,19 +545,23 @@ class AnalyticsTab(QWidget):
         self._session_table_wrapper.setVisible(checked)
         self._btn_sessions.setText("\u25b2 Session Details" if checked else "\u25bc Session Details")
         self._style_toggle_btn(self._btn_sessions, checked)
+        if checked:
+            self.session_table.setMaximumHeight(16777215)
 
     def _toggle_streak_table(self, checked: bool):
         self._streak_table_wrapper.setVisible(checked)
         self._btn_streaks.setText("\u25b2 Streak Details" if checked else "\u25bc Streak Details")
         self._style_toggle_btn(self._btn_streaks, checked)
+        if checked:
+            self.streak_table.setMaximumHeight(220)
 
     @staticmethod
     def _style_toggle_btn(btn: QPushButton, checked: bool) -> None:
         t = get_theme()
         if checked:
             btn.setStyleSheet(
-                f"QPushButton {{ background: {sh.c(t, 'accent_light')}; color: {sh.c(t, 'surface')}; "
-                f"font-weight: 700; border: none; border-radius: 4px; padding: 0 12px; }}"
+                f"QPushButton {{ background: {sh.c(t, 'elevated')}; color: {sh.c(t, 'accent_light')}; "
+                f"font-weight: 700; border: 1px solid {sh.c(t, 'accent')}; border-radius: 4px; padding: 0 12px; }}"
             )
         else:
             btn.setStyleSheet(
@@ -741,7 +774,7 @@ class AnalyticsTab(QWidget):
         # ── Quant Heatmaps section ──
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.Shape.HLine)
-        sep1.setStyleSheet("QFrame { border: none; border-top: 1px solid palette(mid); }")
+        self._separator_frames.append(sep1)
         l.addWidget(sep1)
 
         drill_row = QHBoxLayout()
@@ -762,19 +795,24 @@ class AnalyticsTab(QWidget):
         drill_row.addWidget(self._btn_clear_drill)
         l.addLayout(drill_row)
 
-        cap_hw = QLabel("\u25B6  Hour \u00D7 Weekday  —  Net PnL ($)")
+        sym = self._currency_symbol()
+        cap_hw = QLabel(f"\u25B6  Hour \u00D7 Weekday  —  Net PnL ({sym})")
         self._section_captions.append(cap_hw)
         l.addWidget(cap_hw)
         self.hw_heatmap = _Heatmap()
         self.hw_heatmap.setMinimumHeight(280)
+        self.hw_heatmap.set_outlier_softening(True)
+        self.hw_heatmap.set_currency_symbol(sym)
         self.hw_heatmap.cell_clicked.connect(self._on_hw_heatmap_click)
         l.addWidget(self.hw_heatmap)
 
-        cap_my = QLabel("\u25B6  Year \u00D7 Month  —  Net PnL ($)")
+        cap_my = QLabel(f"\u25B6  Year \u00D7 Month  —  Net PnL ({sym})")
         self._section_captions.append(cap_my)
         l.addWidget(cap_my)
         self.my_heatmap = _Heatmap()
         self.my_heatmap.setMinimumHeight(220)
+        self.my_heatmap.set_outlier_softening(True)
+        self.my_heatmap.set_currency_symbol(sym)
         self.my_heatmap.cell_clicked.connect(self._on_my_heatmap_click)
         l.addWidget(self.my_heatmap)
 
@@ -839,8 +877,16 @@ class AnalyticsTab(QWidget):
             )
         for s in self._summary_labels:
             s.setStyleSheet(sh.summary_label(t))
+        sep_color = QColor(sh.c(t, "border"))
+        sep_color.setAlpha(80)
+        for sep in self._separator_frames:
+            sep.setStyleSheet(
+                "QFrame { border: none; border-top: 1px solid "
+                f"rgba({sep_color.red()}, {sep_color.green()}, {sep_color.blue()}, {sep_color.alpha()}); }}"
+            )
         for plot_attr in (
             "equity_plot", "session_plot",
+            "drawdown_plot",
             "dist_plot", "duration_plot",
             "roll_sharpe_plot", "roll_wr_plot",
             "timeline_plot", "timeline_dur_plot",
@@ -891,18 +937,16 @@ class AnalyticsTab(QWidget):
             self.peak_curve.setPen(
                 pg.mkPen(QColor(sh.c(t, "chart_peak_line")), width=1, style=Qt.PenStyle.DotLine)
             )
-            self.eq_win_scatter.setSymbolBrush(QColor(sh.c(t, "chart_win_marker")))
-            self.eq_win_scatter.setSymbolPen(pg.mkPen(QColor(sh.c(t, "chart_win_marker"))))
-            self.eq_loss_scatter.setSymbolBrush(QColor(sh.c(t, "chart_loss_marker")))
-            self.eq_loss_scatter.setSymbolPen(pg.mkPen(QColor(sh.c(t, "chart_loss_marker"))))
-
-            # Drawdown overlay items (on equity plot)
-            dd_line = pg.mkPen(QColor(sh.c(t, "chart_dd_line")), width=1.5)
+            dd_line = pg.mkPen(QColor(sh.c(t, "chart_dd_line")), width=1.8)
             brush_dd = QColor(sh.c(t, "chart_dd_fill"))
-            brush_dd.setAlpha(80)
-            self._dd_overlay_top.setPen(dd_line)
-            self._dd_overlay_bot.setPen(dd_line)
-            self._dd_overlay_fill.setBrush(pg.mkBrush(brush_dd))
+            brush_dd.setAlpha(70)
+            if hasattr(self, "drawdown_curve"):
+                self.drawdown_curve.setPen(dd_line)
+                self.drawdown_fill.setBrush(pg.mkBrush(brush_dd))
+            if hasattr(self, "drawdown_zero"):
+                zc = QColor(sh.c(t, "text3"))
+                zc.setAlpha(110)
+                self.drawdown_zero.setPen(pg.mkPen(zc, width=1, style=Qt.PenStyle.DashLine))
             # Crosshair
             if hasattr(self, "_eq_cross_v"):
                 pen_cross = pg.mkPen(QColor(sh.c(t, "chart_axis_text")), width=1, style=Qt.PenStyle.DotLine)
@@ -1057,11 +1101,8 @@ class AnalyticsTab(QWidget):
             self.equity_curve.setData([], [])
             self.equity_baseline.setData([], [])
             self.peak_curve.setData([], [])
-            self._dd_overlay_top.setData([], [])
-            self._dd_overlay_bot.setData([], [])
-            self._dd_overlay_fill.setVisible(False)
-            self.eq_win_scatter.setData([], [])
-            self.eq_loss_scatter.setData([], [])
+            self.drawdown_curve.setData([], [])
+            self.drawdown_zero.setData([], [])
             for lbl in getattr(self, "_eq_trade_labels", []):
                 try:
                     self.equity_plot.removeItem(lbl)
@@ -1117,19 +1158,15 @@ class AnalyticsTab(QWidget):
         if hasattr(self, "_eq_initial_line"):
             self._eq_initial_line.setPos(init_eq)
 
-        visible = self.btn_toggle_peak.isChecked() if hasattr(self, "btn_toggle_peak") else True
-        self.peak_curve.setVisible(visible)
-        if visible:
-            self.peak_curve.setData(x_data, peak)
+        self.peak_curve.setVisible(True)
+        self.peak_curve.setData(x_data, peak)
 
         self._dd_data = (x_data, dd_arr_pct, dd_arr_abs)
 
         win_mask = pnls > 0
         loss_mask = pnls < 0
-        win_idx = np.where(win_mask)[0] + 1
-        loss_idx = np.where(loss_mask)[0] + 1
-        self.eq_win_scatter.setData(win_idx, eq_all[win_idx] if win_idx.size > 0 else [])
-        self.eq_loss_scatter.setData(loss_idx, eq_all[loss_idx] if loss_idx.size > 0 else [])
+        self.drawdown_curve.setData(x_data, -dd_arr_pct)
+        self.drawdown_zero.setData(x_data, np.zeros_like(dd_arr_pct, dtype=float))
 
         # ── Best / worst trade annotations ──
         for lbl in getattr(self, "_eq_trade_labels", []):
@@ -1158,6 +1195,7 @@ class AnalyticsTab(QWidget):
 
         if not getattr(self, "_eq_has_data", False):
             self.equity_plot.autoRange()
+            self.drawdown_plot.autoRange()
             self._eq_has_data = True
             fade_in(self.equity_plot, duration_ms=400).start(
                 QPropertyAnimation.DeletionPolicy.DeleteWhenStopped
@@ -1218,25 +1256,6 @@ class AnalyticsTab(QWidget):
         except Exception:
             logger.exception("equity sub-tab sparkline computation failed")
         self._add_drawdown_regions(x_data, dd_arr_pct)
-
-    def _toggle_drawdown(self, checked: bool) -> None:
-        if not hasattr(self, "_dd_data"):
-            return
-        x_data, dd_pct, dd_abs = self._dd_data
-        if checked:
-            # Show drawdown as a fill from 0 downward
-            self._dd_overlay_top.setData(x_data, [0] * len(x_data))
-            self._dd_overlay_bot.setData(x_data, -dd_pct)
-            self._dd_overlay_fill.setVisible(True)
-            self.btn_toggle_dd.setText("Hide Drawdown")
-        else:
-            self._dd_overlay_top.setData([], [])
-            self._dd_overlay_bot.setData([], [])
-            self._dd_overlay_fill.setVisible(False)
-            self.btn_toggle_dd.setText("Show Drawdown")
-
-    def _toggle_peak(self, checked: bool) -> None:
-        self.peak_curve.setVisible(checked)
 
     def _queue_eq_mouse(self, pos) -> None:
         self._eq_mouse_pending = pos
@@ -1834,50 +1853,23 @@ class AnalyticsTab(QWidget):
 
     # ═══════════════════════════════════════════════════════════════ Feature 5
     # ── Calendar Heatmap — Bloomberg/QuantConnect Terminal Style ──
-    _CAL_PALETTE = {
-        "loss_extreme": (200, 50, 50),
-        "loss_mid":     (130, 45, 45),
-        "loss_soft":    (70, 38, 38),
-        "neutral":      (22, 26, 30),
-        "win_soft":     (28, 65, 58),
-        "win_mid":      (35, 120, 100),
-        "win_extreme":  (45, 175, 145),
-        "zero_bg":      (14, 17, 20),
-        "zero_border":  (34, 38, 47),
-        "text_muted":   (180, 190, 200),
-    }
-
     def _interpolate_color(self, c1: tuple, c2: tuple, t: float) -> tuple:
         return tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
 
+    def _rgb(self, key: str) -> tuple[int, int, int]:
+        qc = QColor(sh.c(get_theme(), key))
+        return qc.red(), qc.green(), qc.blue()
+
     def _pnl_to_rgba(self, pnl: float, vmax: float) -> tuple:
-        """Map a P&L value to (r, g, b, a) using a 7-stop continuous gradient."""
-        pal = self._CAL_PALETTE
+        """Map a P&L value to a muted theme-aware calendar cell color."""
         if vmax <= 0:
-            return (*pal["neutral"], 40)
-        intensity = min(1.0, abs(pnl) / vmax)
-        alpha = int(40 + 200 * min(1.0, intensity * 1.2))
-        if pnl >= 0:
-            if intensity < 0.20:
-                t = intensity / 0.20
-                r, g, b = self._interpolate_color(pal["neutral"], pal["win_soft"], t)
-            elif intensity < 0.50:
-                t = (intensity - 0.20) / 0.30
-                r, g, b = self._interpolate_color(pal["win_soft"], pal["win_mid"], t)
-            else:
-                t = (intensity - 0.50) / 0.50
-                r, g, b = self._interpolate_color(pal["win_mid"], pal["win_extreme"], t)
-        else:
-            if intensity < 0.20:
-                t = intensity / 0.20
-                r, g, b = self._interpolate_color(pal["neutral"], pal["loss_soft"], t)
-            elif intensity < 0.50:
-                t = (intensity - 0.20) / 0.30
-                r, g, b = self._interpolate_color(pal["loss_soft"], pal["loss_mid"], t)
-            else:
-                t = (intensity - 0.50) / 0.50
-                r, g, b = self._interpolate_color(pal["loss_mid"], pal["loss_extreme"], t)
-        return (r, g, b, alpha)
+            return (*self._rgb("elevated2"), 70)
+        intensity = min(1.0, abs(pnl) / vmax) ** 0.78
+        alpha = int(120 + 120 * intensity)
+        neutral = self._rgb("elevated2")
+        target = self._rgb("green" if pnl >= 0 else "red")
+        rgb = self._interpolate_color(neutral, target, 0.18 + 0.82 * intensity)
+        return (*rgb, alpha)
 
     def _build_calendar_grid(self, daily: dict, max_days: list, vmax: float) -> tuple:
         """Build a premium terminal-grade calendar using ImageItem for the 
@@ -1887,15 +1879,13 @@ class AnalyticsTab(QWidget):
         """
         max_cols = max(max_days)
         bg_rgba = np.full((12, max_cols, 4), 0, dtype=np.ubyte)
-        pal = self._CAL_PALETTE
+        nr, ng, nb = self._rgb("elevated2")
         
         # Draw empty-day grid — each day is a 1x1 cell with a micro-thin border
-        zr, zg, zb = pal["zero_border"]
-        nr, ng, nb = pal["neutral"]
         for r in range(12):
             n_cols = max_days[r]
             for c in range(n_cols):
-                bg_rgba[r, c] = [nr, ng, nb, 30]
+                bg_rgba[r, c] = [nr, ng, nb, 135]
         
         cell_data = []
         pnl_texts = []
@@ -1907,6 +1897,7 @@ class AnalyticsTab(QWidget):
                 continue
             
             pr, pg_, pb_, pa = self._pnl_to_rgba(pnl, vmax)
+            bg_rgba[m, d] = [pr, pg_, pb_, pa]
             cell_data.append({
                 "x": float(d),
                 "y": float(m),
@@ -1916,15 +1907,9 @@ class AnalyticsTab(QWidget):
             
             # PnL label — only for significant cells
             if abs(pnl) > vmax * 0.08:
-                text_color = QColor(*pal["text_muted"], min(255, pa + 30))
-                if abs(pnl) >= 1_000_000:
-                    label = f"${pnl/1e6:.1f}M"
-                elif abs(pnl) >= 10_000:
-                    label = f"${pnl/1000:.0f}k"
-                elif abs(pnl) >= 1000:
-                    label = f"${pnl:+.0f}"
-                else:
-                    label = f"${pnl:+.0f}"
+                intensity = min(1.0, abs(pnl) / max(vmax, 1e-9))
+                text_color = QColor("#FFFFFF" if intensity >= 0.45 else sh.c(get_theme(), "text"))
+                label = self._money(pnl, compact=True)
                 pnl_texts.append({
                     "x": float(d),
                     "y": float(m),
@@ -1939,25 +1924,6 @@ class AnalyticsTab(QWidget):
         from collections import defaultdict
         
         cell_size = 8
-        
-        # Batch by alpha for performance
-        alpha_groups = defaultdict(list)
-        for i, c in enumerate(cell_data):
-            alpha_groups[c["color"].alpha()].append(i)
-        
-        for alpha, indices in alpha_groups.items():
-            x_pts = [cell_data[i]["x"] for i in indices]
-            y_pts = [cell_data[i]["y"] for i in indices]
-            brushes = [cell_data[i]["color"] for i in indices]
-            
-            cal_plot.plot(
-                x_pts, y_pts,
-                pen=None,
-                symbol="s",
-                symbolSize=cell_size,
-                symbolBrush=brushes,
-                symbolPen=None,
-            )
         
         for item in pnl_texts:
             txt = pg.TextItem(
@@ -1998,10 +1964,20 @@ class AnalyticsTab(QWidget):
         
         if not daily:
             self.cal_summary.setText(f"No trades in {self._cal_year}.")
+            import calendar as _cal
+            max_days = [_cal.monthrange(self._cal_year, m + 1)[1] for m in range(12)]
+            max_cols = max(max_days)
+            nr, ng_, nb_ = self._rgb("elevated2")
+            bg_rgba = np.zeros((12, max_cols, 4), dtype=np.ubyte)
+            for r, n_cols in enumerate(max_days):
+                for c in range(n_cols):
+                    bg_rgba[r, c] = [nr, ng_, nb_, 135]
             self.cal_image = pg.ImageItem(axisOrder="row-major")
             self.cal_plot.addItem(self.cal_image)
-            self.cal_image.setImage(np.zeros((12, 31)))
-            self.cal_plot.autoRange()
+            self.cal_image.setImage(bg_rgba)
+            self.cal_image.setRect(QRectF(-0.5, -0.5, float(max_cols), 12.0))
+            self.cal_plot.setXRange(-0.9, max_cols + 0.5, padding=0.0)
+            self.cal_plot.setYRange(-0.9, 11.9, padding=0.0)
             return
         
         import calendar as _cal
@@ -2014,16 +1990,14 @@ class AnalyticsTab(QWidget):
             vmax = 1.0
         
         t = get_theme()
-        pal = self._CAL_PALETTE
         
         # ── Build grid background (empty cells with micro-thin slate borders) ──
         bg_rgba = np.full((12, max_cols, 4), 0, dtype=np.ubyte)
-        nr, ng_, nb_ = pal["neutral"]
-        zr, zg, zb = pal["zero_border"]
+        nr, ng_, nb_ = self._rgb("elevated2")
         for r in range(12):
             n_cols = max_days[r]
             for c in range(n_cols):
-                bg_rgba[r, c] = [nr, ng_, nb_, 30]
+                bg_rgba[r, c] = [nr, ng_, nb_, 135]
         
         self.cal_image = pg.ImageItem(axisOrder="row-major")
         self.cal_image.setImage(bg_rgba)
@@ -2031,6 +2005,8 @@ class AnalyticsTab(QWidget):
         
         # ── Build and render P&L cells ──
         bg_rgba_full, cell_data, pnl_texts = self._build_calendar_grid(daily, max_days, vmax)
+        self.cal_image.setImage(bg_rgba_full)
+        self.cal_image.setRect(QRectF(-0.5, -0.5, float(max_cols), 12.0))
         self._render_calendar_layer(cell_data, self.cal_plot, pnl_texts, max_cols)
         
         # ── Surgical terminal-style axis labels ──
@@ -2054,7 +2030,7 @@ class AnalyticsTab(QWidget):
         year_pnl = sum(daily.values())
         win_days = sum(1 for v in daily.values() if v > 0)
         loss_days = sum(1 for v in daily.values() if v < 0)
-        pnl_color = sh.c(t, "green_bright") if year_pnl >= 0 else sh.c(t, "red_bright")
+        pnl_color = sh.c(t, "green") if year_pnl >= 0 else sh.c(t, "red")
         
         legend_items = [
             pg.TextItem(
@@ -2063,13 +2039,14 @@ class AnalyticsTab(QWidget):
                 anchor=(1, 0),
             ),
             pg.TextItem(
-                text=f"P&L {year_pnl:+,.0f}",
+                text=f"P&L {self._money(year_pnl)}",
                 color=QColor(pnl_color),
                 anchor=(1, 0),
             ),
         ]
-        legend_items[0].setPos(max_cols - 1, -0.5)
-        legend_items[1].setPos(max_cols - 1, 0.3)
+        legend_x = max_cols + 4.2
+        legend_items[0].setPos(legend_x, -0.5)
+        legend_items[1].setPos(legend_x, 0.3)
         for li in legend_items:
             li.setFont(QFont(font_mono(), 9, QFont.Weight.Bold))
             li.setZValue(10)
@@ -2082,14 +2059,14 @@ class AnalyticsTab(QWidget):
         
         self.cal_summary.setText(
             f'<span style="font-family:{font_mono()};color:{pnl_color};font-weight:600;">'
-            f"Y {self._cal_year}: ${year_pnl:+,.0f}</span>"
+            f"Y {self._cal_year}: {self._money(year_pnl)}</span>"
             f'<span style="font-family:{font_mono()};color:{sh.c(t,"text3")};">'
             f"  |  W {win_days}  L {loss_days}  ·  {len(daily)} sessions"
-            f"  |  Best ${best_day:+,.0f}  Worst ${worst_day:+,.0f}  Avg ${mean_day:+,.0f}</span>"
+            f"  |  Best {self._money(best_day)}  Worst {self._money(worst_day)}  Avg {self._money(mean_day)}</span>"
         )
         
         # ── Range ──
-        self.cal_plot.setXRange(-0.9, max_cols + 0.5, padding=0.0)
+        self.cal_plot.setXRange(-0.9, max_cols + 7.0, padding=0.0)
         self.cal_plot.setYRange(-0.9, 11.9, padding=0.0)
 
     def _cal_nav_prev(self):
@@ -2160,8 +2137,9 @@ class AnalyticsTab(QWidget):
             if dd_pct is None or len(dd_pct) < 2:
                 return
             t = get_theme()
-            brush = QBrush(QColor(sh.c(t, "red_bright")))
-            brush.setStyle(Qt.BrushStyle.Dense4Pattern)
+            col = QColor(sh.c(t, "red_bright"))
+            col.setAlpha(30)
+            brush = QBrush(col)
             in_dd = False
             start = 0
             for i in range(len(dd_pct)):
@@ -2180,7 +2158,7 @@ class AnalyticsTab(QWidget):
                     )
                     fill = pg.FillBetweenItem(top, bot, brush=brush)
                     fill.setZValue(-100)
-                    self.equity_plot.addItem(fill)
+                    self.drawdown_plot.addItem(fill)
                     self._dd_region_items.append(fill)
         except Exception:
             pass
@@ -2279,21 +2257,6 @@ class AnalyticsTab(QWidget):
         l.setContentsMargins(12, 10, 12, 10)
         l.setSpacing(8)
 
-        cap_dd = QLabel("▤  Drawdown Episodes")
-        self._section_captions.append(cap_dd)
-        l.addWidget(cap_dd)
-        self.dd_table = QTableView()
-        self.dd_table.horizontalHeader().setStretchLastSection(True)
-        self.dd_table.setAlternatingRowColors(True)
-        self._dd_model = SimpleTableModel(
-            ["#", "Peak idx", "Trough idx", "Recover idx", "Depth ($)", "Underwater (trades)"],
-            [],
-            parent=self,
-        )
-        self.dd_table.setModel(self._dd_model)
-        self._tables_with_overrides.append(self.dd_table)
-        l.addWidget(self.dd_table, stretch=1)
-
         cap_attr = QLabel("▤  Exit-reason Attribution")
         self._section_captions.append(cap_attr)
         l.addWidget(cap_attr)
@@ -2320,7 +2283,20 @@ class AnalyticsTab(QWidget):
         )
         self.attr_table.setModel(self._attr_model)
         self._tables_with_overrides.append(self.attr_table)
-        l.addWidget(self.attr_table, stretch=1)
+        cap_dd = QLabel("▤  Drawdown Episodes")
+        self._section_captions.append(cap_dd)
+        l.addWidget(cap_dd)
+        self.dd_table = QTableView()
+        self.dd_table.horizontalHeader().setStretchLastSection(True)
+        self.dd_table.setAlternatingRowColors(True)
+        self._dd_model = SimpleTableModel(
+            ["#", "Peak idx", "Trough idx", "Recover idx", "Depth ($)", "Underwater (trades)"],
+            [],
+            parent=self,
+        )
+        self.dd_table.setModel(self._dd_model)
+        self._tables_with_overrides.append(self.dd_table)
+        l.addWidget(self.dd_table, stretch=1)
         return w
 
     # --------------------------------------------------------------- Slippage
@@ -2545,7 +2521,9 @@ class AnalyticsTab(QWidget):
         if hw is None or my is None:
             logger.warning("Heatmap worker returned incomplete payload")
             return
+        sym = self._currency_symbol()
         try:
+            self.hw_heatmap.set_currency_symbol(sym)
             self.hw_heatmap.set_grid(
                 hw.net_pnl,
                 x_labels=WEEKDAY_LABELS,
@@ -2558,6 +2536,7 @@ class AnalyticsTab(QWidget):
         if my.years:
             self._last_my_years = list(my.years)
             try:
+                self.my_heatmap.set_currency_symbol(sym)
                 self.my_heatmap.set_grid(
                     my.net_pnl,
                     x_labels=MONTH_LABELS,
