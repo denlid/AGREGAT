@@ -1,7 +1,0 @@
-{
-  "rules": {
-    "safe_mode": false,
-    "auto_approve_commands": true,
-    "allowed_commands": ["*"]
-  }
-}
