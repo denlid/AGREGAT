@@ -89,19 +89,19 @@ def _update_htf_structure(c):
                 if c.close_htf < strategy._htf_lows[-1][1]:
                     strategy._htf_trend = 'bearish'
                     strategy.log(f"HTF trend changed: BULLISH → BEARISH (MSS, close {c.close_htf:.2f} < low {strategy._htf_lows[-1][1]:.2f})")
-                    # Remove all FVG drawings and clear list
+                    # Перекрашиваем все FVG в серый и очищаем список
                     for fvg in strategy._fvg_list:
-                        if 'drawing_id' in fvg:
-                            strategy.remove_drawing(fvg['drawing_id'])
-                    strategy._fvg_list.clear()   # invalidate all FVGs
+                        if 'drawing_id' in fvg and fvg['drawing_id']:
+                            strategy.update_drawing(fvg['drawing_id'], {'color': 'gray'})
+                    strategy._fvg_list.clear()
             elif strategy._htf_trend == 'bearish':
                 # Break: close above last swing high (LH)
                 if c.close_htf > strategy._htf_highs[-1][1]:
                     strategy._htf_trend = 'bullish'
                     strategy.log(f"HTF trend changed: BEARISH → BULLISH (MSS, close {c.close_htf:.2f} > high {strategy._htf_highs[-1][1]:.2f})")
                     for fvg in strategy._fvg_list:
-                        if 'drawing_id' in fvg:
-                            strategy.remove_drawing(fvg['drawing_id'])
+                        if 'drawing_id' in fvg and fvg['drawing_id']:
+                            strategy.update_drawing(fvg['drawing_id'], {'color': 'gray'})
                     strategy._fvg_list.clear()
 
     if strategy._htf_trend != old_trend and strategy._htf_trend is None:
@@ -120,8 +120,9 @@ def _update_htf_structure(c):
             invalidated = True
             strategy.log(f"Bearish FVG [{fvg['bottom']:.2f}-{fvg['top']:.2f}] invalidated (body below)")
         if invalidated:
+            # Меняем цвет на серый, но прямоугольник не удаляем
             if fvg.get('drawing_id'):
-                strategy.remove_drawing(fvg['drawing_id'])
+                strategy.update_drawing(fvg['drawing_id'], {'color': 'gray'})
             strategy._fvg_list.remove(fvg)
 
     # 4. FVG detection – only when trend is established AND at least 3 candles
@@ -173,8 +174,6 @@ def _update_htf_structure(c):
         draw_fvg_rect(fvg)
         strategy._fvg_list.append(fvg)
         strategy.log(f"Bearish FVG (15m): [curr_high={curr_high:.2f} – prev_prev_low={prev_prev_low:.2f}]")
-
-
 
 
 @strategy.on_15m_close()

@@ -11,12 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Dict
-
-from PySide6.QtCore import QTimer
+from typing import TYPE_CHECKING, Any
 
 from engine.strategy.context import StrategyLoader
 from engine.data.data_loader import DataLoader
+from gui.persistence import settings_persist
 
 if TYPE_CHECKING:
     from gui.main_window import MainWindow
@@ -30,7 +29,7 @@ class SettingsController:
     def __init__(self, host: MainWindow, settings_file: str) -> None:
         self._host = host
         self.settings_file = settings_file
-        self.settings: Dict[str, Any] = {}
+        self.settings: dict[str, Any] = {}
 
     def load(self) -> None:
         """Restore persisted asset, equity, last CSV/strategy and view range."""
@@ -88,11 +87,7 @@ class SettingsController:
             logger.warning(f"Settings: {e}", exc_info=True)
 
     def save(self, key: str | None = None, value: Any = None) -> None:
-        """Persist a single key (when given) and the live UI snapshot to disk.
-
-        IMPORTANT: this file is shared with `gui.persistence.settings_persist`,
-        so we must preserve unrelated keys (e.g. AI provider / API key).
-        """
+        """Persist a single key (when given) and the live UI snapshot to disk."""
         h = self._host
         if key:
             self.settings[key] = value
@@ -106,12 +101,8 @@ class SettingsController:
                 "current_idx": h.engine.current_idx,
                 "view_range": h.chart_tab.plot_widget.getViewBox().viewRange(),
                 "chart_colors": h.chart_tab._color_scheme,
-                # Preserve last loaded CSV/strategy paths so they survive restart
                 "last_csv": self.settings.get("last_csv", ""),
                 "last_strat": self.settings.get("last_strat", ""),
-                # Always read AI fields from the live UI so a session-switch
-                # of provider/key is not overwritten by the stale value that
-                # was loaded from disk at startup.
                 "ai_provider": h.settings_tab.ai_provider_cb.currentText(),
                 "ai_model": h.settings_tab.ai_model_cb.currentText(),
                 "ai_api_key": h.settings_tab.ai_api_key_le.text(),
@@ -120,20 +111,7 @@ class SettingsController:
             }
         )
         try:
-            existing: Dict[str, Any] = {}
-            if os.path.exists(self.settings_file):
-                try:
-                    with open(self.settings_file, encoding="utf-8") as f:
-                        loaded = json.load(f)
-                    if isinstance(loaded, dict):
-                        existing = loaded
-                except Exception:
-                    existing = {}
-
-            payload: Dict[str, Any] = dict(existing)
-            payload.update(self.settings)
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False)
+            settings_persist.save(self.settings)
         except Exception:
             pass
 
@@ -227,4 +205,5 @@ class SettingsController:
             except Exception:
                 pass
 
+        from PySide6.QtCore import QTimer
         QTimer.singleShot(300, restore)

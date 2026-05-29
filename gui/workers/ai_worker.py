@@ -8,7 +8,7 @@ from PySide6.QtCore import QThread, Signal
 
 logger = logging.getLogger("StrategyTester.gui.workers.ai_worker")
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_AI_GUIDE_PATH = os.path.join(_APP_DIR, "docs", "ai_strategy_authoring_guide.md")
+_AI_GUIDE_PATH = os.path.join(_APP_DIR, "docs", "api.md")
 _PROMPTS_DIR = os.path.join(_APP_DIR, "config", "prompts")
 
 

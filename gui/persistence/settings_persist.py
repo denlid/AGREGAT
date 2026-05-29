@@ -56,6 +56,7 @@ DEFAULTS: Dict[str, Any] = {
     "ai_api_key": "",
     "ai_custom_base_url": "",
     "ai_custom_extra_body": "",
+    "ai_max_tokens": 16384,
 }
 
 

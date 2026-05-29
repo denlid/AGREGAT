@@ -12,7 +12,7 @@ strategy = Strategy(
 def _(c):
     # 1. Draw a vertical line through the bar (low to high)
     strategy.draw_line(
-        c.time, c.low,
+        c.time, c.low+10,
         c.time, c.high,
         color=strategy.line_color,
         width=1,
