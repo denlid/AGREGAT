@@ -149,6 +149,26 @@ class Strategy:
         """
         return None
 
+    def feature_params(self) -> Any:
+        """Return the subset of params that influence built features.
+
+        Used by the engine-side feature cache (Roadmap v2 / S1.5) to decide
+        when cached features can be reused across runs. Features depend ONLY
+        on these params — varying any other param (e.g. SL/TP thresholds)
+        does not invalidate the cache.
+
+        The default returns ``None``, which disables feature caching for the
+        strategy (every run rebuilds features). Strategies implementing the
+        feature-cache contract should override this to return a hashable tuple
+        of the indicator params, e.g.::
+
+            def feature_params(self):
+                return (self.params["fast_ema"], self.params["slow_ema"])
+
+        Returning ``None`` is safe but forfeits the cross-run cache benefit.
+        """
+        return None
+
     def vectorized_signals_from_features(self, features: Any, params: Any = None) -> Any:
         """Optional signal-generation hook from a prepared feature bundle.
 

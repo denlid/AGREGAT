@@ -49,6 +49,15 @@ class EMACrossoverFeatureCached(Strategy):
         Param(name="tp_pts", label="TP Points", kind="float", default=100.0, min=20.0, max=1000.0),
     ]
 
+    def feature_params(self):
+        """Params that affect built features — used by engine feature cache (S1.5).
+
+        Features (the EMA arrays) depend ONLY on fast_ema/slow_ema. Varying
+        sl_pts/tp_pts does NOT invalidate the cache, so a sweep over execution
+        thresholds reuses the EMAs computed once.
+        """
+        return (int(self.params["fast_ema"]), int(self.params["slow_ema"]))
+
     def build_vectorized_features(self, df: Any, prepared: Any = None) -> dict:
         """Compute heavy EMA arrays once — the reuse boundary for sweeps.
 
@@ -90,14 +99,18 @@ class EMACrossoverFeatureCached(Strategy):
         slow = features["slow_ema"]
         index = features["index"]
 
-        # Crossover detection: fast crosses above slow → +1, below → -1.
+        # Crossover detection — fully vectorized (no Python loop).
+        # diff[i] > 0 means fast above slow at bar i. A sign change from <=0 to
+        # >0 is a bullish crossover; from >=0 to <0 is bearish.
+        diff = fast - slow
         sig = np.zeros(n, dtype=int)
-        # Avoid index 0 (no prior bar to compare).
-        for i in range(1, n):
-            if fast[i - 1] <= slow[i - 1] and fast[i] > slow[i]:
-                sig[i] = +1  # bullish crossover
-            elif fast[i - 1] >= slow[i - 1] and fast[i] < slow[i]:
-                sig[i] = -1  # bearish crossover
+        if n > 1:
+            prev = diff[:-1]
+            curr = diff[1:]
+            bull = (prev <= 0.0) & (curr > 0.0)
+            bear = (prev >= 0.0) & (curr < 0.0)
+            sig[1:][bull] = +1
+            sig[1:][bear] = -1
 
         # SL/TP from params (these are the swept variables in the target workload).
         sl_pts = float(self.params["sl_pts"])

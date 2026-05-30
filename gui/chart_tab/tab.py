@@ -53,6 +53,7 @@ class ChartTab(QWidget):
         self._selection_mask_items = []
         self._selection_rect_data = None
         self.autofit_y = True
+        self.show_ohlc_tooltip = True  # OHLC crosshair tooltip (BUG-3 → grail feature)
 
         # Initialize cache attributes early (Sprint 3 — array-first snapshot).
         self._cached_snapshot = None
@@ -305,7 +306,7 @@ class ChartTab(QWidget):
         self.cross_label.hide()
 
         # OHLC info label — top-left corner
-        self.ohlc_label = pg.TextItem(color="#9A9AAE", anchor=(0, 1))
+        self.ohlc_label = pg.TextItem(color="#9A9AAE", anchor=(0, 0))
         self.ohlc_label.setZValue(100)
         self.plot_widget.addItem(self.ohlc_label, ignoreBounds=True)  # type: ignore[call-arg]
         self.ohlc_label.hide()
@@ -621,18 +622,40 @@ class ChartTab(QWidget):
         self.vline.setPos(mp.x())
         self.hline.setPos(mp.y())
 
-        idx = int(round(mp.x()))
-        if 0 <= idx < len(self.res_times):
-            _ = self.candlestick_item.get_ohlc_at(idx)
-
         # Price label on right side of crosshair
         vr = self.plot_widget.getViewBox().viewRect()
         self.cross_label.setText(f" {mp.y():.2f}")
         self.cross_label.setPos(vr.right() - (vr.width() * 0.01), mp.y())
         self.cross_label.show()
 
-        # OHLC overlay disabled — cleaner chart per UX preference.
-        self.ohlc_label.hide()
+        # OHLC tooltip — date + open/high/low/close at the hovered bar, tinted
+        # by candle direction. Toggleable via ``self.show_ohlc_tooltip``.
+        if not getattr(self, "show_ohlc_tooltip", True):
+            self.ohlc_label.hide()
+            return
+        idx = int(round(mp.x()))
+        if 0 <= idx < len(self.res_times):
+            ohlc = self.candlestick_item.get_ohlc_at(idx)
+            if ohlc is not None:
+                o, h, l, c = ohlc
+                up = c >= o
+                tint = "#26A69A" if up else "#EF5350"
+                try:
+                    ts = pd.Timestamp(self.res_times[idx]).strftime("%Y-%m-%d %H:%M")
+                except (ValueError, TypeError):
+                    ts = ""
+                self.ohlc_label.setHtml(
+                    f'<span style="color:#8A8A9A">{ts}</span>  '
+                    f'<span style="color:{tint}">'
+                    f"O {o:.2f}  H {h:.2f}  L {l:.2f}  C {c:.2f}</span>"
+                )
+                # Anchor at the top-left of the visible viewport.
+                self.ohlc_label.setPos(vr.left() + (vr.width() * 0.01), vr.top())
+                self.ohlc_label.show()
+            else:
+                self.ohlc_label.hide()
+        else:
+            self.ohlc_label.hide()
 
     def _snap_to_candle(self, x, y):
         """Snap x to nearest candle index, y to nearest OHLC price."""
@@ -1048,7 +1071,7 @@ class ChartTab(QWidget):
         Viewport culling skips drawings outside the visible range to reduce
         scene churn on heavy charts.
         """
-        from gui.chart_tab.overlay_diff import is_drawing_in_viewport
+        from gui.chart_tab.overlay_diff import cached_time64, is_drawing_in_viewport
 
         for i in self.user_graphic_items:
             self.plot_widget.removeItem(i)
@@ -1080,7 +1103,7 @@ class ChartTab(QWidget):
                     self.plot_widget.addItem(lbl)
                     self.user_graphic_items.append(lbl)
                 elif dtype == "marker":
-                    t1 = pd.to_datetime(d["t"]).to_datetime64()
+                    t1 = cached_time64(d, "t", "_t_np")
                     i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                     # Red exclamation mark above candle
                     ohlc = self.candlestick_item.get_ohlc_at(i1)
@@ -1095,15 +1118,15 @@ class ChartTab(QWidget):
                     self.plot_widget.addItem(it)
                     self.user_graphic_items.append(it)
                 elif dtype == "text":
-                    t1 = pd.to_datetime(d["t"]).to_datetime64()
+                    t1 = cached_time64(d, "t", "_t_np")
                     i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                     it = pg.TextItem(d["text"], color=color, anchor=(0.5, 0.5))
                     it.setPos(i1, d["p"])
                     self.plot_widget.addItem(it)
                     self.user_graphic_items.append(it)
                 elif dtype == "line":
-                    t1 = pd.to_datetime(d["t1"]).to_datetime64()
-                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
+                    t1 = cached_time64(d, "t1", "_t1_np")
+                    t2 = cached_time64(d, "t2", "_t2_np")
                     i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                     i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
                     it = pg.LineSegmentROI(
@@ -1118,8 +1141,8 @@ class ChartTab(QWidget):
                     self.plot_widget.addItem(it)
                     self.user_graphic_items.append(it)
                 elif dtype == "rect":
-                    t1 = pd.to_datetime(d["t1"]).to_datetime64()
-                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
+                    t1 = cached_time64(d, "t1", "_t1_np")
+                    t2 = cached_time64(d, "t2", "_t2_np")
                     i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                     i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
                     mnx, mxx = min(i1, i2), max(i1, i2)
@@ -1145,7 +1168,7 @@ class ChartTab(QWidget):
                     pts = d["points"]
                     path = QPainterPath()
                     for idx, pt in enumerate(pts):
-                        t_px = pd.to_datetime(pt["t"]).to_datetime64()
+                        t_px = cached_time64(pt, "t", "_t_np")
                         i_px = max(0, int(np.searchsorted(rt, t_px, side="right")) - 1)
                         if idx == 0:
                             path.moveTo(i_px, pt["p"])
@@ -1572,7 +1595,7 @@ class ChartTab(QWidget):
 
             if self.autofit_y:
                 t_fit = _time.perf_counter()
-                self._autofit_y(vb, res_df, n)
+                self._autofit_y(vb, snapshot, n)
                 t_autofit += _time.perf_counter() - t_fit
         else:
             xmin, xmax = self._tracked_xrange
@@ -1596,7 +1619,7 @@ class ChartTab(QWidget):
             self._tracked_xrange = new_xrange
             if self.autofit_y:
                 t_fit = _time.perf_counter()
-                self._autofit_y(vb, res_df, n)
+                self._autofit_y(vb, snapshot, n)
                 t_autofit += _time.perf_counter() - t_fit
         t_camera = _time.perf_counter() - t0
 
@@ -1651,15 +1674,15 @@ class ChartTab(QWidget):
         if t_all * 1000.0 > self._perf_log_threshold_ms:
             logger.info("chart_perf %s", perf_stats)
 
-    def _autofit_y(self, vb, res_df, n):
+    def _autofit_y(self, vb, snapshot, n):
         """Auto-fit Y axis to the high/low range of visible candles."""
         vr = vb.viewRect()
         x_left = max(0, int(vr.left()))
         x_right = min(n - 1, int(vr.right()))
         if x_right < x_left:
             return
-        visible_h = res_df["high"].values[x_left : x_right + 1]
-        visible_l = res_df["low"].values[x_left : x_right + 1]
+        visible_h = snapshot.high[x_left : x_right + 1]
+        visible_l = snapshot.low[x_left : x_right + 1]
         if len(visible_h) == 0:
             return
         y_min = float(visible_l.min())

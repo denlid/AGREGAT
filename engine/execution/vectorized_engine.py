@@ -104,6 +104,121 @@ class VectorizedResult:
 _REQUIRED_COLS: Sequence[str] = ("signal", "sl_points", "tp_points")
 
 
+def _reconstruct_skipped_trades(
+    *,
+    n: int,
+    sig: np.ndarray,
+    sl_pts_arr: np.ndarray,
+    times: np.ndarray,
+    entry_indices: np.ndarray,
+    exit_indices: np.ndarray,
+    trade_count: int,
+    is_trading_hours_arr: np.ndarray,
+    is_weekend_arr: np.ndarray,
+    is_eod_arr: np.ndarray,
+    enforce_th: bool,
+    weekend_blocking: bool,
+    enforce_eod: bool,
+) -> List[dict[str, Any]]:
+    """Reconstruct TRADING_HOURS / WEEKEND / EOD skipped fills for the Numba path.
+
+    The Numba kernel returns completed trades but not the pending orders that
+    were dropped because the fill bar fell outside the trading window. The
+    pure-Python path tracks these in ``skipped_trades``; this function mirrors
+    that pending->fill state machine so the Numba path produces an identical
+    list (parity with the Visual engine — TZ Phase 6 / A7).
+
+    It replays only the lightweight pending state (no PnL). Position-open
+    intervals are taken directly from the Numba entry/exit indices, so the
+    state machine knows exactly when a fill can happen vs when a position
+    blocks new pendings.
+
+    Returns an empty list when no blocking is enforced (the common case), so
+    this is effectively free unless the asset enables trading-hours/EOD/weekend.
+    """
+    # Fast exit: nothing can be skipped if no blocking rule is active.
+    if not (enforce_th or weekend_blocking or enforce_eod):
+        return []
+
+    # No signals → no pending orders → nothing can be skipped.
+    sig_bars = np.flatnonzero(sig != 0)
+    if sig_bars.size == 0:
+        return []
+
+    # Build a per-bar "position is open" mask from the Numba trade intervals.
+    # A position occupies bars [entry_index, exit_index] inclusive; a pending
+    # cannot fill while a position is open, and a new signal cannot queue a
+    # pending until the position has closed.
+    pos_open = np.zeros(n, dtype=bool)
+    entry_at = np.zeros(n, dtype=bool)
+    for ti in range(trade_count):
+        e = int(entry_indices[ti])
+        x = int(exit_indices[ti])
+        if 0 <= e < n:
+            entry_at[e] = True
+        lo, hi = (e, x) if e <= x else (x, e)
+        lo = max(0, lo)
+        hi = min(n - 1, hi)
+        pos_open[lo : hi + 1] = True
+
+    # Precompute the "fill bar is blocked" mask once (vectorized). A pending
+    # queued at bar i tries to fill at i+1; it is dropped if that bar is
+    # blocked by trading-hours / weekend / EOD rules.
+    blocked = np.zeros(n, dtype=bool)
+    if enforce_th:
+        blocked |= ~is_trading_hours_arr.astype(bool)
+    if weekend_blocking:
+        blocked |= is_weekend_arr.astype(bool)
+    if enforce_eod:
+        blocked |= is_eod_arr.astype(bool)
+
+    # The state machine only does work at signal bars (step 2 queues a pending)
+    # and the bar right after a signal (step 1 resolves it). Every other bar is
+    # a no-op (pend_dir stays 0, no signal), so we iterate ONLY those candidate
+    # bars instead of all n — O(num_signals) instead of O(n). This is exactly
+    # equivalent to the full per-bar loop.
+    candidates = np.union1d(sig_bars, sig_bars + 1)
+    candidates = candidates[candidates < n]
+
+    skipped: List[dict[str, Any]] = []
+    pend_dir = 0
+    for i in candidates:
+        i = int(i)
+        # 1) A pending order from a prior bar tries to fill at this bar's open.
+        #    It is dropped (skipped) if this bar is blocked AND no position
+        #    actually opened here (entry_at[i] confirms a real fill).
+        if pend_dir != 0 and not entry_at[i]:
+            if enforce_th and not is_trading_hours_arr[i]:
+                skip_reason = "TRADING_HOURS"
+            elif weekend_blocking and bool(is_weekend_arr[i]):
+                skip_reason = "WEEKEND"
+            elif enforce_eod and bool(is_eod_arr[i]):
+                skip_reason = "EOD"
+            else:
+                skip_reason = None
+            if skip_reason is not None:
+                skipped.append(
+                    {
+                        "time": str(times[i]),
+                        "reason": skip_reason,
+                        "direction": "long" if pend_dir == +1 else "short",
+                    }
+                )
+            pend_dir = 0
+        elif pend_dir != 0 and entry_at[i]:
+            # The pending filled here (Numba recorded an entry) — clear it.
+            pend_dir = 0
+
+        # 2) A new signal while flat and with no pending queues a pending order
+        #    for the next bar. Mirrors the Python loop's step 5.
+        if not pos_open[i] and pend_dir == 0 and sig[i] != 0:
+            sl_val = float(sl_pts_arr[i])
+            if not np.isnan(sl_val) and sl_val > 0:
+                pend_dir = +1 if sig[i] > 0 else -1
+
+    return skipped
+
+
 def _resolve_vectorized_signals(
     strategy: Any,
     df: pd.DataFrame,
@@ -133,7 +248,37 @@ def _resolve_vectorized_signals(
         return strategy.vectorized_signals(df), False, time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    features = strategy.build_vectorized_features(df, prepared=prepared)
+
+    # Engine-side feature cache (Roadmap v2 / S1.5): reuse the heavy feature
+    # bundle across runs when the dataset and feature-affecting params are
+    # unchanged. The strategy opts in by overriding feature_params() to return
+    # a hashable tuple of indicator params; returning None skips caching.
+    from engine.execution.feature_cache import (
+        get_global_feature_cache,
+        make_feature_cache_key,
+    )
+
+    cache_key = None
+    feature_params_fn = getattr(strategy, "feature_params", None)
+    if callable(feature_params_fn) and prepared is not None:
+        try:
+            fparams = feature_params_fn()
+        except Exception:
+            fparams = None
+        cache_key = make_feature_cache_key(
+            getattr(prepared, "dataset_key", None), strategy, fparams
+        )
+
+    features = None
+    if cache_key is not None:
+        cache = get_global_feature_cache()
+        features = cache.get(cache_key)
+        if features is None:
+            features = strategy.build_vectorized_features(df, prepared=prepared)
+            cache.put(cache_key, features)
+    else:
+        features = strategy.build_vectorized_features(df, prepared=prepared)
+
     signals = strategy.vectorized_signals_from_features(
         features,
         getattr(strategy, "params", None),
@@ -212,6 +357,7 @@ def run_vectorized(
     summary_only: bool = False,
     compact_result: bool = False,
     include_equity_curve: bool = True,
+    skip_lookahead_check: bool = False,
 ) -> VectorizedResult:
     """Run a vectorised backtest.
 
@@ -219,6 +365,11 @@ def run_vectorized(
     :class:`VectorizedResult` with the same ``Trade`` objects that the
     on-candle engine produces, so downstream Analytics / Quant tabs can
     consume both interchangeably.
+
+    ``skip_lookahead_check`` bypasses the per-run look-ahead bias heuristic
+    (which calls ``vectorized_signals`` twice on a slice). Batch runners set
+    this after performing the check once for the whole sweep — the check is
+    strategy-level, not param-level, so repeating it per combo is pure waste.
     """
     if not hasattr(strategy, "vectorized_signals"):
         raise AttributeError(
@@ -277,7 +428,7 @@ def run_vectorized(
     t_validate = time.perf_counter() - t0
 
     # --- Phase 4 Fix: Look-ahead Bias Sandbox Check ---
-    if n > 50:
+    if n > 50 and not skip_lookahead_check:
         try:
             # We take a small slice to keep the check ultra-fast (e.g. max 1000 bars)
             test_size = min(1000, n)
@@ -484,13 +635,31 @@ def run_vectorized(
             "used_feature_cache_contract": bool(used_feature_cache_contract),
         }
         logger.info("vectorized_perf %s", perf)
+        # Reconstruct skipped fills (TRADING_HOURS/WEEKEND/EOD) for parity with
+        # the Visual engine and the pure-Python path. No-op (returns []) when
+        # no blocking rule is enforced, so the common case stays free.
+        skipped_trades = _reconstruct_skipped_trades(
+            n=n,
+            sig=sig,
+            sl_pts_arr=sl_pts_arr,
+            times=times,
+            entry_indices=r_entry_indices,
+            exit_indices=r_exit_indices,
+            trade_count=trade_count,
+            is_trading_hours_arr=is_trading_hours_arr,
+            is_weekend_arr=is_weekend_arr,
+            is_eod_arr=is_eod_arr,
+            enforce_th=enforce_th,
+            weekend_blocking=weekend_blocking,
+            enforce_eod=enforce_eod,
+        )
         return VectorizedResult(
             trades=[] if compact_result else trades,
             equity_curve=(np.array([initial_equity], dtype=float) if not include_equity_curve else equity_curve),
             peak_drawdown_pct=dd_tracker.max_drawdown_pct,
             peak_drawdown_abs=dd_tracker.max_drawdown_abs,
             summary=summary,
-            skipped_trades=[],
+            skipped_trades=skipped_trades,
             perf=perf,
         )
 

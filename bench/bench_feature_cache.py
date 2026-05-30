@@ -49,12 +49,14 @@ class EMACrossoverNoCache(Strategy):
         fast_ema = pd.Series(close).ewm(span=fast_period, adjust=False).mean().to_numpy()
         slow_ema = pd.Series(close).ewm(span=slow_period, adjust=False).mean().to_numpy()
 
+        # Vectorized crossover detection (same logic as the cached strategy).
+        diff = fast_ema - slow_ema
         sig = np.zeros(n, dtype=int)
-        for i in range(1, n):
-            if fast_ema[i - 1] <= slow_ema[i - 1] and fast_ema[i] > slow_ema[i]:
-                sig[i] = +1
-            elif fast_ema[i - 1] >= slow_ema[i - 1] and fast_ema[i] < slow_ema[i]:
-                sig[i] = -1
+        if n > 1:
+            prev = diff[:-1]
+            curr = diff[1:]
+            sig[1:][(prev <= 0.0) & (curr > 0.0)] = +1
+            sig[1:][(prev >= 0.0) & (curr < 0.0)] = -1
 
         sl_pts = float(self.params["sl_pts"])
         tp_pts = float(self.params["tp_pts"])

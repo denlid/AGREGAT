@@ -13,6 +13,32 @@ import hashlib
 from typing import Any, Dict, Optional
 
 
+def cached_time64(d: Dict[str, Any], key: str, cache_key: str) -> Optional[Any]:
+    """Return ``pd.to_datetime(d[key]).to_datetime64()`` with per-drawing caching.
+
+    The converted value is cached on the drawing dict under ``cache_key``,
+    together with the source string it was derived from. If the source string
+    changes (e.g. the user drags an ROI and ``_on_roi_changed`` rewrites
+    ``d["t1"]``), the cache auto-refreshes — so this is safe across edits.
+
+    Avoids the repeated ``pd.to_datetime`` calls that dominated
+    ``_draw_user_items`` on every redraw (BUG-2): each ~50-100µs string parse,
+    × several per drawing × every redraw. Returns None if ``key`` is missing.
+    """
+    import pandas as pd
+
+    src = d.get(key)
+    if src is None:
+        return None
+    src_marker = cache_key + "__src"
+    if d.get(src_marker) == src and cache_key in d:
+        return d[cache_key]
+    val = pd.to_datetime(src).to_datetime64()
+    d[cache_key] = val
+    d[src_marker] = src
+    return val
+
+
 def drawing_id(d: Dict[str, Any]) -> str:
     """Generate stable ID for a drawing dict.
 

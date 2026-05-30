@@ -10,7 +10,46 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from gui.chart_tab.overlay_diff import drawing_id, diff_overlays, is_drawing_in_viewport
+from gui.chart_tab.overlay_diff import (
+    cached_time64,
+    diff_overlays,
+    drawing_id,
+    is_drawing_in_viewport,
+)
+
+
+def test_cached_time64_returns_datetime64():
+    d = {"t": "2024-01-02 10:00"}
+    val = cached_time64(d, "t", "_t_np")
+    assert val is not None
+    assert str(val).startswith("2024-01-02T10:00")
+    # Cached on the dict.
+    assert "_t_np" in d
+
+
+def test_cached_time64_reuses_cache():
+    d = {"t": "2024-01-02 10:00"}
+    v1 = cached_time64(d, "t", "_t_np")
+    cached = d["_t_np"]
+    v2 = cached_time64(d, "t", "_t_np")
+    # Same cached object returned (no re-parse).
+    assert d["_t_np"] is cached
+    assert v1 == v2
+
+
+def test_cached_time64_invalidates_on_source_change():
+    """If the source string changes (ROI drag), cache auto-refreshes."""
+    d = {"t1": "2024-01-02 10:00"}
+    v1 = cached_time64(d, "t1", "_t1_np")
+    # Simulate a drag rewriting the time string.
+    d["t1"] = "2024-01-02 15:00"
+    v2 = cached_time64(d, "t1", "_t1_np")
+    assert v1 != v2
+    assert str(v2).startswith("2024-01-02T15:00")
+
+
+def test_cached_time64_missing_key_returns_none():
+    assert cached_time64({}, "t", "_t_np") is None
 
 
 def test_drawing_id_stable_for_same_drawing():

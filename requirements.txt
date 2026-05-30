@@ -9,3 +9,7 @@ openai>=1.0.0
 anthropic>=0.18.0
 mistralai>=1.0.0
 google-genai>=1.0.0
+# Optional but strongly recommended: JIT-compiles the vectorized backtest
+# inner loop (~160x faster than the pure-Python fallback). The engine works
+# without it (graceful fallback) but optimizer sweeps are dramatically slower.
+numba>=0.60.0
