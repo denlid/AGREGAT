@@ -139,6 +139,27 @@ class Strategy:
     def on_candle(self, ctx: "Context") -> None:
         pass
 
+    def build_vectorized_features(self, df: Any, prepared: Any = None) -> Any:
+        """Optional precompute hook for optimizer-style repeated runs.
+
+        Strategies may override this to split heavy feature construction
+        from cheap signal generation. The default implementation returns
+        ``None``, signalling that :meth:`vectorized_signals` should be
+        used directly.
+        """
+        return None
+
+    def vectorized_signals_from_features(self, features: Any, params: Any = None) -> Any:
+        """Optional signal-generation hook from a prepared feature bundle.
+
+        Strategies that override :meth:`build_vectorized_features` should
+        typically override this method as well.
+        """
+        raise NotImplementedError(
+            "Strategy.vectorized_signals_from_features is not implemented. "
+            "Override it when using build_vectorized_features()."
+        )
+
     def vectorized_signals(self, df: Any) -> Any:  # noqa: D401 — interface stub
         """Return a per-bar signal frame for the vectorised engine.
 

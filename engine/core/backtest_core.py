@@ -23,7 +23,7 @@ Design notes:
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -44,6 +44,9 @@ from engine.models.models import (
 from engine.analytics.stats_accumulator import DrawdownTracker, StatsAccumulator
 from engine.data.tf_aggregator import TimeframeAggregator
 from engine.execution.vectorized_engine import VectorizedResult
+
+if TYPE_CHECKING:
+    from engine.execution.prepared_dataset import PreparedDataset
 
 logger = logging.getLogger("StrategyTester.engine.backtest")
 
@@ -1361,7 +1364,12 @@ class BacktestCore:
     # ------------------------------------------------------------------
     # Vectorised (Quant) execution mode
     # ------------------------------------------------------------------
-    def run_vectorized(self) -> Optional[VectorizedResult]:
+    def run_vectorized(
+        self,
+        *,
+        prepared: Optional[PreparedDataset] = None,
+        optimizer_mode: bool = False,
+    ) -> Optional[VectorizedResult]:
         """Execute the loaded strategy via the fast-quant vectorised engine.
 
         Mirrors the on-candle ``run_to_end`` path — the engine state
@@ -1370,12 +1378,44 @@ class BacktestCore:
         GUI (or any subscriber) refreshes just like after a Visual run.
         Returns the raw :class:`engine.vectorized_engine.VectorizedResult`
         for callers that want to inspect the equity curve directly.
+
+        Parameters
+        ----------
+        prepared
+            Optional pre-built :class:`PreparedDataset` for the loaded ``df``.
+            When supplied, the engine skips the numpy-extract + mask-build
+            stages — the key reuse path for optimizer sweeps over one dataset
+            (Roadmap v2 / S0.2).
+        optimizer_mode
+            When True, runs in summary-only fast mode: no ``Trade`` objects,
+            no equity curve, no engine-state materialization. Returns the bare
+            :class:`VectorizedResult` (``summary`` + ``perf`` only). Use for
+            parameter sweeps where only metrics matter. The default (False)
+            keeps the full GUI single-run behaviour unchanged.
         """
         from engine.execution.vectorized_engine import run_vectorized as _run_vec
 
         if self.df is None or self.strategy is None:
             logger.warning("run_vectorized: data or strategy not loaded")
             return None
+
+        # Optimizer fast path: skip Trade materialization + state replay
+        # entirely and return summary/perf only. We must NOT call self.reset()
+        # or touch GUI state here — sweeps run this thousands of times and the
+        # caller only consumes result.summary. (Roadmap v2 / S0.1)
+        if optimizer_mode:
+            return _run_vec(
+                self.df,
+                self.strategy,
+                asset=self.asset_config,
+                execution_model=self.execution_model,
+                initial_equity=self.initial_equity,
+                risk_pct=self.risk_pct,
+                prepared=prepared,
+                summary_only=True,
+                compact_result=True,
+                include_equity_curve=False,
+            )
 
         # Reset state before a fresh quant run (clears trades + equity).
         self.reset()
@@ -1386,6 +1426,7 @@ class BacktestCore:
             execution_model=self.execution_model,
             initial_equity=self.initial_equity,
             risk_pct=self.risk_pct,
+            prepared=prepared,
         )
 
         # Materialise the result into engine state expected by the GUI tabs.

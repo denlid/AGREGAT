@@ -44,6 +44,22 @@ class ChartTab(QWidget):
         self._is_syncing = False  # prevent recursive sync loops
         self._chart_alive = True  # guard for timer callbacks after destruction
         self.destroyed.connect(lambda: setattr(self, "_chart_alive", False))
+
+        # Initialize state flags early to avoid AttributeError in event handlers
+        # that may fire during widget construction.
+        self._selection_mode = False
+        self._selection_start = None
+        self._selection_overlay = None
+        self._selection_mask_items = []
+        self._selection_rect_data = None
+        self.autofit_y = True
+
+        # Initialize cache attributes early (Sprint 3 — array-first snapshot).
+        self._cached_snapshot = None
+        self._cache_key = None
+        self._cached_trade_marker_key = None
+        self._cached_trade_marker_payload = None
+
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
@@ -336,10 +352,37 @@ class ChartTab(QWidget):
         self._need_autorange = True
         self._user_zoom_width = None  # User's X-zoom width (set by wheel zoom)
         self._tracked_xrange = None  # Our own X-range tracking (bypasses pyqtgraph)
-        self._cache_key = None
-        self._cached_res_df = None
-        self._cached_chart_arrays_key = None
-        self._cached_chart_arrays = None
+
+    def _snapshot_from_dataframe(self, df, active_tf: str, lod_level=None):
+        """Build ChartRenderSnapshot from a DataFrame (HTF fallback path).
+
+        Used when TF aggregator returns a DataFrame (HTF path). Less efficient
+        than the 1m zero-copy path, but still avoids repeated .to_numpy() calls
+        by building the snapshot once and caching it.
+        """
+        from gui.chart_tab.render_snapshot import ChartRenderSnapshot
+
+        n = len(df)
+        time_arr = df["time"].to_numpy()
+        open_arr = df["open"].to_numpy(dtype=np.float64)
+        high_arr = df["high"].to_numpy(dtype=np.float64)
+        low_arr = df["low"].to_numpy(dtype=np.float64)
+        close_arr = df["close"].to_numpy(dtype=np.float64)
+        x_arr = np.arange(n, dtype=np.float64)
+
+        return ChartRenderSnapshot(
+            time=time_arr,
+            open=open_arr,
+            high=high_arr,
+            low=low_arr,
+            close=close_arr,
+            x=x_arr,
+            n=n,
+            source_start=0,
+            source_end=n,
+            active_tf=active_tf,
+            lod_level=lod_level,
+        )
         self._cached_trade_marker_key = None
         self._cached_trade_marker_payload = None
         self._color_scheme = "Classic"
@@ -347,12 +390,6 @@ class ChartTab(QWidget):
         self._brush_path = None
         self._brush_item = None
         self._is_brushing = False
-        self.autofit_y = True
-        self._selection_mode = False
-        self._selection_start = None
-        self._selection_overlay = None
-        self._selection_mask_items = []
-        self._selection_rect_data = None
 
         self._redraw_pending = False
         self._redraw_timer = QTimer()
@@ -890,18 +927,17 @@ class ChartTab(QWidget):
         idx2 = int(max(0, min(rect_data["x2"], len(self.res_times) - 1)))
         if idx2 < idx1:
             idx1, idx2 = idx2, idx1
-        res_df = self._cached_res_df if self._cached_res_df is not None else pd.DataFrame()
+        snapshot = self._cached_snapshot
         candles = []
-        if not res_df.empty:
-            for i in range(idx1, min(idx2 + 1, len(res_df))):
-                row = res_df.iloc[i]
+        if snapshot is not None and snapshot.n > 0:
+            for i in range(idx1, min(idx2 + 1, snapshot.n)):
                 candles.append(
                     {
-                        "time": str(pd.to_datetime(row["time"])),
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
+                        "time": str(pd.to_datetime(snapshot.time[i])),
+                        "open": float(snapshot.open[i]),
+                        "high": float(snapshot.high[i]),
+                        "low": float(snapshot.low[i]),
+                        "close": float(snapshot.close[i]),
                     }
                 )
         t_start = pd.to_datetime(self.res_times[idx1]).to_datetime64()
@@ -1161,8 +1197,8 @@ class ChartTab(QWidget):
         self._reset_layers()
         self._need_autorange = True
         self._cache_key = None
-        self._cached_chart_arrays_key = None
-        self._cached_chart_arrays = None
+        self._cached_snapshot = None
+        self._cache_key = None
         self._cached_trade_marker_key = None
         self._cached_trade_marker_payload = None
         self._prev_res_times = None
@@ -1203,8 +1239,8 @@ class ChartTab(QWidget):
             self.visual_tf_cb.setCurrentText(tf)
             self.visual_tf_cb.blockSignals(prev_block)
         self._cache_key = None
-        self._cached_chart_arrays_key = None
-        self._cached_chart_arrays = None
+        self._cached_snapshot = None
+        self._cache_key = None
         self._cached_trade_marker_key = None
         self._cached_trade_marker_payload = None
         # Phase 0.2 (A3) — ensure forming arrays are built for the selected TF
@@ -1233,33 +1269,6 @@ class ChartTab(QWidget):
     def _get_tf_minutes(self):
         m = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
         return m.get(self.visual_tf_cb.currentText().lower(), 1)
-
-    def _build_chart_arrays(self, res_df):
-        """Build and cache NumPy chart payload for the current render frame."""
-        key = (id(res_df), len(res_df))
-        cached = self._cached_chart_arrays
-        if self._cached_chart_arrays_key == key and cached is not None:
-            return cached, True
-
-        n = len(res_df)
-        x = np.arange(n, dtype=np.float64)
-        cl = res_df["close"].to_numpy(dtype=np.float64, copy=False)
-        o = res_df["open"].to_numpy(dtype=np.float64, copy=False)
-        l = res_df["low"].to_numpy(dtype=np.float64, copy=False)
-        h = res_df["high"].to_numpy(dtype=np.float64, copy=False)
-        candle_arr = np.column_stack((x, o, cl, l, h))
-        candle_arr.setflags(write=False)
-        chart_arrays = {
-            "x": x,
-            "close": cl,
-            "candle_arr": candle_arr,
-            "open": o,
-            "low": l,
-            "high": h,
-        }
-        self._cached_chart_arrays_key = key
-        self._cached_chart_arrays = chart_arrays
-        return chart_arrays, False
 
     def _build_trade_marker_payload(self, rt):
         """Precompute trade-marker arrays once per trade/timeframe state."""
@@ -1388,6 +1397,8 @@ class ChartTab(QWidget):
     def redraw_chart(self):
         """Redraw the current rendering window of candles."""
         import time as _time
+        from gui.chart_tab.render_snapshot import ChartRenderSnapshot
+
         t_total = _time.perf_counter()
 
         if getattr(self, "_is_roi_dragging", False):
@@ -1404,14 +1415,12 @@ class ChartTab(QWidget):
 
         t0 = _time.perf_counter()
         ck = (idx, tf, id(self.engine.df))
-        cache_hit = ck == self._cache_key and self._cached_res_df is not None
+        cache_hit = ck == self._cache_key and self._cached_snapshot is not None
         if cache_hit:
-            res_df = self._cached_res_df
+            snapshot = self._cached_snapshot
         else:
             if tf != "1m" and hasattr(self.engine, "tf_aggregator"):
-                # Sync tf_aggregator to the current 1m index so forming
-                # candles are visible even before the engine has stepped
-                # (after reset / fresh data load, _current_1m_idx == -1).
+                # HTF path: still uses DataFrame (separate optimization).
                 self.engine.tf_aggregator.advance_to(idx)
                 comp = self.engine.tf_aggregator.get_completed_tail(tf, 9999999)
                 form = self.engine.tf_aggregator.get_forming(tf)
@@ -1420,32 +1429,54 @@ class ChartTab(QWidget):
                     res_df = pd.DataFrame(agg)
                 else:
                     res_df = pd.DataFrame()
+
+                # Build snapshot from HTF DataFrame (fallback path).
+                if len(res_df) > 0:
+                    snapshot = self._snapshot_from_dataframe(res_df, tf, lod_level=None)
+                else:
+                    self._last_perf_stats = {
+                        "skip_reason": "empty_htf_df",
+                        "cache_hit": cache_hit,
+                        "tf": tf,
+                        "idx": idx,
+                    }
+                    return
             else:
-                # Pass the ENTIRE history up to the current index.
-                # OpenGL + LodPyramid will handle the performance automatically.
-                res_df = self.engine.df.iloc[0 : idx + 1].copy()
+                # 1m path: zero-copy snapshot from engine numpy arrays (S3 fast path).
+                start = 0
+                end = idx + 1
 
-            # Phase 3 — Cap the render window to avoid lag when idx is at the
-            # end of a huge dataset (e.g. after headless run with 200k+ candles).
-            # We keep a generous buffer beyond the visible area for smooth
-            # scrolling, but never the full history.
-            if len(res_df) > 5_000:
-                tail = res_df.iloc[-5_000:].reset_index(drop=True)
-                res_df = tail
+                # Cap the render window to avoid lag on huge datasets.
+                if end - start > 5_000:
+                    start = end - 5_000
 
-            if len(res_df) == 0:
-                self._last_perf_stats = {
-                    "skip_reason": "empty_res_df",
-                    "cache_hit": cache_hit,
-                    "tf": tf,
-                    "idx": idx,
-                }
-                return
+                snapshot = ChartRenderSnapshot.from_engine_arrays(
+                    time=self.engine._time,
+                    open_=self.engine._open,
+                    high=self.engine._high,
+                    low=self.engine._low,
+                    close=self.engine._close,
+                    start=start,
+                    end=end,
+                    active_tf=tf,
+                    lod_level=None,
+                )
+
             self._cache_key = ck
-            self._cached_res_df = res_df
+            self._cached_snapshot = snapshot
         t_data = _time.perf_counter() - t0
 
-        rt = res_df["time"].values
+        rt = snapshot.time
+        n = snapshot.n
+
+        if n == 0:
+            self._last_perf_stats = {
+                "skip_reason": "empty_snapshot",
+                "cache_hit": cache_hit,
+                "tf": tf,
+                "idx": idx,
+            }
+            return
 
         shift = 0
         prev_rt = getattr(self, "_prev_res_times", None)
@@ -1459,21 +1490,27 @@ class ChartTab(QWidget):
         self.res_times = rt
         t0 = _time.perf_counter()
         # Cache floating point timestamps for instant O(1) lookups during mouse scrolling
-        try:
-            self._res_ts = pd.DatetimeIndex(rt).view(np.int64) / 10**9
-        except Exception:
-            self._res_ts = np.array([pd.to_datetime(t).timestamp() for t in rt])
+        self._res_ts = snapshot.time_float_seconds()
         self.time_axis.set_times(rt)
         t_axis = _time.perf_counter() - t0
 
-        n = len(res_df)
         t0 = _time.perf_counter()
-        chart_arrays, arrays_cache_hit = self._build_chart_arrays(res_df)
-        t_ohlc_pack = _time.perf_counter() - t0
+        # Build chart arrays from snapshot (zero-copy, no DataFrame overhead).
+        x = snapshot.x
+        cl = snapshot.close
+        candle_arr = snapshot.candle_array()
 
-        x = chart_arrays["x"]
-        cl = chart_arrays["close"]
-        candle_arr = chart_arrays["candle_arr"]
+        # Guard against NaN in close prices (corrupt data).
+        if len(cl) > 0 and (np.isnan(cl[-1]) or np.all(np.isnan(cl))):
+            self._last_perf_stats = {
+                "skip_reason": "nan_close_prices",
+                "cache_hit": cache_hit,
+                "tf": tf,
+                "idx": idx,
+            }
+            return
+
+        t_ohlc_pack = _time.perf_counter() - t0
 
         vb = self.plot_widget.getViewBox()
         vb.enableAutoRange(x=False, y=False)

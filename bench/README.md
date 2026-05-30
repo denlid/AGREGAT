@@ -8,6 +8,7 @@ paths the rest of the roadmap depends on:
 | `bench_lsf.py`           | `linear_pivots_close`, `linear_cisd_series_close`, full LinearStructureFVG vectorised run |
 | `bench_llc.py`           | `linear_pivots`, `linear_cisd_series`, full LinearLogicCore vectorised run |
 | `bench_grid.py`          | `optimizer.grid_search` — both single-threaded and `n_workers=4` (Sprint 2.6) |
+| `bench_vectorized_reuse.py` | repeated `run_vectorized` with and without `PreparedDataset` reuse |
 
 Run the full baseline (≈200k bars, three repeats):
 
@@ -23,7 +24,8 @@ python -m bench.run_all --quick
 ```
 
 The baseline is checked in as
-[`bench/baseline.json`](./baseline.json). Sprint 4 will gate CI on a
+[`bench/baseline.json`](./baseline.json). It now also records a
+`vectorized_reuse` block for repeated-run reuse scenarios. Sprint 4 will gate CI on a
 `>5%` regression vs the committed baseline; until then the file is
 treated as a reference snapshot — refresh it whenever a non-trivial
 engine change ships and call out the diff in the PR description.

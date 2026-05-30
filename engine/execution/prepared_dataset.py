@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import blake2b
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -8,6 +9,7 @@ import pandas as pd
 
 from engine.execution.execution import ExecutionModel
 from engine.models.models import AssetConfig
+from engine.optimization.shared_arrays import SharedArrayBundle
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,9 @@ class PreparedDataset:
     commission: float
     slippage_model_int: int
     slippage_k: float
+    dataset_key: str
+    memory_bytes: int
+    memory_mb: float
     meta: Dict[str, Any]
 
     def shared_arrays(self) -> Dict[str, np.ndarray]:
@@ -56,6 +61,47 @@ class PreparedDataset:
             "is_eod": self.is_eod,
             "is_weekend": self.is_weekend,
         }
+
+    def memory_meta(self) -> Dict[str, float | int]:
+        return {
+            "memory_bytes": int(self.memory_bytes),
+            "memory_mb": float(self.memory_mb),
+            "bars": int(self.n),
+        }
+
+    def to_shared_array_bundle(self, *, name: Optional[str] = None) -> SharedArrayBundle:
+        bundle_name = name or f"prepared_{self.dataset_key[:12]}"
+        return SharedArrayBundle(self.shared_arrays(), name=bundle_name)
+
+
+def _dataset_memory_bytes(arrays: Dict[str, np.ndarray]) -> int:
+    return int(sum(int(getattr(arr, "nbytes", 0)) for arr in arrays.values()))
+
+
+def _build_dataset_key(
+    *,
+    times: np.ndarray,
+    open_: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    asset: AssetConfig,
+    execution_model: ExecutionModel,
+) -> str:
+    hasher = blake2b(digest_size=16)
+    hasher.update(np.asarray(times).view(np.uint8).tobytes())
+    hasher.update(np.asarray(open_, dtype=np.float64).view(np.uint8).tobytes())
+    hasher.update(np.asarray(high, dtype=np.float64).view(np.uint8).tobytes())
+    hasher.update(np.asarray(low, dtype=np.float64).view(np.uint8).tobytes())
+    hasher.update(np.asarray(close, dtype=np.float64).view(np.uint8).tobytes())
+    hasher.update(str(float(asset.point_value or 1.0)).encode())
+    hasher.update(str(float(execution_model.spread_price(asset))).encode())
+    hasher.update(str(float(execution_model.slippage_price(asset))).encode())
+    hasher.update(str(float(execution_model._commission(asset))).encode())
+    hasher.update(str(bool(asset.enforce_trading_hours)).encode())
+    hasher.update(str(bool(asset.enforce_eod_close)).encode())
+    hasher.update(str(bool(asset.close_on_weekend)).encode())
+    return hasher.hexdigest()
 
 
 def prepare_vectorized_dataset(
@@ -73,16 +119,35 @@ def prepare_vectorized_dataset(
     n = len(df)
 
     if n == 0:
+        empty_open = np.empty(0, dtype=np.float64)
+        empty_high = np.empty(0, dtype=np.float64)
+        empty_low = np.empty(0, dtype=np.float64)
+        empty_close = np.empty(0, dtype=np.float64)
+        empty_times = np.empty(0, dtype="datetime64[ns]")
+        empty_trading = np.empty(0, dtype=bool)
+        empty_eod = np.empty(0, dtype=bool)
+        empty_weekend = np.empty(0, dtype=bool)
+        arrays = {
+            "open": empty_open,
+            "high": empty_high,
+            "low": empty_low,
+            "close": empty_close,
+            "times": empty_times,
+            "is_trading_hours": empty_trading,
+            "is_eod": empty_eod,
+            "is_weekend": empty_weekend,
+        }
+        memory_bytes = _dataset_memory_bytes(arrays)
         return PreparedDataset(
             n=0,
-            open=np.empty(0, dtype=np.float64),
-            high=np.empty(0, dtype=np.float64),
-            low=np.empty(0, dtype=np.float64),
-            close=np.empty(0, dtype=np.float64),
-            times=np.empty(0, dtype="datetime64[ns]"),
-            is_trading_hours=np.empty(0, dtype=bool),
-            is_eod=np.empty(0, dtype=bool),
-            is_weekend=np.empty(0, dtype=bool),
+            open=empty_open,
+            high=empty_high,
+            low=empty_low,
+            close=empty_close,
+            times=empty_times,
+            is_trading_hours=empty_trading,
+            is_eod=empty_eod,
+            is_weekend=empty_weekend,
             enforce_trading_hours=bool(asset.enforce_trading_hours),
             enforce_eod=bool(asset.enforce_eod_close),
             weekend_blocking=bool(asset.close_on_weekend),
@@ -92,7 +157,10 @@ def prepare_vectorized_dataset(
             commission=em._commission(asset),
             slippage_model_int=0,
             slippage_k=float(em.slippage_k),
-            meta={"bars": 0},
+            dataset_key="empty",
+            memory_bytes=memory_bytes,
+            memory_mb=float(memory_bytes / (1024.0 * 1024.0)),
+            meta={"bars": 0, "dataset_key": "empty", "memory_bytes": memory_bytes, "memory_mb": float(memory_bytes / (1024.0 * 1024.0))},
         )
 
     high = (
@@ -160,6 +228,27 @@ def prepare_vectorized_dataset(
 
     from engine.execution.execution import slippage_model_to_int
 
+    arrays = {
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "times": times,
+        "is_trading_hours": is_trading_hours_arr,
+        "is_eod": is_eod_arr,
+        "is_weekend": is_weekend_arr,
+    }
+    memory_bytes = _dataset_memory_bytes(arrays)
+    dataset_key = _build_dataset_key(
+        times=times,
+        open_=open_,
+        high=high,
+        low=low,
+        close=close,
+        asset=asset,
+        execution_model=em,
+    )
+
     return PreparedDataset(
         n=n,
         open=open_,
@@ -179,5 +268,13 @@ def prepare_vectorized_dataset(
         commission=em._commission(asset),
         slippage_model_int=slippage_model_to_int(em.slippage_model),
         slippage_k=float(em.slippage_k),
-        meta={"bars": int(n)},
+        dataset_key=dataset_key,
+        memory_bytes=memory_bytes,
+        memory_mb=float(memory_bytes / (1024.0 * 1024.0)),
+        meta={
+            "bars": int(n),
+            "dataset_key": dataset_key,
+            "memory_bytes": memory_bytes,
+            "memory_mb": float(memory_bytes / (1024.0 * 1024.0)),
+        },
     )

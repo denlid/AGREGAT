@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from engine.execution.execution import ExecutionModel
-from engine.execution.prepared_dataset import prepare_vectorized_dataset
+from engine.execution.prepared_dataset import PreparedDataset, prepare_vectorized_dataset
 from engine.execution.vectorized_engine import run_vectorized
 from engine.models.models import AssetConfig
 from engine.strategy.context import Strategy
@@ -70,6 +70,12 @@ def test_prepare_vectorized_dataset_extracts_arrays_and_masks() -> None:
     assert prep.is_trading_hours.shape == (len(df),)
     assert prep.is_eod.shape == (len(df),)
     assert prep.is_weekend.shape == (len(df),)
+    assert isinstance(prep, PreparedDataset)
+    assert prep.dataset_key
+    assert prep.memory_bytes > 0
+    assert prep.memory_mb > 0
+    assert prep.meta["dataset_key"] == prep.dataset_key
+    assert prep.meta["memory_bytes"] == prep.memory_bytes
 
 
 def test_run_vectorized_accepts_prepared_dataset() -> None:
@@ -110,3 +116,36 @@ def test_run_vectorized_can_skip_trade_materialization() -> None:
     assert res.trades == []
     assert res.summary["n_trades"] >= 0
     assert res.perf["trade_count"] == res.summary["n_trades"]
+
+
+def test_prepare_vectorized_dataset_key_is_stable_for_same_input() -> None:
+    df = _df(4)
+    asset = _asset()
+    exec_model = ExecutionModel("Optimistic")
+    prep_a = prepare_vectorized_dataset(df, asset=asset, execution_model=exec_model)
+    prep_b = prepare_vectorized_dataset(df.copy(), asset=asset, execution_model=exec_model)
+
+    assert prep_a.dataset_key == prep_b.dataset_key
+    assert prep_a.memory_bytes == prep_b.memory_bytes
+
+
+def test_prepare_vectorized_dataset_key_changes_when_prices_change() -> None:
+    df = _df(4)
+    asset = _asset()
+    exec_model = ExecutionModel("Optimistic")
+    prep_a = prepare_vectorized_dataset(df, asset=asset, execution_model=exec_model)
+    df2 = df.copy()
+    df2.loc[df2.index[0], "Close"] = 999.0
+    prep_b = prepare_vectorized_dataset(df2, asset=asset, execution_model=exec_model)
+
+    assert prep_a.dataset_key != prep_b.dataset_key
+
+
+def test_prepare_vectorized_dataset_empty_has_empty_key_and_zero_memory() -> None:
+    df = pd.DataFrame(columns=["time", "Open", "High", "Low", "Close"])
+    prep = prepare_vectorized_dataset(df, asset=_asset(), execution_model=ExecutionModel("Optimistic"))
+
+    assert prep.dataset_key == "empty"
+    assert prep.memory_bytes == 0
+    assert prep.memory_mb == 0.0
+    assert prep.memory_meta()["bars"] == 0

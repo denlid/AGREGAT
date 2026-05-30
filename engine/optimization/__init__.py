@@ -7,6 +7,10 @@ from engine.optimization.optimizer import (
     random_search,
 )
 from engine.optimization.shared_arrays import SharedArrayBundle
+from engine.optimization.vectorized_runner import (
+    VectorizedRunner,
+    make_vectorized_runner,
+)
 
 __all__ = [
     "OptimizationRun",
@@ -14,4 +18,6 @@ __all__ = [
     "grid_search",
     "random_search",
     "SharedArrayBundle",
+    "VectorizedRunner",
+    "make_vectorized_runner",
 ]

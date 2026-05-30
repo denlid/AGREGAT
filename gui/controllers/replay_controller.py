@@ -63,10 +63,14 @@ class ReplayController:
         h.trades_tab._clear()
         h.analytics_tab.refresh_all(force=True)
         h.stats_tab._recalc()
-        try:
-            h.quant_tab.refresh_all()
-        except Exception:
-            logger.exception("quant_tab.refresh_all failed on reset")
+        # Quant tab was removed/refactored from MainWindow tab wiring.
+        # Keep reset flow backward-compatible by only refreshing it when present.
+        quant_tab = getattr(h, "quant_tab", None)
+        if quant_tab is not None:
+            try:
+                quant_tab.refresh_all()
+            except Exception:
+                logger.exception("quant_tab.refresh_all failed on reset")
         h.progress.setValue(0)
         h.bar_replay._update_state()
 

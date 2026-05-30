@@ -104,6 +104,43 @@ class VectorizedResult:
 _REQUIRED_COLS: Sequence[str] = ("signal", "sl_points", "tp_points")
 
 
+def _resolve_vectorized_signals(
+    strategy: Any,
+    df: pd.DataFrame,
+    prepared: Optional[PreparedDataset],
+) -> tuple[pd.DataFrame, bool, float]:
+    import time
+
+    from engine.strategy.context import Strategy
+
+    build_features = getattr(strategy, "build_vectorized_features", None)
+    signals_from_features = getattr(strategy, "vectorized_signals_from_features", None)
+    # Compare against the BASE Strategy class, not type(strategy) — otherwise
+    # every subclass that overrides the methods will fail the "is not" check
+    # because type(strategy).method IS the overridden method.
+    base_build = getattr(Strategy, "build_vectorized_features", None)
+    base_from_features = getattr(Strategy, "vectorized_signals_from_features", None)
+    can_use_feature_contract = (
+        callable(build_features)
+        and callable(signals_from_features)
+        and base_build is not None
+        and base_from_features is not None
+        and getattr(build_features, "__func__", None) is not base_build
+        and getattr(signals_from_features, "__func__", None) is not base_from_features
+    )
+    if not can_use_feature_contract:
+        t0 = time.perf_counter()
+        return strategy.vectorized_signals(df), False, time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    features = strategy.build_vectorized_features(df, prepared=prepared)
+    signals = strategy.vectorized_signals_from_features(
+        features,
+        getattr(strategy, "params", None),
+    )
+    return signals, True, time.perf_counter() - t0
+
+
 def _validate_signals(signals: pd.DataFrame, n_bars: int) -> None:
     """Cheap sanity check — surface bad strategies with a clear error."""
     if not isinstance(signals, pd.DataFrame):
@@ -172,6 +209,9 @@ def run_vectorized(
     absolute_max_lots: float = 100.0,
     prepared: Optional[PreparedDataset] = None,
     materialize_trades: bool = True,
+    summary_only: bool = False,
+    compact_result: bool = False,
+    include_equity_curve: bool = True,
 ) -> VectorizedResult:
     """Run a vectorised backtest.
 
@@ -185,6 +225,11 @@ def run_vectorized(
             "Strategy does not implement vectorized_signals(df). "
             "Either add the method or run with the Visual (on_candle) engine."
         )
+
+    if summary_only:
+        materialize_trades = False
+    strategy_name = getattr(strategy, "__class__", type(strategy)).__name__
+    prepared_reused = prepared is not None
 
     if df is None or len(df) == 0:
         return VectorizedResult([], np.array([initial_equity]), 0.0, 0.0, {}, perf={
@@ -200,15 +245,25 @@ def run_vectorized(
             "total_ms": 0.0,
             "used_numba": False,
             "trade_count": 0,
+            "prepared_reused": False,
+            "materialize_trades": False,
+            "summary_only": bool(summary_only),
+            "signal_memory_mb": 0.0,
+            "strategy_name": strategy_name,
+            "compact_result": bool(compact_result),
+            "include_equity_curve": bool(include_equity_curve),
+            "used_feature_cache_contract": False,
         })
 
     import time
     t_run_start = time.perf_counter()
     t0 = time.perf_counter()
 
-    signals = strategy.vectorized_signals(df)
-
-    t_elapsed = time.perf_counter() - t0
+    signals, used_feature_cache_contract, t_elapsed = _resolve_vectorized_signals(
+        strategy,
+        df,
+        prepared,
+    )
     if t_elapsed > 1.0:
         logger.warning(
             f"⚠️ Ваша стратегія (vectorized_signals) виконувалась {t_elapsed:.2f} сек. "
@@ -274,6 +329,10 @@ def run_vectorized(
         risk_arr = signals["risk_pct"].to_numpy(dtype=np.float64)
     else:
         risk_arr = np.full(n, risk_pct, dtype=np.float64)
+    signal_memory_mb = float(
+        (sig.nbytes + sl_pts_arr.nbytes + tp_pts_arr.nbytes + risk_arr.nbytes)
+        / (1024.0 * 1024.0)
+    )
 
     # ---- Fast path: Numba-JIT inner loop ----
     if HAS_NUMBA_VEC:
@@ -415,11 +474,19 @@ def run_vectorized(
             "total_ms": round((time.perf_counter() - t_run_start) * 1000.0, 3),
             "used_numba": True,
             "trade_count": int(trade_count),
+            "prepared_reused": bool(prepared_reused),
+            "materialize_trades": bool(materialize_trades),
+            "summary_only": bool(summary_only),
+            "signal_memory_mb": round(signal_memory_mb, 4),
+            "strategy_name": strategy_name,
+            "compact_result": bool(compact_result),
+            "include_equity_curve": bool(include_equity_curve),
+            "used_feature_cache_contract": bool(used_feature_cache_contract),
         }
         logger.info("vectorized_perf %s", perf)
         return VectorizedResult(
-            trades=trades,
-            equity_curve=equity_curve,
+            trades=[] if compact_result else trades,
+            equity_curve=(np.array([initial_equity], dtype=float) if not include_equity_curve else equity_curve),
             peak_drawdown_pct=dd_tracker.max_drawdown_pct,
             peak_drawdown_abs=dd_tracker.max_drawdown_abs,
             summary=summary,
@@ -703,11 +770,19 @@ def run_vectorized(
         "total_ms": round((time.perf_counter() - t_run_start) * 1000.0, 3),
         "used_numba": False,
         "trade_count": int(len(trades)),
+        "prepared_reused": bool(prepared_reused),
+        "materialize_trades": bool(materialize_trades),
+        "summary_only": bool(summary_only),
+        "signal_memory_mb": round(signal_memory_mb, 4),
+        "strategy_name": strategy_name,
+        "compact_result": bool(compact_result),
+        "include_equity_curve": bool(include_equity_curve),
+        "used_feature_cache_contract": bool(used_feature_cache_contract),
     }
     logger.info("vectorized_perf %s", perf)
     return VectorizedResult(
-        trades=trades if materialize_trades else [],
-        equity_curve=np.array(equity_track, dtype=float),
+        trades=[] if compact_result else (trades if materialize_trades else []),
+        equity_curve=(np.array([initial_equity], dtype=float) if not include_equity_curve else np.array(equity_track, dtype=float)),
         peak_drawdown_pct=dd_tracker.max_drawdown_pct,
         peak_drawdown_abs=dd_tracker.max_drawdown_abs,
         summary=summary,
