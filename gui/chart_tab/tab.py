@@ -346,7 +346,7 @@ class ChartTab(QWidget):
         self.user_drawings_history = []  # undo history
         self.user_drawings_redo = []  # redo stack
         self.user_graphic_items = []  # rendered items (cleared on each redraw)
-        self.strategy_graphic_items = []
+        self.strategy_graphic_items = {}  # Dict[drawing_id -> QGraphicsItem] (Sprint 4)
         self.trade_graphic_items = []
         self.res_times = np.array([])
         self._need_autorange = True
@@ -1031,17 +1031,25 @@ class ChartTab(QWidget):
 
     def _clear_strategy_drawings(self):
         """Clear all strategy-generated drawings from engine."""
-        for i in self.strategy_graphic_items:
-            self.plot_widget.removeItem(i)
-            if hasattr(i, "deleteLater"):
-                i.deleteLater()
+        for item in self.strategy_graphic_items.values():
+            self.plot_widget.removeItem(item)
+            if hasattr(item, "deleteLater"):
+                item.deleteLater()
         self.strategy_graphic_items.clear()
         self.engine.drawings.clear()
         logger.info("🧹 Strategy drawings cleared")
         self.redraw_chart()
 
     def _draw_user_items(self, rt):
-        """Re-render user drawings from stored time/price data."""
+        """Re-render user drawings from stored time/price data.
+
+        User drawings include interactive ROI items (line, rect, brush) that
+        carry drag state, so we use clear+recreate rather than diff (Sprint 4).
+        Viewport culling skips drawings outside the visible range to reduce
+        scene churn on heavy charts.
+        """
+        from gui.chart_tab.overlay_diff import is_drawing_in_viewport
+
         for i in self.user_graphic_items:
             self.plot_widget.removeItem(i)
             if hasattr(i, "deleteLater"):
@@ -1049,7 +1057,12 @@ class ChartTab(QWidget):
         self.user_graphic_items.clear()
         if len(rt) == 0:
             return
+        vmin, vmax = rt[0], rt[-1]
         for d in self.user_drawings:
+            # Viewport culling: skip drawings outside visible range.
+            # hline has no time coord (always visible); others are checked.
+            if d.get("type") != "hline" and not is_drawing_in_viewport(d, vmin, vmax):
+                continue
             try:
                 color = QColor(d.get("color", "#FFFFFF"))
                 w = d.get("width", 2)
@@ -1198,7 +1211,6 @@ class ChartTab(QWidget):
         self._need_autorange = True
         self._cache_key = None
         self._cached_snapshot = None
-        self._cache_key = None
         self._cached_trade_marker_key = None
         self._cached_trade_marker_payload = None
         self._prev_res_times = None
@@ -1896,93 +1908,119 @@ class ChartTab(QWidget):
     # Strategy drawings
     # ==============================
     def _draw_strategy(self, rt):
-        for item in self.strategy_graphic_items:
-            self.plot_widget.removeItem(item)
-        self.strategy_graphic_items.clear()
+        """Render strategy drawings with diff reconciliation (Sprint 4).
+
+        Instead of clear+recreate, compute diff between old and new drawings
+        and only add/remove changed items. Reuses existing items when possible.
+        """
+        from gui.chart_tab.overlay_diff import drawing_id, diff_overlays, is_drawing_in_viewport
+
         hidden = {tag for tag, act in self.layer_cbs.items() if not act.isChecked()}
         if len(rt) == 0:
+            # No visible data — remove all strategy items.
+            for item in self.strategy_graphic_items.values():
+                self.plot_widget.removeItem(item)
+            self.strategy_graphic_items.clear()
             return
+
         vmin, vmax = rt[0], rt[-1]
+
+        # Filter drawings: visible in viewport + not hidden by layer toggle.
+        visible_drawings = []
         for d in self.engine.drawings:
             dtag = d.get("tag", "")
             if dtag and dtag in hidden:
                 continue
-            try:
-                # Use pre-cached numpy datetime64 (set by engine.add_drawing)
-                t1 = d.get("_t_np") or d.get("_t1_np")
-                if t1 is None:
-                    tk = "t" if "t" in d else "t1"
-                    t1 = pd.to_datetime(d[tk]).to_datetime64()
-                if "_t2_np" in d:
-                    t2 = d["_t2_np"]
-                    if t1 < vmin and t2 < vmin:
-                        continue
-                    if t1 > vmax and t2 > vmax:
-                        continue
-                elif "t2" in d:
-                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    if t1 < vmin and t2 < vmin:
-                        continue
-                    if t1 > vmax and t2 > vmax:
-                        continue
-                else:
-                    if t1 < vmin or t1 > vmax:
-                        continue
-                i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
-                p1 = d.get("p", d.get("p1"))
-                rc = d.get("color", "white")
-                if isinstance(rc, str) and rc.startswith("rgba"):
-                    try:
-                        pts = [
-                            float(p.strip())
-                            for p in rc.replace("rgba(", "").replace(")", "").split(",")
-                        ]
-                        color = QColor(int(pts[0]), int(pts[1]), int(pts[2]), int(pts[3] * 255))
-                    except (ValueError, IndexError, TypeError):
-                        color = QColor("white")
-                else:
-                    color = QColor(rc)
-                if not color.isValid():
-                    color = QColor("white")
+            if not is_drawing_in_viewport(d, vmin, vmax):
+                continue
+            visible_drawings.append(d)
 
-                if d["type"] == "line":
-                    t2 = d.get("_t2_np")
-                    if t2 is None:
-                        t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
-                    it = pg.PlotDataItem(
-                        [i1, i2], [p1, d["p2"]], pen=pg.mkPen(color, width=d.get("width", 1))
-                    )
-                    self.plot_widget.addItem(it)
-                    self.strategy_graphic_items.append(it)
-                elif d["type"] == "rect":
-                    t2 = d.get("_t2_np")
-                    if t2 is None:
-                        t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
-                    p2 = d["p2"]
-                    mnx, mxx = min(i1, i2), max(i1, i2)
-                    mny, mxy = min(p1, p2), max(p1, p2)
-                    brush = None
-                    if d.get("fill", True):
-                        fc = QColor(color)
-                        fc.setAlphaF(d.get("opacity", 0.3))
-                        brush = pg.mkBrush(fc)
-                    it = QGraphicsRectItem(
-                        float(mnx), float(mny), float(mxx - mnx) or 1.0, float(mxy - mny)
-                    )
-                    it.setPen(pg.mkPen(color))
-                    if brush:
-                        it.setBrush(brush)
-                    self.plot_widget.addItem(it)
-                    self.strategy_graphic_items.append(it)
-                elif d["type"] == "text":
-                    it = pg.TextItem(d["text"], color=color, anchor=(0.5, 0))
-                    it.setPos(i1, p1)
-                    self.plot_widget.addItem(it)
-                    self.strategy_graphic_items.append(it)
-            except Exception as e:
-                logger.error(f"Draw: {e}")
+        # Compute diff: which items to remove, keep, add.
+        old_ids = self.strategy_graphic_items  # Dict[id -> item]
+        to_remove, to_keep, to_add = diff_overlays(old_ids, visible_drawings)
+
+        # Remove items no longer in the scene.
+        for rid in to_remove:
+            item = old_ids.pop(rid)
+            self.plot_widget.removeItem(item)
+
+        # Add new items.
+        for d in to_add:
+            item = self._create_strategy_item(d, rt)
+            if item is not None:
+                did = drawing_id(d)
+                self.strategy_graphic_items[did] = item
+
+    def _create_strategy_item(self, d: dict, rt):
+        """Create a QGraphicsItem for a strategy drawing dict.
+
+        Extracted from the old _draw_strategy loop for reuse in diff reconciliation.
+        """
+        try:
+            # Time coordinate resolution (use cached _t_np if available).
+            t1 = d.get("_t_np") or d.get("_t1_np")
+            if t1 is None:
+                tk = "t" if "t" in d else "t1"
+                t1 = pd.to_datetime(d[tk]).to_datetime64()
+            i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
+            p1 = d.get("p", d.get("p1"))
+
+            # Color parsing.
+            rc = d.get("color", "white")
+            if isinstance(rc, str) and rc.startswith("rgba"):
+                try:
+                    pts = [
+                        float(p.strip())
+                        for p in rc.replace("rgba(", "").replace(")", "").split(",")
+                    ]
+                    color = QColor(int(pts[0]), int(pts[1]), int(pts[2]), int(pts[3] * 255))
+                except (ValueError, IndexError, TypeError):
+                    color = QColor("white")
+            else:
+                color = QColor(rc)
+            if not color.isValid():
+                color = QColor("white")
+
+            # Create item by type.
+            if d["type"] == "line":
+                t2 = d.get("_t2_np")
+                if t2 is None:
+                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
+                i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
+                it = pg.PlotDataItem(
+                    [i1, i2], [p1, d["p2"]], pen=pg.mkPen(color, width=d.get("width", 1))
+                )
+                self.plot_widget.addItem(it)
+                return it
+            elif d["type"] == "rect":
+                t2 = d.get("_t2_np")
+                if t2 is None:
+                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
+                i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
+                p2 = d["p2"]
+                mnx, mxx = min(i1, i2), max(i1, i2)
+                mny, mxy = min(p1, p2), max(p1, p2)
+                brush = None
+                if d.get("fill", True):
+                    fc = QColor(color)
+                    fc.setAlphaF(d.get("opacity", 0.3))
+                    brush = pg.mkBrush(fc)
+                it = QGraphicsRectItem(
+                    float(mnx), float(mny), float(mxx - mnx) or 1.0, float(mxy - mny)
+                )
+                it.setPen(pg.mkPen(color))
+                if brush:
+                    it.setBrush(brush)
+                self.plot_widget.addItem(it)
+                return it
+            elif d["type"] == "text":
+                it = pg.TextItem(d["text"], color=color, anchor=(0.5, 0))
+                it.setPos(i1, p1)
+                self.plot_widget.addItem(it)
+                return it
+        except Exception as e:
+            logger.error(f"Draw strategy item: {e}")
+            return None
 
     # ==============================
     # Trade focus navigation
