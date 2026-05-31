@@ -101,7 +101,14 @@ def run_vectorized_loop(
     maes = np.empty(max_trades, dtype=np.float64)
     mfes = np.empty(max_trades, dtype=np.float64)
     initial_sls = np.empty(max_trades, dtype=np.float64)
-    equity_arr = np.empty(n + 1, dtype=np.float64)
+    # n+2 (not n+1): one slot for the initial equity + one per bar (n) +
+    # one extra for the end-of-data force-close point recorded after the
+    # loop (see "Close any remaining position" below). Allocating only
+    # n+1 made that final write land out of bounds — numba's njit has no
+    # bounds-checking, so the write was silently dropped by the closing
+    # slice and ``equity_arr[-1]`` reported the equity *before* the final
+    # close, diverging from the trade ledger and the visual engine.
+    equity_arr = np.empty(n + 2, dtype=np.float64)
     equity_arr[0] = initial_equity
 
     trade_count = 0

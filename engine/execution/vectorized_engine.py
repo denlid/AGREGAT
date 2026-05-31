@@ -539,6 +539,18 @@ def run_vectorized(
         dd_tracker.reset(initial_equity)
         trades: List[Trade] = []
         slippage_cost_per_trade_val = slip * 2.0 * point_value
+        # Drawdown must be driven by *post-trade* equity (one reading per
+        # closed trade), exactly like the visual engine and the Python
+        # fallback below. The Numba ``equity_curve`` is a *per-bar* series,
+        # so indexing it by trade number (the previous behaviour) sampled
+        # the still-flat opening bars and reported ~0 drawdown. Rebuild the
+        # running equity from the trade PnL ledger instead, mirroring the
+        # loop's per-cent rounding so the figure matches to the penny.
+        post_trade_eq = np.empty(trade_count, dtype=np.float64)
+        _running_eq = float(initial_equity)
+        for _ti in range(trade_count):
+            _running_eq = _round_to_step(_running_eq + float(r_pnls[_ti]), 0.01)
+            post_trade_eq[_ti] = _running_eq
         t0 = time.perf_counter()
         if materialize_trades:
             for ti in range(trade_count):
@@ -557,11 +569,7 @@ def run_vectorized(
                     dur = max(0, int((exit_ts - entry_ts).total_seconds() / 60))
                 except (ValueError, TypeError):
                     dur = max(0, x_idx - e_idx)
-                dd_tracker.update(
-                    float(equity_curve[ti + 1])
-                    if ti + 1 < len(equity_curve)
-                    else float(equity_curve[-1])
-                )
+                dd_tracker.update(float(post_trade_eq[ti]))
                 vol = float(r_volumes[ti])
                 trades.append(
                     Trade(
@@ -594,11 +602,7 @@ def run_vectorized(
                 )
         else:
             for ti in range(trade_count):
-                dd_tracker.update(
-                    float(equity_curve[ti + 1])
-                    if ti + 1 < len(equity_curve)
-                    else float(equity_curve[-1])
-                )
+                dd_tracker.update(float(post_trade_eq[ti]))
         t_trade_materialize = time.perf_counter() - t0
         t0 = time.perf_counter()
         final_eq = float(equity_curve[-1])
