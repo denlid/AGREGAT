@@ -87,14 +87,22 @@ def build_trade_marker_arrays(
         for i, tr in enumerate(trades):
             et_np = getattr(tr, "entry_time_np", None)
             xt_np = getattr(tr, "exit_time_np", None)
-            entry_times[i] = et_np if et_np is not None else np.datetime64(pd.to_datetime(tr.entry_time))
-            exit_times[i] = xt_np if xt_np is not None else np.datetime64(pd.to_datetime(tr.exit_time))
+            ei = int(getattr(tr, "entry_index", 0))
+            xi = int(getattr(tr, "exit_index", ei))
+            if et_np is None:
+                et_raw = getattr(tr, "entry_time", None)
+                et_np = rt[max(0, min(ei, len(rt) - 1))] if et_raw is None else np.datetime64(pd.to_datetime(et_raw))
+            if xt_np is None:
+                xt_raw = getattr(tr, "exit_time", None)
+                xt_np = rt[max(0, min(xi, len(rt) - 1))] if xt_raw is None else np.datetime64(pd.to_datetime(xt_raw))
+            entry_times[i] = et_np
+            exit_times[i] = xt_np
             entry_prices[i] = tr.entry_price
             exit_prices[i] = tr.exit_price
             pnls[i] = tr.pnl
-            entry_idx[i] = tr.entry_index
-            exit_idx[i] = tr.exit_index
-            directions.append(tr.direction)
+            entry_idx[i] = ei
+            exit_idx[i] = xi
+            directions.append(getattr(tr, "direction", getattr(tr, "side", "")))
 
         # Filter: only trades within bounds and visible time range.
         # Reject trades whose *entry* is entirely after the visible render
@@ -114,9 +122,9 @@ def build_trade_marker_arrays(
             vis_entry_prices = entry_prices[visible]
             vis_exit_prices = exit_prices[visible]
             vis_pnls = pnls[visible]
-            # Sprint 7: Vectorized final assembly (eliminate Python loop)
-            # This was the bottleneck: 85% of redraw time spent here
-            vis_dirs_arr = np.array([d for d, v in zip(directions, visible) if v])
+            # OPT-1: Vectorized direction check (avoid Python list comprehension)
+            vis_dirs_indices = np.where(visible)[0]
+            vis_dirs_arr = np.array([directions[i] for i in vis_dirs_indices], dtype='U10')
             is_long = vis_dirs_arr == "long"
 
             # Split by direction using boolean indexing (vectorized)

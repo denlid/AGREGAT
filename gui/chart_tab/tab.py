@@ -353,6 +353,33 @@ class ChartTab(QWidget):
         self._need_autorange = True
         self._user_zoom_width = None  # User's X-zoom width (set by wheel zoom)
         self._tracked_xrange = None  # Our own X-range tracking (bypasses pyqtgraph)
+        self._cached_chart_arrays_key = None
+        self._cached_chart_arrays = None
+        self._color_scheme = "Classic"
+        self._last_click_pos = None
+        self._brush_path = None
+        self._brush_item = None
+        self._is_brushing = False
+
+        self._redraw_pending = False
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.setInterval(60)
+        self._redraw_timer.timeout.connect(self._do_deferred_redraw)
+        self._last_perf_stats = {}
+        self._perf_stats_history = []
+        self._perf_log_threshold_ms = 30.0
+        self._adaptive_lod_enabled = True
+        self._adaptive_lod_threshold_ms = 24.0
+        self._adaptive_lod_cooldown = 0
+        self._render_backend = (
+            "gl" if self.candlestick_item.__class__.__name__ == "GLCandlestickItem" else "painter"
+        )
+
+        self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_clicked)
+        self.engine.data_loaded.connect(self.on_data_loaded)
+        self.engine.step_completed.connect(self.on_step_completed)
+        self.apply_chart_theme()
 
     def _snapshot_from_dataframe(self, df, active_tf: str, lod_level=None):
         """Build ChartRenderSnapshot from a DataFrame (HTF fallback path).
@@ -384,33 +411,34 @@ class ChartTab(QWidget):
             active_tf=active_tf,
             lod_level=lod_level,
         )
-        self._cached_trade_marker_key = None
-        self._cached_trade_marker_payload = None
-        self._color_scheme = "Classic"
-        self._last_click_pos = None
-        self._brush_path = None
-        self._brush_item = None
-        self._is_brushing = False
 
-        self._redraw_pending = False
-        self._redraw_timer = QTimer()
-        self._redraw_timer.setSingleShot(True)
-        self._redraw_timer.setInterval(60)
-        self._redraw_timer.timeout.connect(self._do_deferred_redraw)
-        self._last_perf_stats = {}
-        self._perf_stats_history = []
-        self._perf_log_threshold_ms = 30.0
-        self._adaptive_lod_enabled = True
-        self._adaptive_lod_threshold_ms = 24.0
-        self._adaptive_lod_cooldown = 0
-        self._render_backend = (
-            "gl" if self.candlestick_item.__class__.__name__ == "GLCandlestickItem" else "painter"
-        )
+    def _build_chart_arrays(self, res_df):
+        """Build immutable chart arrays from a DataFrame with identity caching.
 
-        self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_clicked)
-        self.engine.data_loaded.connect(self.on_data_loaded)
-        self.engine.step_completed.connect(self.on_step_completed)
-        self.apply_chart_theme()
+        Kept as a compatibility shim for callers/tests that predate the
+        array-first ChartRenderSnapshot path.
+        """
+        key = (id(res_df), len(res_df))
+        cached = self._cached_chart_arrays
+        if self._cached_chart_arrays_key == key and cached is not None:
+            return cached, True
+
+        n = len(res_df)
+        x = np.arange(n, dtype=np.float64)
+        open_arr = res_df["open"].to_numpy(dtype=np.float64, copy=False)
+        high_arr = res_df["high"].to_numpy(dtype=np.float64, copy=False)
+        low_arr = res_df["low"].to_numpy(dtype=np.float64, copy=False)
+        close_arr = res_df["close"].to_numpy(dtype=np.float64, copy=False)
+        candle_arr = np.column_stack((x, open_arr, close_arr, low_arr, high_arr))
+        candle_arr.setflags(write=False)
+        arrays = {
+            "x": x,
+            "close": close_arr,
+            "candle_arr": candle_arr,
+        }
+        self._cached_chart_arrays_key = key
+        self._cached_chart_arrays = arrays
+        return arrays, False
 
     def _fit_all(self):
         """Reset zoom and fit all data."""
@@ -489,10 +517,6 @@ class ChartTab(QWidget):
             # During tear-down or partial init, the plot may already be gone.
             pass
 
-    def toggle_tools(self):
-        """Toggle sidebar visibility."""
-        # The sidebar is always visible in the new layout (it's small)
-        pass
 
     # --- Drawing tool ---
     def _set_tool(self, name):
@@ -1208,6 +1232,7 @@ class ChartTab(QWidget):
         else:
             self.price_curve.hide()
             self.candlestick_item.show()
+        self.redraw_chart()
 
     def on_data_loaded(self, total):
         for p in [
@@ -1234,6 +1259,8 @@ class ChartTab(QWidget):
         self._need_autorange = True
         self._cache_key = None
         self._cached_snapshot = None
+        self._cached_chart_arrays_key = None
+        self._cached_chart_arrays = None
         self._cached_trade_marker_key = None
         self._cached_trade_marker_payload = None
         self._prev_res_times = None
@@ -1275,7 +1302,8 @@ class ChartTab(QWidget):
             self.visual_tf_cb.blockSignals(prev_block)
         self._cache_key = None
         self._cached_snapshot = None
-        self._cache_key = None
+        self._cached_chart_arrays_key = None
+        self._cached_chart_arrays = None
         self._cached_trade_marker_key = None
         self._cached_trade_marker_payload = None
         # Phase 0.2 (A3) — ensure forming arrays are built for the selected TF
@@ -1307,53 +1335,48 @@ class ChartTab(QWidget):
 
     def _build_trade_marker_payload(self, rt):
         """Precompute trade-marker arrays once per trade/timeframe state."""
+        pos = getattr(self.engine, "position", None)
+        cp = None
+        if pos is not None:
+            try:
+                cp = self.engine.ctx.candle.get("close", pos.entry_price)
+            except Exception:
+                cp = getattr(pos, "entry_price", None)
         key = (
             id(rt),
             len(rt),
             len(self.engine.trades),
             bool(self.show_connections_cb.isChecked()),
+            id(pos),
+            getattr(pos, "entry_index", None),
+            float(cp) if cp is not None else None,
         )
         cached = self._cached_trade_marker_payload
         if self._cached_trade_marker_key == key and cached is not None:
             return cached, True
 
-        buy_x, buy_y, sell_x, sell_y, close_x, close_y = [], [], [], [], [], []
-        win_x, win_y, loss_x, loss_y = [], [], [], []
-        if len(rt) > 0:
-            for tr in self.engine.trades:
-                try:
-                    ei = max(0, min(int(tr.entry_index), len(rt) - 1))
-                    xi = max(0, min(int(getattr(tr, "exit_index", ei)), len(rt) - 1))
-                    ep = float(tr.entry_price)
-                    xp = float(getattr(tr, "exit_price", ep))
-                    is_long = str(getattr(tr, "direction", getattr(tr, "side", ""))).lower().startswith("l")
-                    if is_long:
-                        buy_x.append(ei)
-                        buy_y.append(ep)
-                    else:
-                        sell_x.append(ei)
-                        sell_y.append(ep)
-                    close_x.append(xi)
-                    close_y.append(xp)
-                    if self.show_connections_cb.isChecked():
-                        target_x = win_x if float(getattr(tr, "pnl", 0.0)) >= 0 else loss_x
-                        target_y = win_y if float(getattr(tr, "pnl", 0.0)) >= 0 else loss_y
-                        target_x.extend([ei, xi, np.nan])
-                        target_y.extend([ep, xp, np.nan])
-                except Exception:
-                    continue
+        from gui.chart_tab.markers import build_trade_marker_arrays
+
+        arrays = build_trade_marker_arrays(
+            rt=rt,
+            trades=self.engine.trades,
+            df_len=len(self.engine.df) if self.engine.df is not None else len(rt),
+            position=pos,
+            position_close_price=cp,
+            show_connections=bool(self.show_connections_cb.isChecked()),
+        )
 
         payload = {
-            "buy_x": np.asarray(buy_x, dtype=np.float64),
-            "buy_y": np.asarray(buy_y, dtype=np.float64),
-            "sell_x": np.asarray(sell_x, dtype=np.float64),
-            "sell_y": np.asarray(sell_y, dtype=np.float64),
-            "close_x": np.asarray(close_x, dtype=np.float64),
-            "close_y": np.asarray(close_y, dtype=np.float64),
-            "win_x": np.asarray(win_x, dtype=np.float64),
-            "win_y": np.asarray(win_y, dtype=np.float64),
-            "loss_x": np.asarray(loss_x, dtype=np.float64),
-            "loss_y": np.asarray(loss_y, dtype=np.float64),
+            "buy_x": np.asarray(arrays.bx, dtype=np.float64),
+            "buy_y": np.asarray(arrays.by, dtype=np.float64),
+            "sell_x": np.asarray(arrays.sx, dtype=np.float64),
+            "sell_y": np.asarray(arrays.sy, dtype=np.float64),
+            "close_x": np.asarray(arrays.cx, dtype=np.float64),
+            "close_y": np.asarray(arrays.cy, dtype=np.float64),
+            "win_x": np.asarray(arrays.win_x, dtype=np.float64),
+            "win_y": np.asarray(arrays.win_y, dtype=np.float64),
+            "loss_x": np.asarray(arrays.loss_x, dtype=np.float64),
+            "loss_y": np.asarray(arrays.loss_y, dtype=np.float64),
         }
         self._cached_trade_marker_key = key
         self._cached_trade_marker_payload = payload
@@ -1533,7 +1556,7 @@ class ChartTab(QWidget):
         # Build chart arrays from snapshot (zero-copy, no DataFrame overhead).
         x = snapshot.x
         cl = snapshot.close
-        candle_arr = snapshot.candle_array()
+        candle_arr = None
 
         # Guard against NaN in close prices (corrupt data).
         if len(cl) > 0 and (np.isnan(cl[-1]) or np.all(np.isnan(cl))):
@@ -1545,19 +1568,23 @@ class ChartTab(QWidget):
             }
             return
 
+        if self.candlestick_item.isVisible():
+            candle_arr = snapshot.candle_array()
         t_ohlc_pack = _time.perf_counter() - t0
 
         vb = self.plot_widget.getViewBox()
         vb.enableAutoRange(x=False, y=False)
 
         t0 = _time.perf_counter()
-        self.price_curve.setData(x, cl)
+        if self.price_curve.isVisible():
+            self.price_curve.setData(x, cl)
         self.current_marker.setData([n - 1], [cl[-1]])
         self.price_hline.setPos(cl[-1])
         self.price_hline.show()
 
         t0 = _time.perf_counter()
-        self.candlestick_item.set_data(candle_arr)
+        if self.candlestick_item.isVisible():
+            self.candlestick_item.set_data(candle_arr)
         t_candle_set = _time.perf_counter() - t0
         t_candles = t_ohlc_pack + t_candle_set
 
@@ -1795,17 +1822,15 @@ class ChartTab(QWidget):
         """
         if total_rows <= 0:
             return
-        
-        timer = getattr(self, "_pager_debounce_timer", None)
-        if timer is None:
+
+        if not hasattr(self, "_pager_debounce_timer"):
             from PySide6.QtCore import QTimer
-            timer = QTimer(self)
-            timer.setSingleShot(True)
-            timer.setInterval(200) # 200ms debounce
-            timer.timeout.connect(self._do_pager_chunks_changed)
-            self._pager_debounce_timer = timer
-        
-        timer.start()
+            self._pager_debounce_timer = QTimer(self)
+            self._pager_debounce_timer.setSingleShot(True)
+            self._pager_debounce_timer.setInterval(200)
+            self._pager_debounce_timer.timeout.connect(self._do_pager_chunks_changed)
+
+        self._pager_debounce_timer.start()
 
     def _do_pager_chunks_changed(self) -> None:
         pager = getattr(self, "_data_pager", None)
@@ -2068,6 +2093,9 @@ class ChartTab(QWidget):
         Intended for navigation from Trades tab popups; must never raise.
         If *force* is True, re-navigate even if the same trade was already focused.
         """
+        if not self._chart_alive:
+            return
+
         trade_id = getattr(trade, "id", None)
         if not force and hasattr(self, "_last_focused_trade") and self._last_focused_trade == trade_id:
             return
@@ -2207,8 +2235,6 @@ class ChartTab(QWidget):
                     self._trade_focus_clear_timer.timeout.connect(
                         self._clear_trade_focus_highlight
                     )
-                elif self._trade_focus_clear_timer is not None and not self._chart_alive:
-                    return
                 self._trade_focus_clear_timer.start(10000)
             except Exception:
                 pass

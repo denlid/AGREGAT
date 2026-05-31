@@ -74,23 +74,31 @@ def downsample_ohlc(
         # zero-cost when not needed.
         return list(data) if not isinstance(data, list) else data
 
-    arr = np.asarray(data, dtype=np.float64)
-    # arr columns: 0=idx, 1=open, 2=close, 3=low, 4=high
     bin_size = int(np.ceil(n / max_bars))
     n_bins = int(np.ceil(n / bin_size))
 
-    out: List[OhlcTuple] = [(0.0, 0.0, 0.0, 0.0, 0.0)] * n_bins
-    for k in range(n_bins):
-        a = k * bin_size
-        b = min(a + bin_size, n)
-        chunk = arr[a:b]
-        idx = float(chunk[0, 0])
-        op = float(chunk[0, 1])
-        cl = float(chunk[-1, 2])
-        lo = float(chunk[:, 3].min())
-        hi = float(chunk[:, 4].max())
-        out[k] = (idx, op, cl, lo, hi)
-    return out
+    arr = np.asarray(data, dtype=np.float64)
+    # arr columns: 0=idx, 1=open, 2=close, 3=low, 4=high
+    full_n = (n // bin_size) * bin_size
+    out_arr = np.empty((n_bins, 5), dtype=np.float64)
+
+    if full_n:
+        chunks = arr[:full_n].reshape(-1, bin_size, 5)
+        out_arr[: chunks.shape[0], 0] = chunks[:, 0, 0]
+        out_arr[: chunks.shape[0], 1] = chunks[:, 0, 1]
+        out_arr[: chunks.shape[0], 2] = chunks[:, -1, 2]
+        out_arr[: chunks.shape[0], 3] = chunks[:, :, 3].min(axis=1)
+        out_arr[: chunks.shape[0], 4] = chunks[:, :, 4].max(axis=1)
+
+    if full_n < n:
+        chunk = arr[full_n:n]
+        out_arr[-1, 0] = chunk[0, 0]
+        out_arr[-1, 1] = chunk[0, 1]
+        out_arr[-1, 2] = chunk[-1, 2]
+        out_arr[-1, 3] = chunk[:, 3].min()
+        out_arr[-1, 4] = chunk[:, 4].max()
+
+    return [tuple(row) for row in out_arr.tolist()]
 
 
 def downsample_xy(

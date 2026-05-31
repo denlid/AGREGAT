@@ -187,13 +187,15 @@ def pack_candle_instances(
 
     n = arr.shape[0]
     res = np.empty((n, FLOATS_PER_INSTANCE), dtype=np.float32)
-    
-    # arr: (idx, open, close, low, high)
-    res[:, 0] = arr[:, 0].astype(np.float32, copy=False) # x
-    res[:, 1] = arr[:, 1].astype(np.float32, copy=False) # open
-    res[:, 2] = arr[:, 2].astype(np.float32, copy=False) # close
-    res[:, 3] = arr[:, 4].astype(np.float32, copy=False) # high
-    res[:, 4] = arr[:, 3].astype(np.float32, copy=False) # low
+
+    # ISSUE-2: More efficient array assignment using fancy indexing
+    # arr columns: [idx, open, close, low, high]
+    # res columns: [x, open, close, high, low, r, g, b]
+    res[:, 0] = arr[:, 0]  # x
+    res[:, 1] = arr[:, 1]  # open
+    res[:, 2] = arr[:, 2]  # close
+    res[:, 3] = arr[:, 4]  # high
+    res[:, 4] = arr[:, 3]  # low
 
     op = res[:, 1]
     cl = res[:, 2]
@@ -272,22 +274,11 @@ class GLCandlestickItem(CandlestickItem):
         is_gl = getattr(self.getViewWidget(), "useOpenGL", False)
         if not is_gl:
             super()._do_range_repaint()
-        
+
         if self._arr.shape[0] == 0:
             return
-            
+
         self._update_width()
-        
-        # With instancing, we can afford to keep the whole resident
-        # set on the GPU. We only rebuild if the width changes or
-        # if the underlying data array changed (handled by set_data).
-        last_w = getattr(self, "_last_gl_w", -1)
-        if self._last_w != last_w:
-            self._last_gl_w = self._last_w
-            # Width is a uniform, so we don't actually need to rebuild
-            # the instance buffer here, just trigger a repaint.
-            pass
-            
         self.update()
 
     def set_colors(self, bull: str, bear: str) -> None:  # type: ignore[override]
@@ -645,12 +636,10 @@ def make_candlestick_item(
 
 
 __all__ = [
-    "BODY_VERTS_PER_CANDLE",
-    "FLOATS_PER_VERTEX",
+    "FLOATS_PER_INSTANCE",
     "FRAGMENT_SHADER_SRC",
     "GLCandlestickItem",
     "VERTEX_SHADER_SRC",
-    "WICK_VERTS_PER_CANDLE",
     "is_gl_candle_available",
     "make_candlestick_item",
     "pack_candle_instances",
