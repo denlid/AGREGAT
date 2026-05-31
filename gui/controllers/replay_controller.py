@@ -273,16 +273,12 @@ class ReplayController:
     # ------------------------------------------------------------------
     def undo_drawing(self) -> None:
         ct = self._host.chart_tab
-        if ct.user_drawings_history:
-            ct.user_drawings_redo.append(list(ct.user_drawings))
-            ct.user_drawings = ct.user_drawings_history.pop()
-            ct._draw_user_items(ct.res_times)
-            logger.info("↶ Drawing undo")
+        ct.drawing_ctrl.undo()
+        ct._draw_user_items(ct.res_times)
+        logger.info("↶ Drawing undo")
 
     def redo_drawing(self) -> None:
         ct = self._host.chart_tab
-        if ct.user_drawings_redo:
-            ct.user_drawings_history.append(list(ct.user_drawings))
-            ct.user_drawings = ct.user_drawings_redo.pop()
-            ct._draw_user_items(ct.res_times)
-            logger.info("↷ Drawing redo")
+        ct.drawing_ctrl.redo()
+        ct._draw_user_items(ct.res_times)
+        logger.info("↷ Drawing redo")

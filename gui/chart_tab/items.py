@@ -519,11 +519,26 @@ class CandlestickItem(pg.GraphicsObject):
 
 
 class FilledRectROI(pg.RectROI):
-    """RectROI that paints a filled brush behind the standard handles."""
+    """RectROI that paints a filled brush behind the standard handles.
+    Handles are hidden by default and shown only on hover.
+    """
 
     def __init__(self, *args, **kwargs) -> None:
         self.brush = kwargs.pop("brush", None)
         super().__init__(*args, **kwargs)
+        self._handles_visible = False
+        self._set_handles_visible(False)
+
+    def _set_handles_visible(self, visible: bool) -> None:
+        self._handles_visible = visible
+        for h in self.handles:
+            item = h.get("item")
+            if item is not None:
+                item.setVisible(visible)
+
+    def hoverEvent(self, ev) -> None:
+        super().hoverEvent(ev)
+        self._set_handles_visible(not ev.isExit())
 
     def paint(self, p, opt, widget) -> None:  # type: ignore[no-untyped-def]
         if self.brush:

@@ -306,7 +306,7 @@ class MainWindow(QMainWindow):
         sc("Shift+Left", lambda: not self._is_editor_tab_active() and rc.step_back_visual_candle())
         sc(Qt.Key.Key_Space, lambda: not self._is_editor_tab_active() and self.bar_replay.toggle_play())
         sc(Qt.Key.Key_Home, lambda: not self._is_editor_tab_active() and self.chart_tab._fit_all())
-        sc(Qt.Key.Key_Escape, lambda: not self._is_editor_tab_active() and self.chart_tab._set_tool("None"))
+        sc(Qt.Key.Key_Escape, lambda: not self._is_editor_tab_active() and self.chart_tab._cancel_active_mode())
         sc("Ctrl+=", lambda: not self._is_editor_tab_active() and self.chart_tab.zoom_chart(1.15))
         sc("Ctrl+-", lambda: not self._is_editor_tab_active() and self.chart_tab.zoom_chart(1 / 1.15))
         sc("Ctrl+Shift+=", lambda: not self._is_editor_tab_active() and self._zoom_y(1.15))

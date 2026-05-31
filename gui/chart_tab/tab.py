@@ -7,15 +7,12 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QVariantAnimation, Qt, QTimer, Signal, QRectF
-from PySide6.QtGui import QColor, QPainterPath, QCursor
+from PySide6.QtGui import QColor, QCursor, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
-    QColorDialog,
     QComboBox,
-    QGraphicsPathItem,
     QGraphicsRectItem,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QMenu,
     QPushButton,
@@ -23,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.persistence import drawings_persist
+from gui.controllers.drawing_controller import DrawingController
 from gui.styling import style_helpers as sh
 from gui.chart_tab.axis import TimeAxisItem
 from gui.chart_tab.gl_candle import make_candlestick_item
@@ -48,36 +45,35 @@ class ChartTab(QWidget):
         main_layout.setSpacing(0)
 
         # ====== Detached controls (embedded in main_window toolbar) ======
+        self.drawing_ctrl = DrawingController(None)  # plot_widget wired after it's created below
+
         self.draw_btn = QToolButton()
         self.draw_btn.setText("✏️")
         self.draw_btn.setToolTip("Drawing Tools")
         self.draw_btn.setFixedSize(28, 28)
         self.draw_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         draw_menu = QMenu(self.draw_btn)
-        draw_menu.addAction("➖ Line", lambda: self._set_tool("Line"))
-        draw_menu.addAction("━ HLine", lambda: self._set_tool("HLine"))
-        draw_menu.addAction("🟩 Box", lambda: self._set_tool("Rect"))
-        draw_menu.addAction("📌 Marker", lambda: self._set_tool("Marker"))
-        draw_menu.addAction("🖌️ Brush", lambda: self._set_tool("Brush"))
-        draw_menu.addAction("🔤 Text", lambda: self._set_tool("Text"))
+        draw_menu.addAction("➖ Line", lambda: self.drawing_ctrl.set_tool("Line"))
+        draw_menu.addAction("━ HLine", lambda: self.drawing_ctrl.set_tool("HLine"))
+        draw_menu.addAction("🟩 Box", lambda: self.drawing_ctrl.set_tool("Rect"))
+        draw_menu.addAction("📌 Marker", lambda: self.drawing_ctrl.set_tool("Marker"))
+        draw_menu.addAction("🖌️ Brush", lambda: self.drawing_ctrl.set_tool("Brush"))
+        draw_menu.addAction("🔤 Text", lambda: self.drawing_ctrl.set_tool("Text"))
         draw_menu.addSeparator()
         # Line width sub-menu
         wm = draw_menu.addMenu("📏 Width")
         for w in [1, 2, 3, 4, 5]:
-            wm.addAction(f"{w}px", lambda _w=w: setattr(self, "_draw_width", _w))
-        draw_menu.addAction("🎨 Pick Color...", self._pick_draw_color)
+            wm.addAction(f"{w}px", lambda _w=w: self.drawing_ctrl.set_width(_w))
+        draw_menu.addAction("🎨 Pick Color...", lambda: self.drawing_ctrl.pick_color(self))
         draw_menu.addSeparator()
-        draw_menu.addAction("🗑️ Clear All Drawings", self.clear_user_drawings)
+        draw_menu.addAction("🗑️ Clear All Drawings", self.drawing_ctrl.clear_all)
         draw_menu.addAction("🧹 Clear Strategy Drawings", self._clear_strategy_drawings)
         self.draw_btn.setMenu(draw_menu)
-
-        self._draw_color = QColor("#FFFFFF")
-        self._draw_width = 2
 
         self.cancel_btn = QPushButton("❌")
         self.cancel_btn.setFixedSize(28, 28)
         self.cancel_btn.setToolTip("Cancel drawing (Esc)")
-        self.cancel_btn.clicked.connect(self._cancel_active_mode)
+        self.cancel_btn.clicked.connect(self.drawing_ctrl.cancel)
         self.cancel_btn.hide()
 
         self.fit_btn = QPushButton("🎯")
@@ -123,6 +119,7 @@ class ChartTab(QWidget):
             " font-weight: bold; background: transparent;"
         )
         register_theme_listener(self._apply_theme)
+        self.drawing_ctrl.tool_changed.connect(self._on_draw_tool_changed)
 
         # ====== Plot ======
         # Price axis on the RIGHT, time axis on the BOTTOM.
@@ -191,6 +188,10 @@ class ChartTab(QWidget):
         vb.wheelEvent = self._smooth_wheel_zoom
 
         # Override plot_widget mouse events for precise drawing (Brush, etc)
+        self.plot_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._orig_plot_keyPressEvent = self.plot_widget.keyPressEvent
+        self.plot_widget.keyPressEvent = self._plot_keyPressEvent
+
         self._orig_plot_mousePressEvent = self.plot_widget.mousePressEvent
         self._orig_plot_mouseMoveEvent = self.plot_widget.mouseMoveEvent
         self._orig_plot_mouseReleaseEvent = self.plot_widget.mouseReleaseEvent
@@ -299,6 +300,9 @@ class ChartTab(QWidget):
 
         main_layout.addWidget(self.plot_widget, stretch=1)
 
+        # Wire drawing controller to the now-created plot_widget
+        self.drawing_ctrl._pw = self.plot_widget
+
         # Trade focus breadcrumb overlay (hidden by default)
         self._focus_bar = QWidget(self.plot_widget)
         self._focus_bar.setVisible(False)
@@ -322,13 +326,8 @@ class ChartTab(QWidget):
         self.plot_widget.installEventFilter(self)
 
         # State
-        self.current_tool = "None"
-        self.user_drawings = (
-            drawings_persist.load()
-        )  # persistent: list of dicts with time/price coords
-        self.user_drawings_history = []  # undo history
-        self.user_drawings_redo = []  # redo stack
-        self.user_graphic_items = []  # rendered items (cleared on each redraw)
+        self.current_tool = "None"  # kept as proxy for external callers; drawing_ctrl is authoritative
+        self._last_hovered_drawing = None  # track last hovered drawing for RMB context menu
         self.strategy_graphic_items = []
         self.trade_graphic_items = []
         self.res_times = np.array([])
@@ -339,9 +338,6 @@ class ChartTab(QWidget):
         self._cached_res_df = None
         self._color_scheme = "Classic"
         self._last_click_pos = None
-        self._brush_path = None
-        self._brush_item = None
-        self._is_brushing = False
         self.autofit_y = True
         self._selection_mode = False
         self._selection_start = None
@@ -370,10 +366,65 @@ class ChartTab(QWidget):
         self._user_zoom_width = xr[1] - xr[0]
         self._need_autorange = False
 
-    def _pick_draw_color(self):
-        c = QColorDialog.getColor(self._draw_color, self, "Drawing Color")
-        if c.isValid():
-            self._draw_color = c
+    # --- Drawing tool (delegated to DrawingController) ---
+
+    def _on_draw_tool_changed(self, name: str) -> None:
+        self.current_tool = name
+        if name == "None":
+            self.tool_label.setText("")
+            self.cancel_btn.hide()
+        else:
+            self.tool_label.setText(f"Drawing: {name}")
+            self.cancel_btn.show()
+
+    def keyPressEvent(self, evt) -> None:
+        self._plot_keyPressEvent(evt)
+
+    def _plot_keyPressEvent(self, evt) -> None:
+        if evt.matches(QKeySequence.StandardKey.Undo):
+            self.drawing_ctrl.undo()
+            self._draw_user_items(self.res_times)
+            evt.accept()
+            return
+        if evt.matches(QKeySequence.StandardKey.Redo):
+            self.drawing_ctrl.redo()
+            self._draw_user_items(self.res_times)
+            evt.accept()
+            return
+        if evt.matches(QKeySequence.StandardKey.Copy):
+            target = self._last_hovered_drawing
+            if target is not None and hasattr(target, "d_ref"):
+                self.drawing_ctrl.copy_drawing(target.d_ref)
+            evt.accept()
+            return
+        if evt.matches(QKeySequence.StandardKey.Paste):
+            self.drawing_ctrl.paste_drawing(self.res_times)
+            self._draw_user_items(self.res_times)
+            evt.accept()
+            return
+        if (evt.modifiers() & Qt.KeyboardModifier.ControlModifier or evt.modifiers() & Qt.KeyboardModifier.MetaModifier) and evt.key() == Qt.Key.Key_D:
+            target = self._last_hovered_drawing
+            if target is not None and hasattr(target, "d_ref"):
+                self.drawing_ctrl.duplicate_drawing(target.d_ref, self.res_times)
+                self._draw_user_items(self.res_times)
+            evt.accept()
+            return
+        if evt.matches(QKeySequence.StandardKey.Delete) or evt.key() == Qt.Key.Key_Delete:
+            target = self._last_hovered_drawing
+            if target is not None and hasattr(target, "d_ref"):
+                self.drawing_ctrl._delete_drawing(target.d_ref, self.res_times)
+                self._draw_user_items(self.res_times)
+                self._last_hovered_drawing = None
+            evt.accept()
+            return
+        if hasattr(self, "_orig_plot_keyPressEvent"):
+            self._orig_plot_keyPressEvent(evt)
+        else:
+            super().keyPressEvent(evt)
+
+    def clear_user_drawings(self) -> None:
+        self.drawing_ctrl.clear_all()
+        logger.info("🗑️ User drawings cleared")
 
     def _add_layer(self, tag: str, label: str, default_on: bool = True):
         """Add a toggleable layer to the Layers menu. Idempotent."""
@@ -439,24 +490,13 @@ class ChartTab(QWidget):
 
     def toggle_tools(self):
         """Toggle sidebar visibility."""
-        # The sidebar is always visible in the new layout (it's small)
         pass
-
-    # --- Drawing tool ---
-    def _set_tool(self, name):
-        self.current_tool = name
-        if name == "None":
-            self.tool_label.setText("")
-            self.cancel_btn.hide()
-        else:
-            self.tool_label.setText(f"Drawing: {name}")
-            self.cancel_btn.show()
 
     def _cancel_active_mode(self):
         if self._selection_mode:
             self.cancel_area_selection_mode()
             return
-        self._set_tool("None")
+        self.drawing_ctrl.cancel()
 
     def enable_area_selection_mode(self):
         self._selection_mode = True
@@ -583,17 +623,6 @@ class ChartTab(QWidget):
         # OHLC overlay disabled — cleaner chart per UX preference.
         self.ohlc_label.hide()
 
-    def _snap_to_candle(self, x, y):
-        """Snap x to nearest candle index, y to nearest OHLC price."""
-        sx = max(0, min(int(round(x)), len(self.res_times) - 1))
-        sy = y
-        return sx, sy
-
-    def _idx_to_time_str(self, idx):
-        """Convert candle index to time string for persistent storage."""
-        idx = max(0, min(idx, len(self.res_times) - 1))
-        return str(pd.to_datetime(self.res_times[idx]))
-
     def _plot_mousePressEvent(self, evt):
         if len(self.res_times) == 0:
             return self._orig_plot_mousePressEvent(evt)
@@ -621,6 +650,27 @@ class ChartTab(QWidget):
             return
 
         if evt.button() == Qt.MouseButton.RightButton:
+            # Find a hovered drawing and show its context menu
+            target = self._last_hovered_drawing
+            if target is None:
+                # Fallback: check mouseHovering directly (in case move event missed it)
+                for item in self.drawing_ctrl._graphic_items:
+                    if getattr(item, "mouseHovering", False):
+                        target = item
+                        break
+            if target is not None and hasattr(target, "mouseClickEvent"):
+                import pyqtgraph as _pg
+
+                class _FakeEv:
+                    def button(self_): return Qt.MouseButton.RightButton
+                    def accept(self_): pass
+                    def pos(self_): return _pg.Point(scene_pos.x(), scene_pos.y())
+                    def scenePos(self_): return scene_pos
+
+                target.mouseClickEvent(_FakeEv())
+                evt.accept()
+                return
+
             idx = int(round(x))
             ts = ""
             if 0 <= idx < len(self.res_times):
@@ -640,78 +690,23 @@ class ChartTab(QWidget):
                     f"Δ {abs(int(round(x)) - int(round(lx)))} candles, {abs(y - ly):.2f} pts"
                 ).setEnabled(False)
             from PySide6.QtGui import QCursor
-
             menu.exec(QCursor.pos())
             evt.accept()
             return
 
         self._last_click_pos = (x, y)
-        if self.current_tool == "None":
-            return self._orig_plot_mousePressEvent(evt)
 
-        sx, sy = self._snap_to_candle(x, y)
-        t_str = self._idx_to_time_str(sx)
-        w = self._draw_width
-        color = self._draw_color.name()
+        # Delegate drawing to DrawingController
+        if self.drawing_ctrl.current_tool != "None":
+            if self.drawing_ctrl.handle_mouse_press(scene_pos, evt.button(), self.res_times):
+                self._draw_user_items(self.res_times)
+                evt.accept()
+                return
 
-        if evt.button() == Qt.MouseButton.LeftButton and self.current_tool in [
-            "Brush",
-            "Line",
-            "Rect",
-        ]:
-            self._drawing_active = self.current_tool
-            self._drawing_start_pt = (sx, sy)
-            self._drawing_start_t = t_str
-            self.plot_widget.getViewBox().setMouseEnabled(x=False, y=False)
-
-            if self.current_tool == "Brush":
-                self._brush_path = QPainterPath(QPointF(x, y))
-                self._interactive_item = QGraphicsPathItem(self._brush_path)
-            elif self.current_tool == "Line":
-                from PySide6.QtWidgets import QGraphicsLineItem
-
-                self._interactive_item = QGraphicsLineItem(sx, sy, sx, sy)
-            elif self.current_tool == "Rect":
-                from PySide6.QtCore import QRectF
-                from PySide6.QtWidgets import QGraphicsRectItem
-
-                self._interactive_item = QGraphicsRectItem(QRectF(sx, sy, 0, 0))
-                fc = QColor(color)
-                fc.setAlphaF(0.2)
-                self._interactive_item.setBrush(pg.mkBrush(fc))
-
-            self._interactive_item.setPen(pg.mkPen(color, width=w))
-            self.plot_widget.addItem(self._interactive_item)
-            evt.accept()
-            return
-
-        if evt.button() != Qt.MouseButton.LeftButton:
-            return self._orig_plot_mousePressEvent(evt)
-
-        if self.current_tool == "HLine":
-            self._save_drawing_state()
-            self.user_drawings.append({"type": "hline", "p": sy, "color": color, "width": w})
-            drawings_persist.save(self.user_drawings)
-        elif self.current_tool == "Marker":
-            self._save_drawing_state()
-            self.user_drawings.append({"type": "marker", "t": t_str, "p": sy, "color": color})
-            drawings_persist.save(self.user_drawings)
-        elif self.current_tool == "Text":
-            text, ok = QInputDialog.getText(self, "Add Text", "Enter text:")
-            if ok and text:
-                self._save_drawing_state()
-                self.user_drawings.append(
-                    {"type": "text", "t": t_str, "p": sy, "text": text, "color": color}
-                )
-                drawings_persist.save(self.user_drawings)
-            else:
-                return self._orig_plot_mousePressEvent(evt)
-
-        self._draw_user_items(self.res_times)
-        evt.accept()
+        return self._orig_plot_mousePressEvent(evt)
 
     def _plot_mouseDoubleClickEvent(self, evt):
-        if getattr(self, "current_tool", "None") != "None":
+        if self.drawing_ctrl.current_tool != "None":
             return self._plot_mousePressEvent(evt)
         return self._orig_plot_mouseDoubleClickEvent(evt)
 
@@ -737,33 +732,18 @@ class ChartTab(QWidget):
             self._update_selection_mask(float(sx), float(sy), float(ex), float(ey))
             evt.accept()
             return
-        if getattr(self, "_drawing_active", None):
-            scene_pos = (
-                evt.scenePos()
-                if hasattr(evt, "scenePos")
-                else self.plot_widget.mapToScene(evt.pos())
-            )
-            pos = self.plot_widget.plotItem.vb.mapSceneToView(scene_pos)
-            if self._drawing_active == "Brush":
-                self._brush_path.lineTo(pos.x(), pos.y())
-                self._interactive_item.setPath(self._brush_path)
-            elif self._drawing_active == "Line":
-                sx_curr = max(0, min(int(round(pos.x())), len(self.res_times) - 1))
-                sy_curr = pos.y()
-                self._interactive_item.setLine(
-                    self._drawing_start_pt[0], self._drawing_start_pt[1], sx_curr, sy_curr
-                )
-            elif self._drawing_active == "Rect":
-                sx_curr = max(0, min(int(round(pos.x())), len(self.res_times) - 1))
-                sy_curr = pos.y()
-                from PySide6.QtCore import QRectF
-
-                x1, y1 = self._drawing_start_pt
-                self._interactive_item.setRect(
-                    QRectF(min(x1, sx_curr), min(y1, sy_curr), abs(sx_curr - x1), abs(sy_curr - y1))
-                )
+        scene_pos = (
+            evt.scenePos() if hasattr(evt, "scenePos") else self.plot_widget.mapToScene(evt.pos())
+        )
+        if self.drawing_ctrl.handle_mouse_move(scene_pos, self.res_times):
             evt.accept()
             return
+        # Track which drawing item is currently hovered for RMB context menu
+        self._last_hovered_drawing = None
+        for item in self.drawing_ctrl._graphic_items:
+            if getattr(item, "mouseHovering", False):
+                self._last_hovered_drawing = item
+                break
         self._orig_plot_mouseMoveEvent(evt)
 
     def _plot_mouseReleaseEvent(self, evt):
@@ -794,73 +774,15 @@ class ChartTab(QWidget):
             self._clear_selection_mask()
             evt.accept()
             return
-        if getattr(self, "_drawing_active", None):
-            tool = self._drawing_active
-            self._drawing_active = None
-            self.plot_widget.getViewBox().setMouseEnabled(x=True, y=True)
 
-            scene_pos = (
-                evt.scenePos()
-                if hasattr(evt, "scenePos")
-                else self.plot_widget.mapToScene(evt.pos())
-            )
-            pos = self.plot_widget.plotItem.vb.mapSceneToView(scene_pos)
-            sx_curr = max(0, min(int(round(pos.x())), len(self.res_times) - 1))
-            sy_curr = pos.y()
-            t2_str = self._idx_to_time_str(sx_curr)
-
-            if tool == "Brush":
-                pts = []
-                for i in range(self._brush_path.elementCount()):
-                    el = self._brush_path.elementAt(i)
-                    tx = self._idx_to_time_str(int(el.x))
-                    pts.append({"t": tx, "p": el.y})
-                if len(pts) > 1:
-                    self.user_drawings.append(
-                        {
-                            "type": "brush",
-                            "points": pts,
-                            "color": self._draw_color.name(),
-                            "width": self._draw_width,
-                        }
-                    )
-                    drawings_persist.save(self.user_drawings)
-            elif tool == "Line":
-                self._save_drawing_state()
-                self.user_drawings.append(
-                    {
-                        "type": "line",
-                        "t1": self._drawing_start_t,
-                        "p1": self._drawing_start_pt[1],
-                        "t2": t2_str,
-                        "p2": sy_curr,
-                        "color": self._draw_color.name(),
-                        "width": self._draw_width,
-                    }
-                )
-                drawings_persist.save(self.user_drawings)
-            elif tool == "Rect":
-                self._save_drawing_state()
-                self.user_drawings.append(
-                    {
-                        "type": "rect",
-                        "t1": self._drawing_start_t,
-                        "p1": self._drawing_start_pt[1],
-                        "t2": t2_str,
-                        "p2": sy_curr,
-                        "color": self._draw_color.name(),
-                        "width": self._draw_width,
-                    }
-                )
-                drawings_persist.save(self.user_drawings)
-
-            if getattr(self, "_interactive_item", None):
-                self.plot_widget.removeItem(self._interactive_item)
-                self._interactive_item = None
-            self._brush_path = None
+        scene_pos = (
+            evt.scenePos() if hasattr(evt, "scenePos") else self.plot_widget.mapToScene(evt.pos())
+        )
+        if self.drawing_ctrl.handle_mouse_release(scene_pos, self.res_times):
             self._draw_user_items(self.res_times)
             evt.accept()
             return
+
         self._orig_plot_mouseReleaseEvent(evt)
 
         # Update the camera tracker upon mouse release (user manual panning)
@@ -932,53 +854,6 @@ class ChartTab(QWidget):
             },
         }
 
-    def _on_roi_changed(self, roi, d):
-        """Update persistent drawing dict when ROI is resized/moved."""
-        if len(self.res_times) == 0:
-            return
-        pos = roi.pos()
-        sz = roi.size()
-        i1 = max(0, min(int(pos.x()), len(self.res_times) - 1))
-
-        if d["type"] == "rect":
-            d["t1"] = str(pd.to_datetime(self.res_times[i1]))
-            d["p1"] = pos.y()
-            i2 = max(0, min(int(pos.x() + sz.x()), len(self.res_times) - 1))
-            d["t2"] = str(pd.to_datetime(self.res_times[i2]))
-            d["p2"] = pos.y() + sz.y()
-        elif d["type"] == "line":
-            handles = roi.getSceneHandlePositions()
-            if len(handles) >= 2:
-                vp1 = self.plot_widget.getViewBox().mapSceneToView(handles[0][1])
-                vp2 = self.plot_widget.getViewBox().mapSceneToView(handles[1][1])
-                i1_line = max(0, min(int(vp1.x()), len(self.res_times) - 1))
-                d["t1"] = str(pd.to_datetime(self.res_times[i1_line]))
-                d["p1"] = vp1.y()
-                i2_line = max(0, min(int(vp2.x()), len(self.res_times) - 1))
-                d["t2"] = str(pd.to_datetime(self.res_times[i2_line]))
-                d["p2"] = vp2.y()
-
-        drawings_persist.save(self.user_drawings)
-
-        self._is_roi_dragging = False
-
-    def _save_drawing_state(self):
-        """Save current drawings to undo history (max 50 levels)."""
-        self.user_drawings_history.append(list(self.user_drawings))
-        if len(self.user_drawings_history) > 50:
-            self.user_drawings_history.pop(0)
-        self.user_drawings_redo.clear()  # Clear redo on new action
-
-    def clear_user_drawings(self):
-        for i in self.user_graphic_items:
-            self.plot_widget.removeItem(i)
-            if hasattr(i, "deleteLater"):
-                i.deleteLater()
-        self.user_graphic_items.clear()
-        self.user_drawings.clear()
-        drawings_persist.save(self.user_drawings)
-        logger.info("🗑️ User drawings cleared")
-
     def _clear_strategy_drawings(self):
         """Clear all strategy-generated drawings from engine."""
         for i in self.strategy_graphic_items:
@@ -991,109 +866,8 @@ class ChartTab(QWidget):
         self.redraw_chart()
 
     def _draw_user_items(self, rt):
-        """Re-render user drawings from stored time/price data."""
-        for i in self.user_graphic_items:
-            self.plot_widget.removeItem(i)
-            if hasattr(i, "deleteLater"):
-                i.deleteLater()
-        self.user_graphic_items.clear()
-        if len(rt) == 0:
-            return
-        for d in self.user_drawings:
-            try:
-                color = QColor(d.get("color", "#FFFFFF"))
-                w = d.get("width", 2)
-                dtype = d["type"]
-                if dtype == "hline":
-                    it = pg.InfiniteLine(
-                        pos=d["p"],
-                        angle=0,
-                        pen=pg.mkPen(color, width=w, style=Qt.PenStyle.DashDotLine),
-                    )
-                    lbl = pg.TextItem(f"{d['p']:.2f}", color=color, anchor=(0, 1))
-                    lbl.setPos(0, d["p"])
-                    self.plot_widget.addItem(it)
-                    self.user_graphic_items.append(it)
-                    self.plot_widget.addItem(lbl)
-                    self.user_graphic_items.append(lbl)
-                elif dtype == "marker":
-                    t1 = pd.to_datetime(d["t"]).to_datetime64()
-                    i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
-                    # Red exclamation mark above candle
-                    ohlc = self.candlestick_item.get_ohlc_at(i1)
-                    offset_y = d["p"]
-                    if ohlc:
-                        offset_y = max(ohlc) + (abs(ohlc[1] - ohlc[2]) * 0.1)
-                    it = pg.TextItem("❗️", color=QColor("#FF1744"), anchor=(0.5, 1))
-                    font = it.textItem.font()
-                    font.setPointSize(18)
-                    it.textItem.setFont(font)
-                    it.setPos(i1, offset_y)
-                    self.plot_widget.addItem(it)
-                    self.user_graphic_items.append(it)
-                elif dtype == "text":
-                    t1 = pd.to_datetime(d["t"]).to_datetime64()
-                    i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
-                    it = pg.TextItem(d["text"], color=color, anchor=(0.5, 0.5))
-                    it.setPos(i1, d["p"])
-                    self.plot_widget.addItem(it)
-                    self.user_graphic_items.append(it)
-                elif dtype == "line":
-                    t1 = pd.to_datetime(d["t1"]).to_datetime64()
-                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
-                    i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
-                    it = pg.LineSegmentROI(
-                        [[i1, d["p1"]], [i2, d["p2"]]], pen=pg.mkPen(color, width=w), movable=True
-                    )
-                    it.sigRegionChangeStarted.connect(
-                        lambda r: setattr(self, "_is_roi_dragging", True)
-                    )
-                    it.sigRegionChangeFinished.connect(
-                        lambda roi, d_ref=d: self._on_roi_changed(roi, d_ref)
-                    )
-                    self.plot_widget.addItem(it)
-                    self.user_graphic_items.append(it)
-                elif dtype == "rect":
-                    t1 = pd.to_datetime(d["t1"]).to_datetime64()
-                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
-                    i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
-                    mnx, mxx = min(i1, i2), max(i1, i2)
-                    mny, mxy = min(d["p1"], d["p2"]), max(d["p1"], d["p2"])
-                    fc = QColor(color)
-                    fc.setAlphaF(0.2)
-                    it = FilledRectROI(
-                        [mnx, mny],
-                        [mxx - mnx or 1.0, mxy - mny or 1.0],
-                        pen=pg.mkPen(color, width=w),
-                        movable=True,
-                        brush=pg.mkBrush(fc),
-                    )
-                    it.sigRegionChangeStarted.connect(
-                        lambda r: setattr(self, "_is_roi_dragging", True)
-                    )
-                    it.sigRegionChangeFinished.connect(
-                        lambda roi, d_ref=d: self._on_roi_changed(roi, d_ref)
-                    )
-                    self.plot_widget.addItem(it)
-                    self.user_graphic_items.append(it)
-                elif dtype == "brush":
-                    pts = d["points"]
-                    path = QPainterPath()
-                    for idx, pt in enumerate(pts):
-                        t_px = pd.to_datetime(pt["t"]).to_datetime64()
-                        i_px = max(0, int(np.searchsorted(rt, t_px, side="right")) - 1)
-                        if idx == 0:
-                            path.moveTo(i_px, pt["p"])
-                        else:
-                            path.lineTo(i_px, pt["p"])
-                    it = QGraphicsPathItem(path)
-                    it.setPen(pg.mkPen(color, width=w))
-                    self.plot_widget.addItem(it)
-                    self.user_graphic_items.append(it)
-            except Exception as e:
-                logger.error(f"UserDraw: {e}")
+        """Delegate user drawing render to DrawingController."""
+        self.drawing_ctrl.render(rt)
 
     def on_position_changed(self):
         """Called when engine position opens/closes/SL changes — trigger chart redraw."""
@@ -1215,7 +989,7 @@ class ChartTab(QWidget):
         import time as _time
         t_total = _time.perf_counter()
 
-        if getattr(self, "_is_roi_dragging", False):
+        if getattr(self, "_is_roi_dragging", False) or self.drawing_ctrl.is_roi_dragging:
             return
 
         if self.engine.df is None:
