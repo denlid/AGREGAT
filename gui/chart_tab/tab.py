@@ -1635,7 +1635,6 @@ class ChartTab(QWidget):
             "tf": tf,
             "idx": int(idx),
             "cache_hit": bool(cache_hit),
-            "chart_arrays_cache_hit": bool(arrays_cache_hit),
             "trade_markers_cache_hit": bool(trade_markers_cache_hit),
             "bars_total": int(n),
             "bars_visible": int(visible_bars),

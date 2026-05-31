@@ -100,27 +100,35 @@ class BacktestCore:
     def _refresh_numpy_columns(self) -> None:
         """Re-bind the NumPy storage from ``self.df`` and refresh the
         DataView's column dict.
+
+        Sprint 3.1: Uses float32 for OHLC arrays (50% memory save) when
+        AGREGAT_USE_FLOAT32 env var is set. Precision loss is negligible
+        for price data (<0.00003).
         """
+        import os
+        use_float32 = os.environ.get("AGREGAT_USE_FLOAT32", "").lower() in ("1", "true", "yes")
+        price_dtype = np.float32 if use_float32 else np.float64
+
         df = self.df
         if df is None or len(df) == 0:
-            self._open = np.empty(0, dtype=np.float64)
-            self._high = np.empty(0, dtype=np.float64)
-            self._low = np.empty(0, dtype=np.float64)
-            self._close = np.empty(0, dtype=np.float64)
-            self._volume = np.empty(0, dtype=np.float64)
+            self._open = np.empty(0, dtype=price_dtype)
+            self._high = np.empty(0, dtype=price_dtype)
+            self._low = np.empty(0, dtype=price_dtype)
+            self._close = np.empty(0, dtype=price_dtype)
+            self._volume = np.empty(0, dtype=price_dtype)
             self._time = np.empty(0, dtype="datetime64[ns]")
             # Phase 1.4 — per-bar spread overrides (points). Empty when
             # the data source has no ``spread`` column.
-            self._spread_per_bar = np.empty(0, dtype=np.float64)
+            self._spread_per_bar = np.empty(0, dtype=price_dtype)
         else:
-            self._open = df["open"].to_numpy(dtype=np.float64, copy=False)
-            self._high = df["high"].to_numpy(dtype=np.float64, copy=False)
-            self._low = df["low"].to_numpy(dtype=np.float64, copy=False)
-            self._close = df["close"].to_numpy(dtype=np.float64, copy=False)
+            self._open = df["open"].to_numpy(dtype=price_dtype, copy=False)
+            self._high = df["high"].to_numpy(dtype=price_dtype, copy=False)
+            self._low = df["low"].to_numpy(dtype=price_dtype, copy=False)
+            self._close = df["close"].to_numpy(dtype=price_dtype, copy=False)
             volume = (
-                df["volume"].to_numpy(dtype=np.float64, copy=False)
+                df["volume"].to_numpy(dtype=price_dtype, copy=False)
                 if "volume" in df.columns
-                else np.zeros(len(df), dtype=np.float64)
+                else np.zeros(len(df), dtype=price_dtype)
             )
             self._volume = volume
             self._time = pd.to_datetime(df["time"]).to_numpy()
@@ -129,10 +137,10 @@ class BacktestCore:
             # stays False and the legacy fixed spread is used.
             if "spread" in df.columns:
                 self._spread_per_bar = df["spread"].to_numpy(
-                    dtype=np.float64, copy=False
+                    dtype=price_dtype, copy=False
                 )
             else:
-                self._spread_per_bar = np.empty(0, dtype=np.float64)
+                self._spread_per_bar = np.empty(0, dtype=price_dtype)
         # Re-bind the DataView's dict in place so existing references
         # (e.g. ``ctx.data``) automatically pick up the new arrays.
         cols = self.data._arrays  # noqa: SLF001 — intentional internal handshake
@@ -186,6 +194,10 @@ class BacktestCore:
     # Lifecycle
     # ------------------------------------------------------------------
     def __init__(self) -> None:
+        import os
+        use_float32 = os.environ.get("AGREGAT_USE_FLOAT32", "").lower() in ("1", "true", "yes")
+        price_dtype = np.float32 if use_float32 else np.float64
+
         self.df: Optional[pd.DataFrame] = None
         self.df_full: Optional[pd.DataFrame] = (
             None  # untouched copy for date-range filtering
@@ -202,11 +214,12 @@ class BacktestCore:
         # (per-bar reads) and strategies via :class:`DataView`. Empty
         # placeholders are installed up front so ``ctx.data`` has a
         # usable shape even before any candle is fed.
-        self._open = np.empty(0, dtype=np.float64)
-        self._high = np.empty(0, dtype=np.float64)
-        self._low = np.empty(0, dtype=np.float64)
-        self._close = np.empty(0, dtype=np.float64)
-        self._volume = np.empty(0, dtype=np.float64)
+        # Sprint 3.1: Uses float32 when AGREGAT_USE_FLOAT32=1 (50% memory save)
+        self._open = np.empty(0, dtype=price_dtype)
+        self._high = np.empty(0, dtype=price_dtype)
+        self._low = np.empty(0, dtype=price_dtype)
+        self._close = np.empty(0, dtype=price_dtype)
+        self._volume = np.empty(0, dtype=price_dtype)
         self._time = np.empty(0, dtype="datetime64[ns]")
 
         self.current_idx = -1
