@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QVariantAnimation, Qt, QTimer, Signal, QRectF
-from PySide6.QtGui import QColor, QCursor, QKeySequence
+from PySide6.QtGui import QColor, QCursor, QKeySequence, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -125,6 +125,8 @@ class ChartTab(QWidget):
         # Price axis on the RIGHT, time axis on the BOTTOM.
         self.time_axis = TimeAxisItem(orientation="bottom")
         self.plot_widget = pg.PlotWidget(axisItems={"bottom": self.time_axis})
+        self.plot_widget.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.plot_widget.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         self.plot_widget.setBackground(QColor("#0D0D10"))
         self.plot_widget.showGrid(x=True, y=True, alpha=0.06)
         self.plot_widget.setMenuEnabled(False)
