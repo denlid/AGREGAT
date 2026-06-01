@@ -499,19 +499,33 @@ class DataPager(QObject):
                 evicted.append(victim_id)
             rows_total = sum(len(c.df) for c in self._resident.values())
 
-            # Pre-compute the concatenated frame on the worker thread
-            chunks = [c.df for c in self._resident.values()]
+            # Pre-compute the contiguous read-out frame on the worker thread.
+            #
+            # Tiles are non-overlapping in time (``set_tiles`` enforces this)
+            # and each loaded chunk is internally time-sorted, so concatenating
+            # the chunks in ascending start-time order already yields a globally
+            # sorted frame. That lets us skip the O(N log N) ``sort_values`` that
+            # used to dominate this callback (it re-sorted *every* resident row
+            # on each tile land, even when only one tile changed). An O(N)
+            # monotonicity check guards correctness: if the source data is out of
+            # order for any reason we fall back to the explicit stable mergesort,
+            # reproducing the legacy result exactly.
+            chunks = [c.df for c in self._resident.values() if len(c.df)]
             if not chunks:
                 self._cached_concat = pd.DataFrame()
                 self._cached_sorted_times = None
+            elif "time" not in chunks[0].columns:
+                self._cached_concat = pd.concat(chunks, ignore_index=True)
+                self._cached_sorted_times = None
             else:
-                frame = pd.concat(chunks, ignore_index=True)
-                if "time" in frame.columns:
+                ordered = sorted(chunks, key=lambda d: d["time"].iloc[0])
+                frame = pd.concat(ordered, ignore_index=True)
+                times = pd.DatetimeIndex(frame["time"])
+                if not times.is_monotonic_increasing:
                     frame = frame.sort_values("time", kind="mergesort").reset_index(drop=True)
-                    self._cached_sorted_times = pd.DatetimeIndex(frame["time"])
-                else:
-                    self._cached_sorted_times = None
+                    times = pd.DatetimeIndex(frame["time"])
                 self._cached_concat = frame
+                self._cached_sorted_times = times
 
         logger.debug(
             "DataPager: tile %s landed (rows=%d, resident=%d, evicted=%s)",

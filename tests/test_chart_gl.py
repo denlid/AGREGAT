@@ -195,10 +195,26 @@ def test_truthy_env_parses_known_values() -> None:
         assert _truthy_env(v) is None, v
 
 
-def test_make_candlestick_item_default_returns_legacy(monkeypatch, qapp) -> None:
-    """Default (env unset, force=None) → legacy CandlestickItem.
-    Phase 3 is opt-in only until validated on real GPUs."""
+def test_make_candlestick_item_default_uses_gl_when_available(monkeypatch, qapp) -> None:
+    """Opt-out default: env unset + OpenGL available → GL subclass.
+
+    The paint path still falls back to the QPainter renderer if a live GL
+    context can't be created (see ``GLCandlestickItem._try_paint_gl``), so this
+    only swaps in the fast path — it never risks a blank chart."""
+    if not is_gl_candle_available():
+        pytest.skip("PySide6 GL bindings not available")
     monkeypatch.delenv("AGREGAT_GL_CANDLES", raising=False)
+    monkeypatch.delenv("AGREGAT_USE_GPU", raising=False)
+    monkeypatch.setattr("gui.chart_tab.gpu_config.is_opengl_available", lambda: True)
+    item = make_candlestick_item()
+    assert isinstance(item, GLCandlestickItem)
+
+
+def test_make_candlestick_item_default_falls_back_when_gl_unavailable(monkeypatch, qapp) -> None:
+    """Opt-out default: env unset + OpenGL NOT available → legacy item."""
+    monkeypatch.delenv("AGREGAT_GL_CANDLES", raising=False)
+    monkeypatch.delenv("AGREGAT_USE_GPU", raising=False)
+    monkeypatch.setattr("gui.chart_tab.gpu_config.is_opengl_available", lambda: False)
     item = make_candlestick_item()
     assert isinstance(item, CandlestickItem)
     assert not isinstance(item, GLCandlestickItem)
@@ -246,7 +262,11 @@ def test_make_candlestick_item_force_overrides_env(monkeypatch, qapp) -> None:
 def test_make_candlestick_item_unrecognised_env_treated_as_unset(
     monkeypatch, qapp
 ) -> None:
+    """An unrecognised value is treated as unset → the policy decides.
+    With OpenGL unavailable that resolves to the legacy software item."""
     monkeypatch.setenv("AGREGAT_GL_CANDLES", "perhaps")
+    monkeypatch.delenv("AGREGAT_USE_GPU", raising=False)
+    monkeypatch.setattr("gui.chart_tab.gpu_config.is_opengl_available", lambda: False)
     item = make_candlestick_item()
     assert not isinstance(item, GLCandlestickItem)
 

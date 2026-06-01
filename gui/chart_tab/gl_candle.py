@@ -609,16 +609,24 @@ def make_candlestick_item(
       missing — we never crash here).
     * ``force=False`` — always return the legacy
       :class:`CandlestickItem`.
-    * ``force=None`` (default) — honour the ``AGREGAT_GL_CANDLES`` env
-      var. Off when unset so existing setups don't get an
-      unverified-on-this-box code path silently turned on.
+    * ``force=None`` (default) — delegate to the unified Phase 5 policy
+      :func:`gui.chart_tab.gpu_config.should_use_gl_candles`, so the factory
+      and the telemetry/adaptive layer never disagree. That policy honours
+      ``AGREGAT_GL_CANDLES`` when set and otherwise enables GL whenever the
+      OpenGL backend is available. This is an **opt-out** default: the paint
+      path falls back to the QPainter renderer on any GL failure (no context,
+      shader init failure, …), so "on when available" can only swap the fast
+      path in — it can never break rendering. Set ``AGREGAT_GL_CANDLES=0`` to
+      force the legacy software path.
 
     Tests inject ``force=`` to exercise both branches without
     monkey-patching ``os.environ``.
     """
     if force is None:
-        env_pref = _truthy_env(os.environ.get(_ENV_VAR))
-        want_gl = bool(env_pref) if env_pref is not None else False
+        # Local import keeps the module import order independent of gpu_config.
+        from gui.chart_tab.gpu_config import should_use_gl_candles
+
+        want_gl = should_use_gl_candles()
     else:
         want_gl = bool(force)
 

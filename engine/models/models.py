@@ -199,6 +199,14 @@ class Position:
 # ==========================================
 # Trade (closed position record)
 # ==========================================
+# Sentinel for Trade.__init__: distinguishes "caller did not supply a
+# precomputed datetime64" (fall back to parsing ``entry_time``) from the
+# legitimate value ``None`` (timestamp is genuinely absent). The vectorised
+# engine passes datetime64 values directly to skip the ~125 µs/trade
+# ``pd.to_datetime(str)`` round-trip — see ``vectorized_engine`` materialisation.
+_NP_TIME_UNSET = object()
+
+
 class Trade:
     __slots__ = (
         "id",
@@ -262,6 +270,8 @@ class Trade:
         dow: str = "Unknown",
         hod: int = -1,
         regime: str = "unknown",
+        entry_time_np: Any = _NP_TIME_UNSET,
+        exit_time_np: Any = _NP_TIME_UNSET,
     ) -> None:
         self.id = id
         self.direction = direction
@@ -274,17 +284,27 @@ class Trade:
         self.entry_time = entry_time
         self.exit_time = exit_time
         # Pre-cache np.datetime64 for fast chart marker rendering.
-        # Avoids repeated pd.to_datetime(str) on every redraw.
-        try:
-            _et_ts = pd.to_datetime(entry_time, errors="coerce")
-            self.entry_time_np = _et_ts.to_datetime64() if not pd.isna(_et_ts) else None
-        except (ValueError, TypeError):
-            self.entry_time_np = None
-        try:
-            _xt_ts = pd.to_datetime(exit_time, errors="coerce")
-            self.exit_time_np = _xt_ts.to_datetime64() if not pd.isna(_xt_ts) else None
-        except (ValueError, TypeError):
-            self.exit_time_np = None
+        # Avoids repeated pd.to_datetime(str) on every redraw. Callers that
+        # already hold the datetime64 (the vectorised engine slices it straight
+        # from the OHLC time array) pass it via ``entry_time_np`` / ``exit_time_np``
+        # to skip the costly string parse — the dominant cost when materialising
+        # tens of thousands of trades.
+        if entry_time_np is _NP_TIME_UNSET:
+            try:
+                _et_ts = pd.to_datetime(entry_time, errors="coerce")
+                self.entry_time_np = _et_ts.to_datetime64() if not pd.isna(_et_ts) else None
+            except (ValueError, TypeError):
+                self.entry_time_np = None
+        else:
+            self.entry_time_np = entry_time_np
+        if exit_time_np is _NP_TIME_UNSET:
+            try:
+                _xt_ts = pd.to_datetime(exit_time, errors="coerce")
+                self.exit_time_np = _xt_ts.to_datetime64() if not pd.isna(_xt_ts) else None
+            except (ValueError, TypeError):
+                self.exit_time_np = None
+        else:
+            self.exit_time_np = exit_time_np
         self.volume = volume
         self.duration_minutes = duration_minutes
         self.exit_reason = exit_reason

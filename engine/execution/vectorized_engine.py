@@ -546,63 +546,99 @@ def run_vectorized(
         # the still-flat opening bars and reported ~0 drawdown. Rebuild the
         # running equity from the trade PnL ledger instead, mirroring the
         # loop's per-cent rounding so the figure matches to the penny.
-        post_trade_eq = np.empty(trade_count, dtype=np.float64)
+        # Running post-trade equity. The per-step re-rounding mirrors the
+        # visual engine (kills float drift), so it stays a sequential scan —
+        # but we feed it from a Python list (one ``.tolist()``) instead of
+        # ``float(np_scalar)`` per iteration.
+        pnls_py = r_pnls[:trade_count].tolist()
+        post_trade_eq = [0.0] * trade_count
         _running_eq = float(initial_equity)
         for _ti in range(trade_count):
-            _running_eq = _round_to_step(_running_eq + float(r_pnls[_ti]), 0.01)
+            _running_eq = _round_to_step(_running_eq + pnls_py[_ti], 0.01)
             post_trade_eq[_ti] = _running_eq
         t0 = time.perf_counter()
         if materialize_trades:
-            for ti in range(trade_count):
-                e_idx = int(r_entry_indices[ti])
-                x_idx = int(r_exit_indices[ti])
-                d = "long" if r_directions[ti] == 1 else "short"
-                sl_dist = (
-                    abs(r_entry_prices[ti] - r_initial_sls[ti])
-                    if r_initial_sls[ti] > 0
-                    else 0.0
-                )
-                rr = (float(r_pnl_pts[ti]) / sl_dist) if sl_dist > 0 else None
-                try:
-                    entry_ts = pd.Timestamp(times[e_idx])
-                    exit_ts = pd.Timestamp(times[x_idx])
-                    dur = max(0, int((exit_ts - entry_ts).total_seconds() / 60))
-                except (ValueError, TypeError):
-                    dur = max(0, x_idx - e_idx)
-                dd_tracker.update(float(post_trade_eq[ti]))
-                vol = float(r_volumes[ti])
+            # --- Vectorised field prep (one pass each, NumPy/C speed) -------
+            # The previous hot loop spent ~99% of a multi-second 5-year run on
+            # per-trade ``pd.Timestamp``/``pd.to_datetime`` round-trips and
+            # ``float(np_scalar)`` casts. Hoist all of that out of the loop:
+            #   * slice the result arrays once and ``.tolist()`` them so the
+            #     loop reads native Python scalars (no per-element cast),
+            #   * derive datetime64 / ISO strings / durations with vectorised
+            #     NumPy ops — bit-for-bit identical to the old per-trade path.
+            tc = trade_count
+            e_idx_arr = r_entry_indices[:tc].astype(np.int64)
+            x_idx_arr = r_exit_indices[:tc].astype(np.int64)
+            et_raw = times[e_idx_arr]
+            xt_raw = times[x_idx_arr]
+            # ``entry_time`` keeps the raw element string — ``arr.astype(str)``
+            # is element-for-element identical to the legacy ``str(times[i])``
+            # for any dtype (datetime64 → ISO, int64 → integer string).
+            entry_str_list = et_raw.astype(str).tolist()
+            exit_str_list = xt_raw.astype(str).tolist()
+            # Normalise to datetime64[ns] for duration + the cached np time,
+            # mirroring the legacy ``pd.Timestamp`` / ``pd.to_datetime`` path so
+            # both int64-epoch and datetime64 time arrays behave identically.
+            et_ns = pd.to_datetime(et_raw).values
+            xt_ns = pd.to_datetime(xt_raw).values
+            entry_np_list = list(et_ns)
+            exit_np_list = list(xt_ns)
+            dur_arr = ((xt_ns - et_ns) / np.timedelta64(1, "m")).astype(np.int64)
+            np.clip(dur_arr, 0, None, out=dur_arr)
+            dur_list = dur_arr.tolist()
+            e_idx_list = e_idx_arr.tolist()
+            x_idx_list = x_idx_arr.tolist()
+            entry_prices = r_entry_prices[:tc].tolist()
+            exit_prices = r_exit_prices[:tc].tolist()
+            pnl_pts_py = r_pnl_pts[:tc].tolist()
+            directions_py = r_directions[:tc].tolist()
+            exit_reasons_py = r_exit_reasons[:tc].tolist()
+            volumes_py = r_volumes[:tc].tolist()
+            maes_py = r_maes[:tc].tolist()
+            mfes_py = r_mfes[:tc].tolist()
+            initial_sls_py = r_initial_sls[:tc].tolist()
+            for ti in range(tc):
+                init_sl = initial_sls_py[ti]
+                sl_dist = abs(entry_prices[ti] - init_sl) if init_sl > 0 else 0.0
+                rr = (pnl_pts_py[ti] / sl_dist) if sl_dist > 0 else None
+                dd_tracker.update(post_trade_eq[ti])
+                vol = volumes_py[ti]
+                mae_v = maes_py[ti]
+                mfe_v = mfes_py[ti]
                 trades.append(
                     Trade(
                         id=ti + 1,
-                        direction=d,
-                        entry_price=float(r_entry_prices[ti]),
-                        exit_price=float(r_exit_prices[ti]),
-                        pnl=float(r_pnls[ti]),
-                        pnl_points=float(r_pnl_pts[ti]),
-                        entry_index=e_idx,
-                        exit_index=x_idx,
-                        entry_time=str(times[e_idx]),
-                        exit_time=str(times[x_idx]),
+                        direction="long" if directions_py[ti] == 1 else "short",
+                        entry_price=entry_prices[ti],
+                        exit_price=exit_prices[ti],
+                        pnl=pnls_py[ti],
+                        pnl_points=pnl_pts_py[ti],
+                        entry_index=e_idx_list[ti],
+                        exit_index=x_idx_list[ti],
+                        entry_time=entry_str_list[ti],
+                        exit_time=exit_str_list[ti],
                         volume=vol,
-                        duration_minutes=dur,
-                        exit_reason=_REASON_MAP.get(int(r_exit_reasons[ti]), "MANUAL"),
-                        mae=float(r_maes[ti]),
-                        mfe=float(r_mfes[ti]),
-                        session=get_session(times[e_idx], asset=asset),
-                        initial_sl=float(r_initial_sls[ti]),
+                        duration_minutes=dur_list[ti],
+                        exit_reason=_REASON_MAP.get(exit_reasons_py[ti], "MANUAL"),
+                        mae=mae_v,
+                        mfe=mfe_v,
+                        session=get_session(et_raw[ti], asset=asset),
+                        initial_sl=init_sl,
                         rr=rr,
-                        mae_dollars=float(r_maes[ti]) * vol * point_value,
-                        mfe_dollars=float(r_mfes[ti]) * vol * point_value,
+                        mae_dollars=mae_v * vol * point_value,
+                        mfe_dollars=mfe_v * vol * point_value,
                         commission=commission * vol,
                         spread_cost=0.0,
                         slippage_cost=_round_to_step(
                             slippage_cost_per_trade_val * vol, 0.01
                         ),
+                        entry_time_np=entry_np_list[ti],
+                        exit_time_np=exit_np_list[ti],
                     )
                 )
         else:
             for ti in range(trade_count):
-                dd_tracker.update(float(post_trade_eq[ti]))
+                dd_tracker.update(post_trade_eq[ti])
         t_trade_materialize = time.perf_counter() - t0
         t0 = time.perf_counter()
         final_eq = float(equity_curve[-1])
