@@ -17,7 +17,6 @@ from PySide6.QtGui import QColor, QKeySequence, QPainterPath, QPainterPathStroke
 from PySide6.QtWidgets import QColorDialog, QGraphicsPathItem, QInputDialog
 
 from gui.persistence import drawings_persist
-from gui.chart_tab.items import FilledRectROI
 
 logger = logging.getLogger("StrategyTester.drawing_controller")
 
@@ -506,7 +505,10 @@ class DrawingController(QObject):
                         rt_ts = self._cached_rt_ts
                     else:
                         try:
-                            rt_ts = pd.to_datetime(rt).astype(np.int64) / 10**9
+                            dt_idx = pd.to_datetime(rt)
+                            if dt_idx.tz is not None:
+                                dt_idx = dt_idx.tz_convert('UTC').tz_localize(None)
+                            rt_ts = dt_idx.astype('datetime64[s]').astype(np.int64).to_numpy()
                         except Exception:
                             rt_ts = np.array([pd.to_datetime(x).timestamp() for x in rt])
                         self._cached_rt = rt
@@ -536,7 +538,10 @@ class DrawingController(QObject):
                 rt_ts = self._cached_rt_ts
             else:
                 try:
-                    rt_ts = pd.to_datetime(rt).astype(np.int64) / 10**9
+                    dt_idx = pd.to_datetime(rt)
+                    if dt_idx.tz is not None:
+                        dt_idx = dt_idx.tz_convert('UTC').tz_localize(None)
+                    rt_ts = dt_idx.astype('datetime64[s]').astype(np.int64).to_numpy()
                 except Exception:
                     rt_ts = np.array([pd.to_datetime(x).timestamp() for x in rt])
                 self._cached_rt = rt
@@ -874,6 +879,7 @@ class DrawingController(QObject):
             self._attach_context_menu(it, d, rt)
 
         elif dtype == "rect":
+            from gui.chart_tab.items import FilledRectROI
             i1 = self._time_to_idx(d["t1"], rt)
             i2 = self._time_to_idx(d["t2"], rt)
             mnx, mxx = min(i1, i2), max(i1, i2)
@@ -1045,7 +1051,7 @@ class DrawingController(QObject):
             paste_act = menu.addAction("📥 Paste (Ctrl+V)")
 
         menu.addSeparator()
-        del_act = menu.addAction("🗑 Delete (Delete)")
+        del_act = menu.addAction("🗑 Delete (Del)")
         color_act = menu.addAction("🎨 Change Color...")
 
         # Submenu for Z-Order in the end of the list
