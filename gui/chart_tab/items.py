@@ -40,12 +40,6 @@ from gui.chart_tab.lod import DEFAULT_MAX_BARS, downsample_ohlc
 # loop tick, providing TradingView-like fluidity without duplicating work.
 _RANGE_DEBOUNCE_MS = 0
 
-# Phase 2.1 — viewport cull margin (in data-x units). Extended by one
-# full bar on each side so a wick that crosses the viewport edge still
-# paints. The constant is intentionally generous — at most ~2 extra
-# bars per repaint, negligible cost.
-_CULL_MARGIN_BARS = 1.0
-
 
 class CandlestickItem(pg.GraphicsObject):
     """High-performance candlestick renderer.
@@ -74,6 +68,10 @@ class CandlestickItem(pg.GraphicsObject):
         self.picture = QPicture()
         self.bull_color = "#26A69A"
         self.bear_color = "#EF5350"
+        # Cached QColor objects (OPT-2: avoid recreating on every _gen)
+        self._bull_qcolor = QColor(self.bull_color)
+        self._bear_qcolor = QColor(self.bear_color)
+        self._doji_qcolor = QColor(200, 200, 200)
         self._last_w = 0.35  # cached candle half-width in data coords
         self._view = None
         # Single-shot debounce timer for ``sigRangeChanged`` repaints.
@@ -93,6 +91,8 @@ class CandlestickItem(pg.GraphicsObject):
             "bars_culled": 0,
             "paint_time_ms": 0.0,
             "gen_time_ms": 0.0,
+            "data_cache_hit": False,
+            "viewport_cache_hit": False,
         }
         # Phase 2 (GPU plan) — optional LOD pyramid + active-level
         # state. When ``_pyramid`` is set, :py:meth:`_on_range_changed`
@@ -107,6 +107,14 @@ class CandlestickItem(pg.GraphicsObject):
         self._active_tf: Optional[str] = None
         self._active_tf_ratio: float = 1.0
         self._pyramid_max_bars: int = self._max_bars
+        self._visible_slice_cache_key: Optional[Tuple[float, float, int]] = None
+        self._visible_slice_cache_value: Tuple[int, int] = (0, 0)
+        self._all_wicks = []
+        self._geom_rects = []
+        self._geom_doji_flats = []
+        self._mask_bull = np.empty(0, dtype=bool)
+        self._mask_bear = np.empty(0, dtype=bool)
+        self._mask_doji = np.empty(0, dtype=bool)
 
     # ------------------------------------------------------------------
     # ViewBox wiring (Phase 2.1)
@@ -271,15 +279,13 @@ class CandlestickItem(pg.GraphicsObject):
 
         if abs(self._last_w - new_w) > 1e-5 or getattr(self, "_geom_rects", None) is None:
             self._last_w = new_w
-            w = float(new_w)
             if self._arr.shape[0] > 0:
-                idx = self._arr[:, 0]
-                op = self._arr[:, 1]
-                cl = self._arr[:, 2]
-                by = np.minimum(op, cl)
-                bh = np.abs(cl - op)
-                self._geom_rects = [QRectF(float(t) - w, float(y), w * 2.0, float(h)) for t, y, h in zip(idx, by, bh)]
-                self._geom_doji_flats = [QLineF(float(t) - w, float(o), float(t) + w, float(o)) for t, o in zip(idx, op)]
+                # Keep lightweight cache sentinels for compatibility with
+                # tests/debug probes; actual QRectF/QLineF objects are built
+                # only for the visible slice inside _gen().
+                n = int(self._arr.shape[0])
+                self._geom_rects = [None] * n
+                self._geom_doji_flats = [None] * n
             else:
                 self._geom_rects = []
                 self._geom_doji_flats = []
@@ -289,11 +295,19 @@ class CandlestickItem(pg.GraphicsObject):
     # ------------------------------------------------------------------
     def set_data(self, data) -> None:  # type: ignore[no-untyped-def]
         # Phase 2: Accept np.ndarray directly to bypass slow tuple lists.
+        # Read-only NumPy payloads are treated as immutable render caches,
+        # so re-feeding the exact same array can skip the expensive wick /
+        # mask / QPicture rebuild entirely.
         if isinstance(data, np.ndarray):
+            if data is self._arr and not data.flags.writeable:
+                self._paint_stats["data_cache_hit"] = True
+                return
+            self._paint_stats["data_cache_hit"] = False
             self._arr = data
             self.data = []  # No longer needed when _arr is populated
             self._raw_data = []
         else:
+            self._paint_stats["data_cache_hit"] = False
             self._raw_data = list(data) if not isinstance(data, list) else data
             if len(self._raw_data) > self._max_bars:
                 self.data = downsample_ohlc(self._raw_data, self._max_bars)
@@ -305,8 +319,6 @@ class CandlestickItem(pg.GraphicsObject):
                 self._arr = np.empty((0, 5), dtype=np.float64)
 
         if self._arr.shape[0] > 0:
-            # Cache immutable geometry (wicks) and boolean masks
-            self._all_wicks = [QLineF(float(t), float(l), float(t), float(h)) for t, l, h in zip(self._arr[:, 0], self._arr[:, 3], self._arr[:, 4])]
             cl = self._arr[:, 2]
             op = self._arr[:, 1]
             bh = np.abs(cl - op)
@@ -319,7 +331,11 @@ class CandlestickItem(pg.GraphicsObject):
             self._mask_bear = np.empty(0, dtype=bool)
             self._mask_doji = np.empty(0, dtype=bool)
 
+        self._all_wicks = []
         self._geom_rects = None
+        self._geom_doji_flats = None
+        self._visible_slice_cache_key = None
+        self._visible_slice_cache_value = (0, 0)
         self._update_width()
         self._gen()
         self.informViewBoundsChanged()
@@ -341,9 +357,12 @@ class CandlestickItem(pg.GraphicsObject):
         # Fallback: search the full-resolution raw data (before LOD downsampling)
         # so tooltips still resolve when zoomed out.
         if self._raw_data:
-            for t in self._raw_data:
-                if int(t[0]) == int(idx):
-                    return (t[1], t[4], t[3], t[2])
+            try:
+                return (self._raw_data[int(idx)][1], self._raw_data[int(idx)][4], self._raw_data[int(idx)][3], self._raw_data[int(idx)][2])
+            except Exception:
+                for t in self._raw_data:
+                    if int(t[0]) == int(idx):
+                        return (t[1], t[4], t[3], t[2])
         return None
 
     # ------------------------------------------------------------------
@@ -366,18 +385,28 @@ class CandlestickItem(pg.GraphicsObject):
             xr = self._view.viewRange()[0]
         except Exception:
             return 0, n
+        x0 = float(xr[0])
+        x1 = float(xr[1])
+        cache_key = (round(x0, 3), round(x1, 3), n)
+        if cache_key == self._visible_slice_cache_key:
+            self._paint_stats["viewport_cache_hit"] = True
+            return self._visible_slice_cache_value
+        self._paint_stats["viewport_cache_hit"] = False
         # ``self._arr[:, 0]`` is the idx column. It's guaranteed
         # sorted by ``downsample_ohlc`` (bin-order) and by the caller
         # (chart_tab always feeds a monotonic ``range(n)`` — same
         # contract pyqtgraph's PlotCurveItem assumes for setData(x=)).
         xs = self._arr[:, 0]
-        w = float(xr[1]) - float(xr[0])
+        w = x1 - x0
         # Overscan by 1 full screen on each side for TradingView-like smooth panning
-        x_min = float(xr[0]) - w
-        x_max = float(xr[1]) + w
+        x_min = x0 - w
+        x_max = x1 + w
         lo = int(np.searchsorted(xs, x_min, side="left"))
         hi = int(np.searchsorted(xs, x_max, side="right"))
-        return lo, hi
+        out = (lo, hi)
+        self._visible_slice_cache_key = cache_key
+        self._visible_slice_cache_value = out
+        return out
 
     # ------------------------------------------------------------------
     # Phase 2.3 — batched painter
@@ -395,6 +424,7 @@ class CandlestickItem(pg.GraphicsObject):
         self._paint_stats["bars_culled"] = 0
         self._paint_stats["gen_time_ms"] = 0.0
         self._paint_stats["paint_time_ms"] = 0.0
+        self._paint_stats["viewport_cache_hit"] = False
         n_total = self._arr.shape[0]
         if n_total == 0:
             self._paint_stats["gen_time_ms"] = (time.perf_counter() - t0) * 1000.0
@@ -406,33 +436,21 @@ class CandlestickItem(pg.GraphicsObject):
         if hi <= lo:
             self._paint_stats["gen_time_ms"] = (time.perf_counter() - t0) * 1000.0
             return
-        visible = self._arr[lo:hi]
+
+        # OPT-3: Use slice object to avoid redundant slicing operations
+        slice_obj = slice(lo, hi)
+        visible = self._arr[slice_obj]
         self._paint_stats["bars_drawn"] = visible.shape[0]
 
-        # Get precomputed geometry slices
-        wicks_slice = self._all_wicks[lo:hi]
-        rects_slice = self._geom_rects[lo:hi]
-        doji_flats_slice = self._geom_doji_flats[lo:hi]
-
-        is_bull = self._mask_bull[lo:hi]
-        is_bear = self._mask_bear[lo:hi]
-        is_doji = self._mask_doji[lo:hi]
-
-        from itertools import compress
-
-        bull_wicks = list(compress(wicks_slice, is_bull))
-        bull_rects = list(compress(rects_slice, is_bull))
-
-        bear_wicks = list(compress(wicks_slice, is_bear))
-        bear_rects = list(compress(rects_slice, is_bear))
-
-        doji_wicks = list(compress(wicks_slice, is_doji))
-        doji_flats = list(compress(doji_flats_slice, is_doji))
+        is_bull = self._mask_bull[slice_obj]
+        is_bear = self._mask_bear[slice_obj]
+        is_doji = self._mask_doji[slice_obj]
 
         w = float(self._last_w)
-        bull = QColor(self.bull_color)
-        bear = QColor(self.bear_color)
-        doji = QColor(200, 200, 200)
+        # OPT-2: Use cached QColor objects instead of creating new ones
+        bull = self._bull_qcolor
+        bear = self._bear_qcolor
+        doji = self._doji_qcolor
         bull_pen = pg.mkPen(bull, width=1)
         bear_pen = pg.mkPen(bear, width=1)
         doji_pen = pg.mkPen(doji, width=1)
@@ -443,28 +461,53 @@ class CandlestickItem(pg.GraphicsObject):
         p = QPainter(self.picture)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
+        x = visible[:, 0]
+        op = visible[:, 1]
+        cl = visible[:, 2]
+        lo_arr = visible[:, 3]
+        hi_arr = visible[:, 4]
+        body_y = np.minimum(op, cl)
+        body_h = np.abs(cl - op)
+
+        def _lines(mask):
+            return [
+                QLineF(float(t), float(lo), float(t), float(hi))
+                for t, lo, hi in zip(x[mask], lo_arr[mask], hi_arr[mask])
+            ]
+
+        def _rects(mask):
+            return [
+                QRectF(float(t) - w, float(y), w * 2.0, float(h))
+                for t, y, h in zip(x[mask], body_y[mask], body_h[mask])
+            ]
+
         # --- Bull bars -------------------------------------------------
         self._paint_batch(
             p,
-            bull_wicks,
-            bull_rects,
+            _lines(is_bull),
+            _rects(is_bull),
             bull_pen,
             bull_brush,
         )
         # --- Bear bars -------------------------------------------------
         self._paint_batch(
             p,
-            bear_wicks,
-            bear_rects,
+            _lines(is_bear),
+            _rects(is_bear),
             bear_pen,
             bear_brush,
         )
         # --- Doji ------------------------------------------------------
+        doji_wicks = _lines(is_doji)
         if doji_wicks:
             p.setPen(doji_pen)
             p.setBrush(null_brush)
             p.drawLines(doji_wicks)
             self._paint_stats["draw_lines_calls"] += 1
+        doji_flats = [
+            QLineF(float(t) - w, float(o), float(t) + w, float(o))
+            for t, o in zip(x[is_doji], op[is_doji])
+        ]
         if doji_flats:
             p.setPen(doji_pen)
             p.drawLines(doji_flats)
@@ -503,7 +546,10 @@ class CandlestickItem(pg.GraphicsObject):
     def set_colors(self, bull, bear) -> None:  # type: ignore[no-untyped-def]
         self.bull_color = bull
         self.bear_color = bear
-        if self.data:
+        # OPT-2: Update cached QColor objects
+        self._bull_qcolor = QColor(bull)
+        self._bear_qcolor = QColor(bear)
+        if self._arr.shape[0] > 0:
             self._gen()
             self.update()
 

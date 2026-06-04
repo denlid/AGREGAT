@@ -22,6 +22,7 @@ import pytest
 from engine.strategy.context import Strategy, has_vectorized_signals
 from engine.execution.execution import ExecutionModel
 from engine.models.models import AssetConfig
+from engine.execution.prepared_dataset import prepare_vectorized_dataset
 from engine.execution.vectorized_engine import run_vectorized
 
 
@@ -59,7 +60,8 @@ class FixedLongOnce(Strategy):
 
     def vectorized_signals(self, df):
         sig = np.zeros(self._n, dtype=int)
-        sig[self._at] = +1
+        if self._n:
+            sig[self._at] = +1
         return pd.DataFrame(
             {
                 "signal": sig,
@@ -79,7 +81,8 @@ class FixedShortOnce(Strategy):
 
     def vectorized_signals(self, df):
         sig = np.zeros(self._n, dtype=int)
-        sig[self._at] = -1
+        if self._n:
+            sig[self._at] = -1
         return pd.DataFrame(
             {
                 "signal": sig,
@@ -117,7 +120,6 @@ def test_run_refuses_strategy_without_vectorized_signals():
 
 
 def test_long_tp_hit_same_bar_optimistic_profile():
-    # 3 bars; entry at bar 0, TP at bar 1 (high jumps to entry+5 with TP=4).
     rows = [
         ("2024-01-02 10:00", 100, 100, 100, 100),
         ("2024-01-02 10:01", 100, 105, 100, 102),
@@ -136,17 +138,15 @@ def test_long_tp_hit_same_bar_optimistic_profile():
     t = res.trades[0]
     assert t.direction == "long"
     assert t.exit_reason == "TP"
-    # TP price = entry (100) + 4 ticks = 104. Optimistic ⇒ no spread, fill = close[0] = 100.
     assert t.entry_price == pytest.approx(100.0)
     assert t.exit_price == pytest.approx(104.0)
     assert t.pnl == pytest.approx(4.0 * t.volume)
 
 
 def test_long_sl_takes_precedence_on_same_bar_collision():
-    # Bar 1 sweeps both SL=98 and TP=104 — engine should resolve worst-case (SL).
     rows = [
         ("2024-01-02 10:00", 100, 100, 100, 100),
-        ("2024-01-02 10:01", 100, 105, 97, 102),  # touches both SL and TP
+        ("2024-01-02 10:01", 100, 105, 97, 102),
         ("2024-01-02 10:02", 102, 103, 101, 101),
     ]
     df = _df(rows)
@@ -162,12 +162,9 @@ def test_long_sl_takes_precedence_on_same_bar_collision():
 
 
 def test_short_sl_uses_ask_side_with_spread():
-    # spread=2, so Ask_high = High + 2. SL = entry + 2*tick = 100 + 2 = 102 (relative
-    # to Bid-side fill). On bar 1, High=101, Ask_high=103 ⇒ SL trips even though
-    # raw High alone (=101) would not.
     rows = [
         ("2024-01-02 10:00", 100, 100, 100, 100),
-        ("2024-01-02 10:01", 100, 101, 100, 100),  # Ask_high=103 hits SL
+        ("2024-01-02 10:01", 100, 101, 100, 100),
         ("2024-01-02 10:02", 100, 100, 100, 100),
     ]
     df = _df(rows)
@@ -184,7 +181,6 @@ def test_short_sl_uses_ask_side_with_spread():
 
 
 def test_eod_close_when_position_open_at_last_bar():
-    # No SL/TP on the path; engine should EOD-close at last close.
     rows = [
         ("2024-01-02 10:00", 100, 100, 100, 100),
         ("2024-01-02 10:01", 100, 101, 99, 100),
@@ -204,7 +200,6 @@ def test_eod_close_when_position_open_at_last_bar():
 
 
 def test_commission_reduces_pnl_realistic_profile():
-    # Same setup as TP test, but with commission=5 per lot — pnl should fall by 5 * volume.
     rows = [
         ("2024-01-02 10:00", 100, 100, 100, 100),
         ("2024-01-02 10:01", 100, 105, 100, 102),
@@ -220,7 +215,6 @@ def test_commission_reduces_pnl_realistic_profile():
     )
     assert len(res.trades) == 1
     t = res.trades[0]
-    # Gross = 4 ticks * volume; commission = 5 * volume.
     assert t.commission == pytest.approx(5.0 * t.volume)
     assert t.pnl == pytest.approx(4.0 * t.volume - 5.0 * t.volume)
 
@@ -236,15 +230,18 @@ def test_returns_empty_result_for_empty_dataframe():
     assert res.trades == []
     assert res.equity_curve.tolist() == [42_000.0]
     assert res.peak_drawdown_pct == 0.0
+    assert res.perf["prepared_reused"] is False
+    assert res.perf["materialize_trades"] is False
+    assert res.perf["signal_memory_mb"] == 0.0
+    assert res.perf["strategy_name"] == "FixedLongOnce"
 
 
 def test_signal_after_position_is_open_is_ignored():
-    # Two consecutive long signals; only the first should open a trade.
     n = 4
     rows = [
         ("2024-01-02 10:00", 100, 100, 100, 100),
         ("2024-01-02 10:01", 100, 100, 100, 100),
-        ("2024-01-02 10:02", 100, 105, 100, 102),  # TP for first trade
+        ("2024-01-02 10:02", 100, 105, 100, 102),
         ("2024-01-02 10:03", 100, 100, 100, 100),
     ]
     df = _df(rows)
@@ -253,7 +250,7 @@ def test_signal_after_position_is_open_is_ignored():
         def vectorized_signals(self, df_):
             sig = np.zeros(n, dtype=int)
             sig[0] = +1
-            sig[1] = +1  # ignored — position still open
+            sig[1] = +1
             return pd.DataFrame(
                 {
                     "signal": sig,
@@ -270,3 +267,52 @@ def test_signal_after_position_is_open_is_ignored():
         execution_model=ExecutionModel("Optimistic"),
     )
     assert len(res.trades) == 1
+
+
+def test_summary_only_disables_trade_materialization_and_can_skip_equity_curve():
+    rows = [
+        ("2024-01-02 10:00", 100, 100, 100, 100),
+        ("2024-01-02 10:01", 100, 105, 100, 102),
+        ("2024-01-02 10:02", 102, 103, 101, 101),
+    ]
+    df = _df(rows)
+    res = run_vectorized(
+        df,
+        FixedLongOnce(at=0, sl_pts=2.0, tp_pts=4.0, n_bars=len(rows)),
+        asset=_asset(),
+        execution_model=ExecutionModel("Optimistic"),
+        summary_only=True,
+        compact_result=True,
+        include_equity_curve=False,
+    )
+    assert res.trades == []
+    assert res.summary["n_trades"] == 1
+    assert res.equity_curve.tolist() == [100_000.0]
+    assert res.perf["summary_only"] is True
+    assert res.perf["materialize_trades"] is False
+    assert res.perf["compact_result"] is True
+    assert res.perf["include_equity_curve"] is False
+    assert res.perf["signal_memory_mb"] >= 0.0
+
+
+def test_prepared_dataset_reuse_is_reported_in_perf():
+    rows = [
+        ("2024-01-02 10:00", 100, 100, 100, 100),
+        ("2024-01-02 10:01", 100, 105, 100, 102),
+        ("2024-01-02 10:02", 102, 103, 101, 101),
+    ]
+    df = _df(rows)
+    asset = _asset()
+    em = ExecutionModel("Optimistic")
+    prepared = prepare_vectorized_dataset(df, asset=asset, execution_model=em)
+    res = run_vectorized(
+        df,
+        FixedLongOnce(at=0, sl_pts=2.0, tp_pts=4.0, n_bars=len(rows)),
+        asset=asset,
+        execution_model=em,
+        prepared=prepared,
+        materialize_trades=False,
+    )
+    assert res.perf["prepared_reused"] is True
+    assert res.perf["materialize_trades"] is False
+    assert res.perf["strategy_name"] == "FixedLongOnce"

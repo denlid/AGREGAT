@@ -91,6 +91,9 @@ class TestParquetFeatherLoaders:
         )
 
     def test_load_parquet_round_trip(self, tmp_path: Path) -> None:
+        # Parquet round-trip needs pyarrow to even write the fixture; skip
+        # cleanly (rather than hard-fail) on a minimal env that lacks it.
+        pytest.importorskip("pyarrow")
         from engine.data.data_loader import DataLoader
 
         df = self._make_ohlc_df()
@@ -102,6 +105,8 @@ class TestParquetFeatherLoaders:
         assert set(loaded.columns) >= {"time", "open", "high", "low", "close", "volume"}
 
     def test_load_feather_round_trip(self, tmp_path: Path) -> None:
+        # Feather (Arrow IPC) is a pyarrow-backed format; skip if absent.
+        pytest.importorskip("pyarrow")
         from engine.data.data_loader import DataLoader
 
         df = self._make_ohlc_df()

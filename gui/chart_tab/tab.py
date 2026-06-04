@@ -330,7 +330,7 @@ class ChartTab(QWidget):
         # State
         self.current_tool = "None"  # kept as proxy for external callers; drawing_ctrl is authoritative
         self._last_hovered_drawing = None  # track last hovered drawing for RMB context menu
-        self.strategy_graphic_items = []
+        self.strategy_graphic_items = {}
         self.trade_graphic_items = []
         self.res_times = np.array([])
         self._need_autorange = True
@@ -346,7 +346,6 @@ class ChartTab(QWidget):
         self._selection_overlay = None
         self._selection_mask_items = []
         self._selection_rect_data = None
-
         self._redraw_pending = False
         self._redraw_timer = QTimer()
         self._redraw_timer.setSingleShot(True)
@@ -359,9 +358,20 @@ class ChartTab(QWidget):
         self.apply_chart_theme()
 
     def _fit_all(self):
-        """Reset zoom and fit all data."""
-        self.plot_widget.autoRange()
+        """Reset zoom and fit all data (X axis to data bounds, ignoring drawing items)."""
         vb = self.plot_widget.getViewBox()
+        n = len(self.res_times)
+        if n == 0:
+            # Fallback to autoRange when no data
+            self.plot_widget.autoRange()
+            vb.enableAutoRange(x=False, y=False)
+        else:
+            # Fit X to data bounds only — avoids being influenced by
+            # drawing items that may have out-of-range coordinates.
+            x_pad = max(5.0, n * 0.02)  # 2% padding, at least 5 bars
+            vb.setRange(xRange=[-x_pad, n - 1 + x_pad], padding=0)
+            if self.autofit_y and self._cached_res_df is not None:
+                self._autofit_y(vb, self._cached_res_df, n)
         vb.enableAutoRange(x=False, y=False)
         xr = vb.viewRange()[0]
         self._tracked_xrange = list(xr)
@@ -858,10 +868,10 @@ class ChartTab(QWidget):
 
     def _clear_strategy_drawings(self):
         """Clear all strategy-generated drawings from engine."""
-        for i in self.strategy_graphic_items:
-            self.plot_widget.removeItem(i)
-            if hasattr(i, "deleteLater"):
-                i.deleteLater()
+        for item in self.strategy_graphic_items.values():
+            self.plot_widget.removeItem(item)
+            if hasattr(item, "deleteLater"):
+                item.deleteLater()
         self.strategy_graphic_items.clear()
         self.engine.drawings.clear()
         logger.info("🧹 Strategy drawings cleared")
@@ -995,6 +1005,7 @@ class ChartTab(QWidget):
         t_total = _time.perf_counter()
 
         if getattr(self, "_is_roi_dragging", False) or self.drawing_ctrl.is_roi_dragging:
+            self._last_perf_stats = {"skip_reason": "roi_dragging"}
             return
 
         if self.engine.df is None:
@@ -1390,7 +1401,7 @@ class ChartTab(QWidget):
     # Strategy drawings
     # ==============================
     def _draw_strategy(self, rt):
-        for item in self.strategy_graphic_items:
+        for item in self.strategy_graphic_items.values():
             self.plot_widget.removeItem(item)
         self.strategy_graphic_items.clear()
         hidden = {tag for tag, act in self.layer_cbs.items() if not act.isChecked()}

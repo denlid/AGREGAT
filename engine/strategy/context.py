@@ -139,6 +139,47 @@ class Strategy:
     def on_candle(self, ctx: "Context") -> None:
         pass
 
+    def build_vectorized_features(self, df: Any, prepared: Any = None) -> Any:
+        """Optional precompute hook for optimizer-style repeated runs.
+
+        Strategies may override this to split heavy feature construction
+        from cheap signal generation. The default implementation returns
+        ``None``, signalling that :meth:`vectorized_signals` should be
+        used directly.
+        """
+        return None
+
+    def feature_params(self) -> Any:
+        """Return the subset of params that influence built features.
+
+        Used by the engine-side feature cache (Roadmap v2 / S1.5) to decide
+        when cached features can be reused across runs. Features depend ONLY
+        on these params — varying any other param (e.g. SL/TP thresholds)
+        does not invalidate the cache.
+
+        The default returns ``None``, which disables feature caching for the
+        strategy (every run rebuilds features). Strategies implementing the
+        feature-cache contract should override this to return a hashable tuple
+        of the indicator params, e.g.::
+
+            def feature_params(self):
+                return (self.params["fast_ema"], self.params["slow_ema"])
+
+        Returning ``None`` is safe but forfeits the cross-run cache benefit.
+        """
+        return None
+
+    def vectorized_signals_from_features(self, features: Any, params: Any = None) -> Any:
+        """Optional signal-generation hook from a prepared feature bundle.
+
+        Strategies that override :meth:`build_vectorized_features` should
+        typically override this method as well.
+        """
+        raise NotImplementedError(
+            "Strategy.vectorized_signals_from_features is not implemented. "
+            "Override it when using build_vectorized_features()."
+        )
+
     def vectorized_signals(self, df: Any) -> Any:  # noqa: D401 — interface stub
         """Return a per-bar signal frame for the vectorised engine.
 

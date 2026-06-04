@@ -187,7 +187,9 @@ def test_export_report_uses_tearsheet_by_default(tmp_path):
     eng = _Eng(_make_trades(20))
     folder = export_report(eng, str(tmp_path))
     assert os.path.isdir(folder)
-    html = open(os.path.join(folder, "analytics.html")).read()
+    html = open(
+        os.path.join(folder, "analytics.html"), encoding="utf-8"
+    ).read()
     assert "Tear-Sheet" in html
     assert "Monthly Returns Heatmap" in html
 
@@ -195,7 +197,9 @@ def test_export_report_uses_tearsheet_by_default(tmp_path):
 def test_export_report_legacy_layout_when_tearsheet_disabled(tmp_path):
     eng = _Eng(_make_trades(20))
     folder = export_report(eng, str(tmp_path), tearsheet=False)
-    html = open(os.path.join(folder, "analytics.html")).read()
+    html = open(
+        os.path.join(folder, "analytics.html"), encoding="utf-8"
+    ).read()
     assert "AGREGAT Backtest Report" in html
     assert "Tear-Sheet" not in html
 

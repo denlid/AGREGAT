@@ -22,6 +22,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from engine.ai.dsl import parse, serialise
+from engine.ai.dsl.parser import _RESERVED_IDS
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "dsl" / "fixtures"
 
@@ -62,7 +63,13 @@ _id_chars = st.text(
 
 
 def _id_strategy():
-    return _id_chars.filter(lambda s: s[0].isalpha())
+    # Must start with a letter AND not collide with a DSL reserved word
+    # ({"id", "type", "on", "do", "when"}). The parser legitimately rejects
+    # reserved ids, so the synthetic-spec generator must avoid them — else
+    # it would build an *invalid* spec and falsely fail the round-trip.
+    return _id_chars.filter(
+        lambda s: s[0].isalpha() and s not in _RESERVED_IDS
+    )
 
 
 def _ema_or_sma_indicator(uid: str):

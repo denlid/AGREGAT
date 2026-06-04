@@ -187,13 +187,15 @@ def pack_candle_instances(
 
     n = arr.shape[0]
     res = np.empty((n, FLOATS_PER_INSTANCE), dtype=np.float32)
-    
-    # arr: (idx, open, close, low, high)
-    res[:, 0] = arr[:, 0].astype(np.float32, copy=False) # x
-    res[:, 1] = arr[:, 1].astype(np.float32, copy=False) # open
-    res[:, 2] = arr[:, 2].astype(np.float32, copy=False) # close
-    res[:, 3] = arr[:, 4].astype(np.float32, copy=False) # high
-    res[:, 4] = arr[:, 3].astype(np.float32, copy=False) # low
+
+    # ISSUE-2: More efficient array assignment using fancy indexing
+    # arr columns: [idx, open, close, low, high]
+    # res columns: [x, open, close, high, low, r, g, b]
+    res[:, 0] = arr[:, 0]  # x
+    res[:, 1] = arr[:, 1]  # open
+    res[:, 2] = arr[:, 2]  # close
+    res[:, 3] = arr[:, 4]  # high
+    res[:, 4] = arr[:, 3]  # low
 
     op = res[:, 1]
     cl = res[:, 2]
@@ -272,22 +274,11 @@ class GLCandlestickItem(CandlestickItem):
         is_gl = getattr(self.getViewWidget(), "useOpenGL", False)
         if not is_gl:
             super()._do_range_repaint()
-        
+
         if self._arr.shape[0] == 0:
             return
-            
+
         self._update_width()
-        
-        # With instancing, we can afford to keep the whole resident
-        # set on the GPU. We only rebuild if the width changes or
-        # if the underlying data array changed (handled by set_data).
-        last_w = getattr(self, "_last_gl_w", -1)
-        if self._last_w != last_w:
-            self._last_gl_w = self._last_w
-            # Width is a uniform, so we don't actually need to rebuild
-            # the instance buffer here, just trigger a repaint.
-            pass
-            
         self.update()
 
     def set_colors(self, bull: str, bear: str) -> None:  # type: ignore[override]
@@ -618,16 +609,24 @@ def make_candlestick_item(
       missing — we never crash here).
     * ``force=False`` — always return the legacy
       :class:`CandlestickItem`.
-    * ``force=None`` (default) — honour the ``AGREGAT_GL_CANDLES`` env
-      var. Off when unset so existing setups don't get an
-      unverified-on-this-box code path silently turned on.
+    * ``force=None`` (default) — delegate to the unified Phase 5 policy
+      :func:`gui.chart_tab.gpu_config.should_use_gl_candles`, so the factory
+      and the telemetry/adaptive layer never disagree. That policy honours
+      ``AGREGAT_GL_CANDLES`` when set and otherwise enables GL whenever the
+      OpenGL backend is available. This is an **opt-out** default: the paint
+      path falls back to the QPainter renderer on any GL failure (no context,
+      shader init failure, …), so "on when available" can only swap the fast
+      path in — it can never break rendering. Set ``AGREGAT_GL_CANDLES=0`` to
+      force the legacy software path.
 
     Tests inject ``force=`` to exercise both branches without
     monkey-patching ``os.environ``.
     """
     if force is None:
-        env_pref = _truthy_env(os.environ.get(_ENV_VAR))
-        want_gl = bool(env_pref) if env_pref is not None else False
+        # Local import keeps the module import order independent of gpu_config.
+        from gui.chart_tab.gpu_config import should_use_gl_candles
+
+        want_gl = should_use_gl_candles()
     else:
         want_gl = bool(force)
 
@@ -645,12 +644,10 @@ def make_candlestick_item(
 
 
 __all__ = [
-    "BODY_VERTS_PER_CANDLE",
-    "FLOATS_PER_VERTEX",
+    "FLOATS_PER_INSTANCE",
     "FRAGMENT_SHADER_SRC",
     "GLCandlestickItem",
     "VERTEX_SHADER_SRC",
-    "WICK_VERTS_PER_CANDLE",
     "is_gl_candle_available",
     "make_candlestick_item",
     "pack_candle_instances",

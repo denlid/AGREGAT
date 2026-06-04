@@ -68,6 +68,11 @@ class ComputeWorker(QObject):
         self._args = args
         self._kwargs = kwargs
         self._cancel = threading.Event()
+        # Set once the task leaves :pymeth:`_do_run` for any reason
+        # (success, error, or cancellation), so callers can block on
+        # :pymeth:`wait` for deterministic teardown — the QThreadPool /
+        # QRunnable execution model has no QThread.wait() of its own.
+        self._done = threading.Event()
         # Sprint 2.7 — every async op carries a unique trace_id that
         # the JSON formatter (engine.logging_config.JSONFormatter)
         # surfaces in every record emitted from this worker. Callers
@@ -85,6 +90,26 @@ class ComputeWorker(QObject):
     def is_cancelled(self) -> bool:
         return self._cancel.is_set()
 
+    def wait(self, timeout_ms: Optional[int] = None) -> bool:
+        """Block until the task has finished (success, error, or cancel).
+
+        Mirrors the ``QThread.wait()`` API the worker offered before it
+        moved to the QThreadPool model, so callers and tests can settle
+        the background task deterministically.
+
+        Parameters
+        ----------
+        timeout_ms:
+            Maximum time to wait, in milliseconds. ``None`` waits forever.
+
+        Returns
+        -------
+        bool
+            ``True`` if the task completed, ``False`` if the wait timed out.
+        """
+        timeout_s = None if timeout_ms is None else max(0.0, timeout_ms / 1000.0)
+        return self._done.wait(timeout_s)
+
     def start(self) -> None:
         class _Task(QRunnable):
             def __init__(self, worker: "ComputeWorker") -> None:
@@ -101,14 +126,18 @@ class ComputeWorker(QObject):
         # kwarg; otherwise call as-is.
         kwargs = dict(self._kwargs)
         try:
-            result = self._fn(*self._args, **kwargs)
-        except Exception as exc:  # pragma: no cover — defensive
-            self._log.exception("ComputeWorker callable raised")
-            self.error.emit(exc)
-            return
-        if self._cancel.is_set():
-            return
-        self.finished.emit(result)
+            try:
+                result = self._fn(*self._args, **kwargs)
+            except Exception as exc:  # pragma: no cover — defensive
+                self._log.exception("ComputeWorker callable raised")
+                self.error.emit(exc)
+                return
+            if self._cancel.is_set():
+                return
+            self.finished.emit(result)
+        finally:
+            # Always release waiters, no matter which path we left through.
+            self._done.set()
 
 
 class Spinner(QLabel):

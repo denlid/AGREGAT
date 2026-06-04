@@ -405,6 +405,20 @@ class DrawingController(QObject):
         self.load()
         self._mark_dirty()
 
+    def reset_for_new_data(self, symbol: str) -> None:
+        """Reset drawings for a new data load — clears all drawings
+        instead of loading old ones from disk, then updates the persist key."""
+        self._clear_items()
+        self.user_drawings.clear()
+        self._history.clear()
+        self._redo.clear()
+        self._dirty = False
+        self._last_rt = None
+        self._persist_key = symbol
+        drawings_persist.save(self.user_drawings, self._persist_key)
+        self.drawings_changed.emit()
+        logger.info("User drawings reset for new data symbol=%s", symbol)
+
     def set_tool(self, name: str) -> None:
         self.current_tool = name
         self.tool_changed.emit(name)

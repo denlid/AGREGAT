@@ -760,6 +760,31 @@ def test_get_dataframe_for_range_filters(qapp) -> None:
     assert sliced["time"].iloc[-1] == pd.Timestamp("2024-01-01 00:20")
 
 
+def test_get_dataframe_for_range_handles_inverted_bounds(qapp) -> None:
+    pager = DataPager(lambda fp: _synth_frame(60, start="2024-01-01"))
+    pager.set_tiles(
+        [
+            PagerTile(
+                tile_id="a",
+                filepath="a.csv",
+                time_min=pd.Timestamp("2024-01-01"),
+                time_max=pd.Timestamp("2024-01-31"),
+            )
+        ]
+    )
+    pager.ensure_visible(
+        pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-31")
+    )
+    assert _wait_for_pool()
+    sliced = pager.get_dataframe_for_range(
+        pd.Timestamp("2024-01-01 00:20"),
+        pd.Timestamp("2024-01-01 00:10"),
+    )
+    assert len(sliced) == 11
+    assert sliced["time"].iloc[0] == pd.Timestamp("2024-01-01 00:10")
+    assert sliced["time"].iloc[-1] == pd.Timestamp("2024-01-01 00:20")
+
+
 def test_get_dataframe_for_range_handles_empty(qapp) -> None:
     pager = DataPager(lambda fp: _synth_frame(5))
     assert pager.get_dataframe_for_range(
@@ -850,15 +875,14 @@ def test_make_pager_returns_none_when_env_off(qapp, monkeypatch) -> None:
 
 def test_make_pager_returns_pager_when_env_on(qapp, monkeypatch) -> None:
     monkeypatch.setenv("AGREGAT_DATA_PAGER", "1")
-    result = make_pager(
+    pager = make_pager(
         ["a.csv", "b.csv"],
         loader_fn=lambda fp: _synth_frame(3),
         max_resident=2,
     )
-    assert result is not None
-    pager, tiles = result
+    assert pager is not None
     assert isinstance(pager, DataPager)
-    assert {t.tile_id for t in tiles} == {"a.csv", "b.csv"}
+    assert {t.tile_id for t in pager.list_tiles()} == {"a.csv", "b.csv"}
     assert pager.max_resident == 2
     pager.shutdown()
 

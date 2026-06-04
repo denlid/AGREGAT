@@ -65,6 +65,36 @@ class _Empty(Strategy):
 
 
 class MainWindow(QMainWindow):
+    # Data formats the loader can ingest (see DataLoader.load_* dispatch).
+    # Kept lowercase; matching is case-insensitive.
+    _SUPPORTED_DROP_EXTS = (".csv", ".parquet", ".pq", ".feather", ".ipc")
+
+    @staticmethod
+    def _drop_first_supported_path(urls) -> "str | None":
+        """Return the path of the first *local* dropped file whose
+        extension the data loader supports, else ``None``.
+
+        Phase 2.5 (C3) drag-and-drop filtering. Pulled out as a pure,
+        Qt-free static helper so the selection logic is unit-testable
+        without a running event loop; the ``dropEvent`` handler delegates
+        here. Remote drops (``http://`` / ``ftp://`` — anything that is
+        not a local file) are ignored so a stray drag can never trigger a
+        network fetch.
+        """
+        for url in urls:
+            try:
+                if not url.isLocalFile():
+                    continue
+                path = url.toLocalFile()
+            except AttributeError:
+                continue
+            if not path:
+                continue
+            ext = os.path.splitext(path)[1].lower()
+            if ext in MainWindow._SUPPORTED_DROP_EXTS:
+                return path
+        return None
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("AGREGAT")

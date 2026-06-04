@@ -60,13 +60,26 @@ class ReplayController:
                 cache.invalidate()
         except Exception:
             pass
+        # Очищаем пользовательские рисунки при ресете
+        h.chart_tab.drawing_ctrl.clear_all()
+        # Очищаем стратегические рисунки (FVG, линии и т.д.)
+        for item in h.chart_tab.strategy_graphic_items.values():
+            h.chart_tab.plot_widget.removeItem(item)
+            if hasattr(item, "deleteLater"):
+                item.deleteLater()
+        h.chart_tab.strategy_graphic_items.clear()
+        h.engine.drawings.clear()
         h.trades_tab._clear()
         h.analytics_tab.refresh_all(force=True)
         h.stats_tab._recalc()
-        try:
-            h.quant_tab.refresh_all()
-        except Exception:
-            logger.exception("quant_tab.refresh_all failed on reset")
+        # Quant tab was removed/refactored from MainWindow tab wiring.
+        # Keep reset flow backward-compatible by only refreshing it when present.
+        quant_tab = getattr(h, "quant_tab", None)
+        if quant_tab is not None:
+            try:
+                quant_tab.refresh_all()
+            except Exception:
+                logger.exception("quant_tab.refresh_all failed on reset")
         h.progress.setValue(0)
         h.bar_replay._update_state()
 
@@ -136,24 +149,10 @@ class ReplayController:
             return
         t_step = _time.perf_counter() - t0
 
-        t0 = _time.perf_counter()
-        if eng.current_idx >= 0:
-            eng.step_completed.emit(
-                eng.current_idx,
-                eng.candle_at(eng.current_idx),
-            )
-        t_emit = _time.perf_counter() - t0
-
-        t0 = _time.perf_counter()
-        eng.update_stats()
-        t_stats = _time.perf_counter() - t0
-
         t_all = _time.perf_counter() - t_total
         logger.info(
             f"⏱ step_visual: calc={t_calc*1000:.1f}ms "
             f"step_n({steps})={t_step*1000:.1f}ms "
-            f"emit={t_emit*1000:.1f}ms "
-            f"stats={t_stats*1000:.1f}ms "
             f"TOTAL={t_all*1000:.1f}ms"
         )
 
@@ -166,10 +165,14 @@ class ReplayController:
         if tgt == h.engine.current_idx:
             return
         h.chart_tab._cache_key = None
-        h.chart_tab._cached_res_df = None
+        h.chart_tab._cached_snapshot = None
+        h.chart_tab._cached_chart_arrays_key = None
+        h.chart_tab._cached_chart_arrays = None
         if h.chart_tab_2 is not None and h.chart_tab_2.isVisible():
             h.chart_tab_2._cache_key = None
-            h.chart_tab_2._cached_res_df = None
+            h.chart_tab_2._cached_snapshot = None
+            h.chart_tab_2._cached_chart_arrays_key = None
+            h.chart_tab_2._cached_chart_arrays = None
         h.engine.reset()
         # Suppress autorange — we want to keep the user's zoom (_user_zoom_width)
         h.chart_tab._need_autorange = False

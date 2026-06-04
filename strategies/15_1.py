@@ -89,10 +89,10 @@ def _update_htf_structure(c):
                 if c.close_htf < strategy._htf_lows[-1][1]:
                     strategy._htf_trend = 'bearish'
                     strategy.log(f"HTF trend changed: BULLISH → BEARISH (MSS, close {c.close_htf:.2f} < low {strategy._htf_lows[-1][1]:.2f})")
-                    # Перекрашиваем все FVG в серый и очищаем список
+                    # Видаляємо всі старі FVG з графіка і очищаємо список
                     for fvg in strategy._fvg_list:
                         if 'drawing_id' in fvg and fvg['drawing_id']:
-                            strategy.update_drawing(fvg['drawing_id'], {'color': 'gray'})
+                            strategy.remove_drawing(fvg['drawing_id'])
                     strategy._fvg_list.clear()
             elif strategy._htf_trend == 'bearish':
                 # Break: close above last swing high (LH)
@@ -101,7 +101,7 @@ def _update_htf_structure(c):
                     strategy.log(f"HTF trend changed: BEARISH → BULLISH (MSS, close {c.close_htf:.2f} > high {strategy._htf_highs[-1][1]:.2f})")
                     for fvg in strategy._fvg_list:
                         if 'drawing_id' in fvg and fvg['drawing_id']:
-                            strategy.update_drawing(fvg['drawing_id'], {'color': 'gray'})
+                            strategy.remove_drawing(fvg['drawing_id'])
                     strategy._fvg_list.clear()
 
     if strategy._htf_trend != old_trend and strategy._htf_trend is None:
@@ -143,6 +143,11 @@ def _update_htf_structure(c):
         t_end = c.time_htf             # current candle time
         col = 'green' if fvg['dir'] == 'bull' else 'red'
         tag = f"fvg_{int(t_start)}_{int(t_end)}"
+        # Remove stale drawings for ALL inactive FVGs first
+        for old_fvg in strategy._fvg_list[:]:
+            if old_fvg is not fvg and old_fvg.get('drawing_id'):
+                strategy.remove_drawing(old_fvg['drawing_id'])
+                old_fvg['drawing_id'] = None
         fvg['drawing_id'] = tag
         strategy.draw_rect(t_start, fvg['bottom'], t_end, fvg['top'],
                             color=col, fill=True, opacity=0.3, tag=tag)
