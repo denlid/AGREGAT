@@ -253,7 +253,7 @@ class DataPager(QObject):
         self._loader_fn = loader_fn
         self._max_resident = int(max_resident)
         self._max_resident_bytes = max_resident_bytes
-        self._pool = thread_pool or QThreadPool()
+        self._pool = thread_pool or QThreadPool.globalInstance()
 
         # All cache state is guarded by ``_lock``. The mutex is
         # re-entrant so the worker callback (running on a pool
@@ -318,6 +318,7 @@ class DataPager(QObject):
             self._in_flight.clear()
             self._touch_counter = 0
             self._cached_concat = pd.DataFrame()
+            self._cached_sorted_times = None
         # Signals must fire outside the lock to avoid re-entrant
         # slot calls re-acquiring it on the same thread.
         self.chunks_changed.emit(0)
@@ -498,15 +499,33 @@ class DataPager(QObject):
                 evicted.append(victim_id)
             rows_total = sum(len(c.df) for c in self._resident.values())
 
-            # Pre-compute the concatenated frame on the worker thread
-            chunks = [c.df for c in self._resident.values()]
+            # Pre-compute the contiguous read-out frame on the worker thread.
+            #
+            # Tiles are non-overlapping in time (``set_tiles`` enforces this)
+            # and each loaded chunk is internally time-sorted, so concatenating
+            # the chunks in ascending start-time order already yields a globally
+            # sorted frame. That lets us skip the O(N log N) ``sort_values`` that
+            # used to dominate this callback (it re-sorted *every* resident row
+            # on each tile land, even when only one tile changed). An O(N)
+            # monotonicity check guards correctness: if the source data is out of
+            # order for any reason we fall back to the explicit stable mergesort,
+            # reproducing the legacy result exactly.
+            chunks = [c.df for c in self._resident.values() if len(c.df)]
             if not chunks:
                 self._cached_concat = pd.DataFrame()
+                self._cached_sorted_times = None
+            elif "time" not in chunks[0].columns:
+                self._cached_concat = pd.concat(chunks, ignore_index=True)
+                self._cached_sorted_times = None
             else:
-                frame = pd.concat(chunks, ignore_index=True)
-                if "time" in frame.columns:
+                ordered = sorted(chunks, key=lambda d: d["time"].iloc[0])
+                frame = pd.concat(ordered, ignore_index=True)
+                times = pd.DatetimeIndex(frame["time"])
+                if not times.is_monotonic_increasing:
                     frame = frame.sort_values("time", kind="mergesort").reset_index(drop=True)
+                    times = pd.DatetimeIndex(frame["time"])
                 self._cached_concat = frame
+                self._cached_sorted_times = times
 
         logger.debug(
             "DataPager: tile %s landed (rows=%d, resident=%d, evicted=%s)",
@@ -550,8 +569,20 @@ class DataPager(QObject):
             return df
         t_min = pd.Timestamp(t_min)
         t_max = pd.Timestamp(t_max)
-        mask = (df["time"] >= t_min) & (df["time"] <= t_max)
-        return df.loc[mask].reset_index(drop=True)
+        if t_min > t_max:
+            t_min, t_max = t_max, t_min
+
+        with self._lock:
+            sorted_times = getattr(self, "_cached_sorted_times", None)
+            if sorted_times is None or len(sorted_times) != len(df):
+                sorted_times = pd.DatetimeIndex(df["time"])
+                self._cached_sorted_times = sorted_times
+
+        left = int(sorted_times.searchsorted(t_min, side="left"))
+        right = int(sorted_times.searchsorted(t_max, side="right"))
+        if right <= left:
+            return df.iloc[0:0].copy()
+        return df.iloc[left:right].reset_index(drop=True)
 
     # ------------------------------------------------------------------
     # Shutdown

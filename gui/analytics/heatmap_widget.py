@@ -514,9 +514,10 @@ class HeatmapWidget(pg.GraphicsLayoutWidget):
         self._tooltip_bg.setPos(col - 4.5, tip_y - 1.2)
         self._tooltip_bg.setSize((9, 2.4))
         self._tooltip_bg.setPen(pg.mkPen(QColor(sh.c(t, "border")), width=1))
-        bg_qcolor = QColor(sh.c(t, "elevated2"))
-        bg_qcolor.setAlpha(230)
-        self._tooltip_bg.setBrush(pg.mkBrush(bg_qcolor))
+        # Note: RectROI doesn't support setBrush (only outline pen).
+        # bg_qcolor = QColor(sh.c(t, "elevated2"))
+        # bg_qcolor.setAlpha(230)
+        # self._tooltip_bg.setBrush(pg.mkBrush(bg_qcolor))
         self._tooltip_bg.show()
 
     def _build_tooltip_html(

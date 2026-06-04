@@ -58,6 +58,7 @@ import pandas as pd
 
 from engine.analytics._vec_numba import HAS_NUMBA_VEC, run_vectorized_loop
 from engine.execution.execution import ExecutionModel, slippage_model_to_int
+from engine.execution.prepared_dataset import PreparedDataset, prepare_vectorized_dataset
 from engine.models.models import AssetConfig, Trade, get_session
 from engine.analytics.stats_accumulator import DrawdownTracker
 
@@ -93,6 +94,7 @@ class VectorizedResult:
     # cannot drift between engines (TZ Phase 6 / A8). Each entry is
     # ``{'time': str, 'reason': 'TRADING_HOURS', 'direction': 'long'|'short'}``.
     skipped_trades: List[dict[str, Any]] = field(default_factory=list)
+    perf: dict[str, Any] = field(default_factory=dict)
 
 
 # Required columns in the strategy's signal frame. Any others are ignored.
@@ -100,6 +102,188 @@ class VectorizedResult:
 # matching the convention used by ``Context.calculate_lot`` in the visual
 # engine (multiplied by ``asset.point_value`` to convert to dollar risk).
 _REQUIRED_COLS: Sequence[str] = ("signal", "sl_points", "tp_points")
+
+
+def _reconstruct_skipped_trades(
+    *,
+    n: int,
+    sig: np.ndarray,
+    sl_pts_arr: np.ndarray,
+    times: np.ndarray,
+    entry_indices: np.ndarray,
+    exit_indices: np.ndarray,
+    trade_count: int,
+    is_trading_hours_arr: np.ndarray,
+    is_weekend_arr: np.ndarray,
+    is_eod_arr: np.ndarray,
+    enforce_th: bool,
+    weekend_blocking: bool,
+    enforce_eod: bool,
+) -> List[dict[str, Any]]:
+    """Reconstruct TRADING_HOURS / WEEKEND / EOD skipped fills for the Numba path.
+
+    The Numba kernel returns completed trades but not the pending orders that
+    were dropped because the fill bar fell outside the trading window. The
+    pure-Python path tracks these in ``skipped_trades``; this function mirrors
+    that pending->fill state machine so the Numba path produces an identical
+    list (parity with the Visual engine — TZ Phase 6 / A7).
+
+    It replays only the lightweight pending state (no PnL). Position-open
+    intervals are taken directly from the Numba entry/exit indices, so the
+    state machine knows exactly when a fill can happen vs when a position
+    blocks new pendings.
+
+    Returns an empty list when no blocking is enforced (the common case), so
+    this is effectively free unless the asset enables trading-hours/EOD/weekend.
+    """
+    # Fast exit: nothing can be skipped if no blocking rule is active.
+    if not (enforce_th or weekend_blocking or enforce_eod):
+        return []
+
+    # No signals → no pending orders → nothing can be skipped.
+    sig_bars = np.flatnonzero(sig != 0)
+    if sig_bars.size == 0:
+        return []
+
+    # Build a per-bar "position is open" mask from the Numba trade intervals.
+    # A position occupies bars [entry_index, exit_index] inclusive; a pending
+    # cannot fill while a position is open, and a new signal cannot queue a
+    # pending until the position has closed.
+    pos_open = np.zeros(n, dtype=bool)
+    entry_at = np.zeros(n, dtype=bool)
+    for ti in range(trade_count):
+        e = int(entry_indices[ti])
+        x = int(exit_indices[ti])
+        if 0 <= e < n:
+            entry_at[e] = True
+        lo, hi = (e, x) if e <= x else (x, e)
+        lo = max(0, lo)
+        hi = min(n - 1, hi)
+        pos_open[lo : hi + 1] = True
+
+    # Precompute the "fill bar is blocked" mask once (vectorized). A pending
+    # queued at bar i tries to fill at i+1; it is dropped if that bar is
+    # blocked by trading-hours / weekend / EOD rules.
+    blocked = np.zeros(n, dtype=bool)
+    if enforce_th:
+        blocked |= ~is_trading_hours_arr.astype(bool)
+    if weekend_blocking:
+        blocked |= is_weekend_arr.astype(bool)
+    if enforce_eod:
+        blocked |= is_eod_arr.astype(bool)
+
+    # The state machine only does work at signal bars (step 2 queues a pending)
+    # and the bar right after a signal (step 1 resolves it). Every other bar is
+    # a no-op (pend_dir stays 0, no signal), so we iterate ONLY those candidate
+    # bars instead of all n — O(num_signals) instead of O(n). This is exactly
+    # equivalent to the full per-bar loop.
+    candidates = np.union1d(sig_bars, sig_bars + 1)
+    candidates = candidates[candidates < n]
+
+    skipped: List[dict[str, Any]] = []
+    pend_dir = 0
+    for i in candidates:
+        i = int(i)
+        # 1) A pending order from a prior bar tries to fill at this bar's open.
+        #    It is dropped (skipped) if this bar is blocked AND no position
+        #    actually opened here (entry_at[i] confirms a real fill).
+        if pend_dir != 0 and not entry_at[i]:
+            if enforce_th and not is_trading_hours_arr[i]:
+                skip_reason = "TRADING_HOURS"
+            elif weekend_blocking and bool(is_weekend_arr[i]):
+                skip_reason = "WEEKEND"
+            elif enforce_eod and bool(is_eod_arr[i]):
+                skip_reason = "EOD"
+            else:
+                skip_reason = None
+            if skip_reason is not None:
+                skipped.append(
+                    {
+                        "time": str(times[i]),
+                        "reason": skip_reason,
+                        "direction": "long" if pend_dir == +1 else "short",
+                    }
+                )
+            pend_dir = 0
+        elif pend_dir != 0 and entry_at[i]:
+            # The pending filled here (Numba recorded an entry) — clear it.
+            pend_dir = 0
+
+        # 2) A new signal while flat and with no pending queues a pending order
+        #    for the next bar. Mirrors the Python loop's step 5.
+        if not pos_open[i] and pend_dir == 0 and sig[i] != 0:
+            sl_val = float(sl_pts_arr[i])
+            if not np.isnan(sl_val) and sl_val > 0:
+                pend_dir = +1 if sig[i] > 0 else -1
+
+    return skipped
+
+
+def _resolve_vectorized_signals(
+    strategy: Any,
+    df: pd.DataFrame,
+    prepared: Optional[PreparedDataset],
+) -> tuple[pd.DataFrame, bool, float]:
+    import time
+
+    from engine.strategy.context import Strategy
+
+    build_features = getattr(strategy, "build_vectorized_features", None)
+    signals_from_features = getattr(strategy, "vectorized_signals_from_features", None)
+    # Compare against the BASE Strategy class, not type(strategy) — otherwise
+    # every subclass that overrides the methods will fail the "is not" check
+    # because type(strategy).method IS the overridden method.
+    base_build = getattr(Strategy, "build_vectorized_features", None)
+    base_from_features = getattr(Strategy, "vectorized_signals_from_features", None)
+    can_use_feature_contract = (
+        callable(build_features)
+        and callable(signals_from_features)
+        and base_build is not None
+        and base_from_features is not None
+        and getattr(build_features, "__func__", None) is not base_build
+        and getattr(signals_from_features, "__func__", None) is not base_from_features
+    )
+    if not can_use_feature_contract:
+        t0 = time.perf_counter()
+        return strategy.vectorized_signals(df), False, time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+
+    # Engine-side feature cache (Roadmap v2 / S1.5): reuse the heavy feature
+    # bundle across runs when the dataset and feature-affecting params are
+    # unchanged. The strategy opts in by overriding feature_params() to return
+    # a hashable tuple of indicator params; returning None skips caching.
+    from engine.execution.feature_cache import (
+        get_global_feature_cache,
+        make_feature_cache_key,
+    )
+
+    cache_key = None
+    feature_params_fn = getattr(strategy, "feature_params", None)
+    if callable(feature_params_fn) and prepared is not None:
+        try:
+            fparams = feature_params_fn()
+        except Exception:
+            fparams = None
+        cache_key = make_feature_cache_key(
+            getattr(prepared, "dataset_key", None), strategy, fparams
+        )
+
+    features = None
+    if cache_key is not None:
+        cache = get_global_feature_cache()
+        features = cache.get(cache_key)
+        if features is None:
+            features = strategy.build_vectorized_features(df, prepared=prepared)
+            cache.put(cache_key, features)
+    else:
+        features = strategy.build_vectorized_features(df, prepared=prepared)
+
+    signals = strategy.vectorized_signals_from_features(
+        features,
+        getattr(strategy, "params", None),
+    )
+    return signals, True, time.perf_counter() - t0
 
 
 def _validate_signals(signals: pd.DataFrame, n_bars: int) -> None:
@@ -168,6 +352,12 @@ def run_vectorized(
     initial_equity: float = 100_000.0,
     risk_pct: float = 1.0,
     absolute_max_lots: float = 100.0,
+    prepared: Optional[PreparedDataset] = None,
+    materialize_trades: bool = True,
+    summary_only: bool = False,
+    compact_result: bool = False,
+    include_equity_curve: bool = True,
+    skip_lookahead_check: bool = False,
 ) -> VectorizedResult:
     """Run a vectorised backtest.
 
@@ -175,6 +365,11 @@ def run_vectorized(
     :class:`VectorizedResult` with the same ``Trade`` objects that the
     on-candle engine produces, so downstream Analytics / Quant tabs can
     consume both interchangeably.
+
+    ``skip_lookahead_check`` bypasses the per-run look-ahead bias heuristic
+    (which calls ``vectorized_signals`` twice on a slice). Batch runners set
+    this after performing the check once for the whole sweep — the check is
+    strategy-level, not param-level, so repeating it per combo is pure waste.
     """
     if not hasattr(strategy, "vectorized_signals"):
         raise AttributeError(
@@ -182,15 +377,44 @@ def run_vectorized(
             "Either add the method or run with the Visual (on_candle) engine."
         )
 
+    if summary_only:
+        materialize_trades = False
+    strategy_name = getattr(strategy, "__class__", type(strategy)).__name__
+    prepared_reused = prepared is not None
+
     if df is None or len(df) == 0:
-        return VectorizedResult([], np.array([initial_equity]), 0.0, 0.0, {})
+        return VectorizedResult([], np.array([initial_equity]), 0.0, 0.0, {}, perf={
+            "bars": 0,
+            "signals_gen_ms": 0.0,
+            "signals_validate_ms": 0.0,
+            "numpy_extract_ms": 0.0,
+            "mask_build_ms": 0.0,
+            "numba_loop_ms": 0.0,
+            "python_loop_ms": 0.0,
+            "trade_materialize_ms": 0.0,
+            "summary_ms": 0.0,
+            "total_ms": 0.0,
+            "used_numba": False,
+            "trade_count": 0,
+            "prepared_reused": False,
+            "materialize_trades": False,
+            "summary_only": bool(summary_only),
+            "signal_memory_mb": 0.0,
+            "strategy_name": strategy_name,
+            "compact_result": bool(compact_result),
+            "include_equity_curve": bool(include_equity_curve),
+            "used_feature_cache_contract": False,
+        })
 
     import time
+    t_run_start = time.perf_counter()
     t0 = time.perf_counter()
-    
-    signals = strategy.vectorized_signals(df)
-    
-    t_elapsed = time.perf_counter() - t0
+
+    signals, used_feature_cache_contract, t_elapsed = _resolve_vectorized_signals(
+        strategy,
+        df,
+        prepared,
+    )
     if t_elapsed > 1.0:
         logger.warning(
             f"⚠️ Ваша стратегія (vectorized_signals) виконувалась {t_elapsed:.2f} сек. "
@@ -199,10 +423,12 @@ def run_vectorized(
         )
 
     n = len(df)
+    t0 = time.perf_counter()
     _validate_signals(signals, n)
+    t_validate = time.perf_counter() - t0
 
     # --- Phase 4 Fix: Look-ahead Bias Sandbox Check ---
-    if n > 50:
+    if n > 50 and not skip_lookahead_check:
         try:
             # We take a small slice to keep the check ultra-fast (e.g. max 1000 bars)
             test_size = min(1000, n)
@@ -224,42 +450,28 @@ def run_vectorized(
             pass # Ignore heuristic failures (e.g., if strategy requires min 2000 bars to warmup)
 
     em = execution_model or ExecutionModel()
-    spread = em.spread_price(asset)
-    slip = em.slippage_price(asset)
-    commission = em._commission(asset)
-    slip_per_leg = em._slippage(asset)
-    point_value = float(asset.point_value or 1.0)
-    # Round-trip slippage in dollars — what gets actually deducted from
-    # PnL once both legs fill at slipped prices (entry via
-    # ``adjust_fill_price``, exit via the SL/TP/EOD logic below). TZ
-    # Phase 5 / A4: reflect the *realised* cost rather than zero.
-    slippage_cost_per_trade = slip_per_leg * 2.0 * point_value
+    t0 = time.perf_counter()
+    prep = prepared or prepare_vectorized_dataset(df, asset=asset, execution_model=em)
+    t_numpy_extract = time.perf_counter() - t0
+    t_mask_build = 0.0 if prepared is not None else t_numpy_extract
 
-    # Pull the columns we need into NumPy arrays once (avoid pandas overhead in the loop).
-    high = (
-        df["High"].to_numpy(dtype=np.float64)
-        if "High" in df.columns
-        else df["high"].to_numpy(dtype=np.float64)
-    )
-    low = (
-        df["Low"].to_numpy(dtype=np.float64)
-        if "Low" in df.columns
-        else df["low"].to_numpy(dtype=np.float64)
-    )
-    close = (
-        df["Close"].to_numpy(dtype=np.float64)
-        if "Close" in df.columns
-        else df["close"].to_numpy(dtype=np.float64)
-    )
-    open_ = (
-        df["Open"].to_numpy(dtype=np.float64)
-        if "Open" in df.columns
-        else df["open"].to_numpy(dtype=np.float64)
-    )
-    if "time" in df.columns:
-        times = df["time"].to_numpy()
-    else:
-        times = df.index.to_numpy()
+    open_ = prep.open
+    high = prep.high
+    low = prep.low
+    close = prep.close
+    times = prep.times
+    is_trading_hours_arr = prep.is_trading_hours
+    is_eod_arr = prep.is_eod
+    is_weekend_arr = prep.is_weekend
+    enforce_th = prep.enforce_trading_hours
+    enforce_eod = prep.enforce_eod
+    weekend_blocking = prep.weekend_blocking
+    point_value = prep.point_value
+    spread = prep.spread
+    slip = prep.slip
+    commission = prep.commission
+    slip_per_leg = em._slippage(asset)
+    slippage_cost_per_trade = slip_per_leg * 2.0 * point_value
 
     sig = signals["signal"].to_numpy(dtype=np.int64)
     sl_pts_arr = signals["sl_points"].to_numpy(dtype=np.float64)
@@ -268,57 +480,15 @@ def run_vectorized(
         risk_arr = signals["risk_pct"].to_numpy(dtype=np.float64)
     else:
         risk_arr = np.full(n, risk_pct, dtype=np.float64)
-
-    # Pre-compute trading-hours / EOD / weekend masks once. Mirrors
-    # :func:`engine.models.is_trading_hours`, :func:`is_eod` and
-    # :func:`is_weekend` so the vectorised engine cannot diverge from the
-    # visual one on the same dataset (TZ Phase 6 / A8).
-    enforce_th = bool(asset.enforce_trading_hours)
-    enforce_eod = bool(asset.enforce_eod_close)
-    weekend_blocking = bool(asset.close_on_weekend)
-    try:
-        ts_index = pd.DatetimeIndex(pd.to_datetime(times))
-        # Phase 1.5 — convert to the asset's session_tz before pulling
-        # hour-of-day so the trading-hours / EOD mask reflects the
-        # broker's local clock, not the data's UTC offset.
-        session_tz = getattr(asset, "session_tz", None)
-        if session_tz:
-            try:
-                if ts_index.tz is None:
-                    ts_index = ts_index.tz_localize("UTC").tz_convert(session_tz)
-                else:
-                    ts_index = ts_index.tz_convert(session_tz)
-            except Exception:  # pragma: no cover — bad tz string
-                pass
-        hm_arr = np.asarray(ts_index.hour, dtype=np.int64) * 60 + np.asarray(
-            ts_index.minute, dtype=np.int64
-        )
-        weekday_arr = np.asarray(ts_index.weekday, dtype=np.int64)
-    except (ValueError, TypeError):
-        hm_arr = np.zeros(n, dtype=np.int64)
-        weekday_arr = np.zeros(n, dtype=np.int64)
-        enforce_th = False
-        weekend_blocking = False
-
-    th_start_min = (
-        asset.trading_hours_start.hour * 60 + asset.trading_hours_start.minute
+    signal_memory_mb = float(
+        (sig.nbytes + sl_pts_arr.nbytes + tp_pts_arr.nbytes + risk_arr.nbytes)
+        / (1024.0 * 1024.0)
     )
-    th_end_min = asset.trading_hours_end.hour * 60 + asset.trading_hours_end.minute
-    eod_min = asset.eod_close.hour * 60 + asset.eod_close.minute
-
-    is_weekend_arr = weekday_arr >= 5
-    in_hours_mask = (hm_arr >= th_start_min) & (hm_arr < th_end_min)
-    if weekend_blocking:
-        in_hours_mask &= ~is_weekend_arr
-    is_trading_hours_arr = in_hours_mask
-    if enforce_eod:
-        is_eod_arr = hm_arr >= eod_min
-    else:
-        is_eod_arr = np.zeros(n, dtype=bool)
 
     # ---- Fast path: Numba-JIT inner loop ----
     if HAS_NUMBA_VEC:
         logger.debug("Vectorised engine: using Numba-accelerated inner loop")
+        t0 = time.perf_counter()
         result_tuple = run_vectorized_loop(
             n,
             open_,
@@ -362,66 +532,118 @@ def run_vectorized(
             r_initial_sls,
             equity_curve,
         ) = result_tuple
+        t_numba_loop = time.perf_counter() - t0
 
         _REASON_MAP = {1: "SL", 2: "TP", 3: "EOD", 4: "WEEKEND", 5: "GAP_SL"}
         dd_tracker = DrawdownTracker()
         dd_tracker.reset(initial_equity)
         trades: List[Trade] = []
         slippage_cost_per_trade_val = slip * 2.0 * point_value
-        for ti in range(trade_count):
-            e_idx = int(r_entry_indices[ti])
-            x_idx = int(r_exit_indices[ti])
-            d = "long" if r_directions[ti] == 1 else "short"
-            sl_dist = (
-                abs(r_entry_prices[ti] - r_initial_sls[ti])
-                if r_initial_sls[ti] > 0
-                else 0.0
-            )
-            rr = (float(r_pnl_pts[ti]) / sl_dist) if sl_dist > 0 else None
-            try:
-                entry_ts = pd.Timestamp(times[e_idx])
-                exit_ts = pd.Timestamp(times[x_idx])
-                dur = max(0, int((exit_ts - entry_ts).total_seconds() / 60))
-            except (ValueError, TypeError):
-                dur = max(0, x_idx - e_idx)
-            dd_tracker.update(
-                float(equity_curve[ti + 1])
-                if ti + 1 < len(equity_curve)
-                else float(equity_curve[-1])
-            )
-            vol = float(r_volumes[ti])
-            trades.append(
-                Trade(
-                    id=ti + 1,
-                    direction=d,
-                    entry_price=float(r_entry_prices[ti]),
-                    exit_price=float(r_exit_prices[ti]),
-                    pnl=float(r_pnls[ti]),
-                    pnl_points=float(r_pnl_pts[ti]),
-                    entry_index=e_idx,
-                    exit_index=x_idx,
-                    entry_time=str(times[e_idx]),
-                    exit_time=str(times[x_idx]),
-                    volume=vol,
-                    duration_minutes=dur,
-                    exit_reason=_REASON_MAP.get(int(r_exit_reasons[ti]), "MANUAL"),
-                    mae=float(r_maes[ti]),
-                    mfe=float(r_mfes[ti]),
-                    session=get_session(times[e_idx], asset=asset),
-                    initial_sl=float(r_initial_sls[ti]),
-                    rr=rr,
-                    mae_dollars=float(r_maes[ti]) * vol * point_value,
-                    mfe_dollars=float(r_mfes[ti]) * vol * point_value,
-                    commission=commission * vol,
-                    spread_cost=0.0,
-                    slippage_cost=_round_to_step(
-                        slippage_cost_per_trade_val * vol, 0.01
-                    ),
+        # Drawdown must be driven by *post-trade* equity (one reading per
+        # closed trade), exactly like the visual engine and the Python
+        # fallback below. The Numba ``equity_curve`` is a *per-bar* series,
+        # so indexing it by trade number (the previous behaviour) sampled
+        # the still-flat opening bars and reported ~0 drawdown. Rebuild the
+        # running equity from the trade PnL ledger instead, mirroring the
+        # loop's per-cent rounding so the figure matches to the penny.
+        # Running post-trade equity. The per-step re-rounding mirrors the
+        # visual engine (kills float drift), so it stays a sequential scan —
+        # but we feed it from a Python list (one ``.tolist()``) instead of
+        # ``float(np_scalar)`` per iteration.
+        pnls_py = r_pnls[:trade_count].tolist()
+        post_trade_eq = [0.0] * trade_count
+        _running_eq = float(initial_equity)
+        for _ti in range(trade_count):
+            _running_eq = _round_to_step(_running_eq + pnls_py[_ti], 0.01)
+            post_trade_eq[_ti] = _running_eq
+        t0 = time.perf_counter()
+        if materialize_trades:
+            # --- Vectorised field prep (one pass each, NumPy/C speed) -------
+            # The previous hot loop spent ~99% of a multi-second 5-year run on
+            # per-trade ``pd.Timestamp``/``pd.to_datetime`` round-trips and
+            # ``float(np_scalar)`` casts. Hoist all of that out of the loop:
+            #   * slice the result arrays once and ``.tolist()`` them so the
+            #     loop reads native Python scalars (no per-element cast),
+            #   * derive datetime64 / ISO strings / durations with vectorised
+            #     NumPy ops — bit-for-bit identical to the old per-trade path.
+            tc = trade_count
+            e_idx_arr = r_entry_indices[:tc].astype(np.int64)
+            x_idx_arr = r_exit_indices[:tc].astype(np.int64)
+            et_raw = times[e_idx_arr]
+            xt_raw = times[x_idx_arr]
+            # ``entry_time`` keeps the raw element string — ``arr.astype(str)``
+            # is element-for-element identical to the legacy ``str(times[i])``
+            # for any dtype (datetime64 → ISO, int64 → integer string).
+            entry_str_list = et_raw.astype(str).tolist()
+            exit_str_list = xt_raw.astype(str).tolist()
+            # Normalise to datetime64[ns] for duration + the cached np time,
+            # mirroring the legacy ``pd.Timestamp`` / ``pd.to_datetime`` path so
+            # both int64-epoch and datetime64 time arrays behave identically.
+            et_ns = pd.to_datetime(et_raw).values
+            xt_ns = pd.to_datetime(xt_raw).values
+            entry_np_list = list(et_ns)
+            exit_np_list = list(xt_ns)
+            dur_arr = ((xt_ns - et_ns) / np.timedelta64(1, "m")).astype(np.int64)
+            np.clip(dur_arr, 0, None, out=dur_arr)
+            dur_list = dur_arr.tolist()
+            e_idx_list = e_idx_arr.tolist()
+            x_idx_list = x_idx_arr.tolist()
+            entry_prices = r_entry_prices[:tc].tolist()
+            exit_prices = r_exit_prices[:tc].tolist()
+            pnl_pts_py = r_pnl_pts[:tc].tolist()
+            directions_py = r_directions[:tc].tolist()
+            exit_reasons_py = r_exit_reasons[:tc].tolist()
+            volumes_py = r_volumes[:tc].tolist()
+            maes_py = r_maes[:tc].tolist()
+            mfes_py = r_mfes[:tc].tolist()
+            initial_sls_py = r_initial_sls[:tc].tolist()
+            for ti in range(tc):
+                init_sl = initial_sls_py[ti]
+                sl_dist = abs(entry_prices[ti] - init_sl) if init_sl > 0 else 0.0
+                rr = (pnl_pts_py[ti] / sl_dist) if sl_dist > 0 else None
+                dd_tracker.update(post_trade_eq[ti])
+                vol = volumes_py[ti]
+                mae_v = maes_py[ti]
+                mfe_v = mfes_py[ti]
+                trades.append(
+                    Trade(
+                        id=ti + 1,
+                        direction="long" if directions_py[ti] == 1 else "short",
+                        entry_price=entry_prices[ti],
+                        exit_price=exit_prices[ti],
+                        pnl=pnls_py[ti],
+                        pnl_points=pnl_pts_py[ti],
+                        entry_index=e_idx_list[ti],
+                        exit_index=x_idx_list[ti],
+                        entry_time=entry_str_list[ti],
+                        exit_time=exit_str_list[ti],
+                        volume=vol,
+                        duration_minutes=dur_list[ti],
+                        exit_reason=_REASON_MAP.get(exit_reasons_py[ti], "MANUAL"),
+                        mae=mae_v,
+                        mfe=mfe_v,
+                        session=get_session(et_raw[ti], asset=asset),
+                        initial_sl=init_sl,
+                        rr=rr,
+                        mae_dollars=mae_v * vol * point_value,
+                        mfe_dollars=mfe_v * vol * point_value,
+                        commission=commission * vol,
+                        spread_cost=0.0,
+                        slippage_cost=_round_to_step(
+                            slippage_cost_per_trade_val * vol, 0.01
+                        ),
+                        entry_time_np=entry_np_list[ti],
+                        exit_time_np=exit_np_list[ti],
+                    )
                 )
-            )
+        else:
+            for ti in range(trade_count):
+                dd_tracker.update(post_trade_eq[ti])
+        t_trade_materialize = time.perf_counter() - t0
+        t0 = time.perf_counter()
         final_eq = float(equity_curve[-1])
         summary = {
-            "n_trades": len(trades),
+            "n_trades": int(trade_count),
             "final_equity": final_eq,
             "total_return_pct": (final_eq - initial_equity) / initial_equity * 100.0
             if initial_equity > 0
@@ -429,16 +651,63 @@ def run_vectorized(
             "peak_drawdown_pct": dd_tracker.max_drawdown_pct,
             "peak_drawdown_abs": dd_tracker.max_drawdown_abs,
         }
+        t_summary = time.perf_counter() - t0
+        perf = {
+            "bars": int(n),
+            "signals_gen_ms": round(t_elapsed * 1000.0, 3),
+            "signals_validate_ms": round(t_validate * 1000.0, 3),
+            "numpy_extract_ms": round(t_numpy_extract * 1000.0, 3),
+            "mask_build_ms": round(t_mask_build * 1000.0, 3),
+            "numba_loop_ms": round(t_numba_loop * 1000.0, 3),
+            "python_loop_ms": 0.0,
+            "trade_materialize_ms": round(t_trade_materialize * 1000.0, 3),
+            "summary_ms": round(t_summary * 1000.0, 3),
+            "total_ms": round((time.perf_counter() - t_run_start) * 1000.0, 3),
+            "used_numba": True,
+            "trade_count": int(trade_count),
+            "prepared_reused": bool(prepared_reused),
+            "materialize_trades": bool(materialize_trades),
+            "summary_only": bool(summary_only),
+            "signal_memory_mb": round(signal_memory_mb, 4),
+            "strategy_name": strategy_name,
+            "compact_result": bool(compact_result),
+            "include_equity_curve": bool(include_equity_curve),
+            "used_feature_cache_contract": bool(used_feature_cache_contract),
+        }
+        logger.info("vectorized_perf %s", perf)
+        # Reconstruct skipped fills (TRADING_HOURS/WEEKEND/EOD) for parity with
+        # the Visual engine and the pure-Python path. No-op (returns []) when
+        # no blocking rule is enforced, so the common case stays free.
+        skipped_trades = _reconstruct_skipped_trades(
+            n=n,
+            sig=sig,
+            sl_pts_arr=sl_pts_arr,
+            times=times,
+            entry_indices=r_entry_indices,
+            exit_indices=r_exit_indices,
+            trade_count=trade_count,
+            is_trading_hours_arr=is_trading_hours_arr,
+            is_weekend_arr=is_weekend_arr,
+            is_eod_arr=is_eod_arr,
+            enforce_th=enforce_th,
+            weekend_blocking=weekend_blocking,
+            enforce_eod=enforce_eod,
+        )
         return VectorizedResult(
-            trades=trades,
-            equity_curve=equity_curve,
+            trades=[] if compact_result else trades,
+            equity_curve=(np.array([initial_equity], dtype=float) if not include_equity_curve else equity_curve),
             peak_drawdown_pct=dd_tracker.max_drawdown_pct,
             peak_drawdown_abs=dd_tracker.max_drawdown_abs,
             summary=summary,
-            skipped_trades=[],
+            skipped_trades=skipped_trades,
+            perf=perf,
         )
 
     # ---- Fallback: pure-Python inner loop (no Numba) ----
+    t_numba_loop = 0.0
+    t_trade_materialize = 0.0
+    t_summary = 0.0
+    t0 = time.perf_counter()
     trades: List[Trade] = []  # type: ignore[no-redef]
     equity_track = [float(initial_equity)]
     equity = float(initial_equity)
@@ -685,6 +954,8 @@ def run_vectorized(
             eod_price = last_close + spread + pos_slip
         _close(eod_price, n - 1, "EOD")
 
+    t_python_loop = time.perf_counter() - t0
+    t0 = time.perf_counter()
     summary = {
         "n_trades": len(trades),
         "final_equity": equity,
@@ -694,11 +965,36 @@ def run_vectorized(
         "peak_drawdown_pct": dd_tracker.max_drawdown_pct,
         "peak_drawdown_abs": dd_tracker.max_drawdown_abs,
     }
+    t_summary = time.perf_counter() - t0
+    perf = {
+        "bars": int(n),
+        "signals_gen_ms": round(t_elapsed * 1000.0, 3),
+        "signals_validate_ms": round(t_validate * 1000.0, 3),
+        "numpy_extract_ms": round(t_numpy_extract * 1000.0, 3),
+        "mask_build_ms": round(t_mask_build * 1000.0, 3),
+        "numba_loop_ms": round(t_numba_loop * 1000.0, 3),
+        "python_loop_ms": round(t_python_loop * 1000.0, 3),
+        "trade_materialize_ms": round(t_trade_materialize * 1000.0, 3),
+        "summary_ms": round(t_summary * 1000.0, 3),
+        "total_ms": round((time.perf_counter() - t_run_start) * 1000.0, 3),
+        "used_numba": False,
+        "trade_count": int(len(trades)),
+        "prepared_reused": bool(prepared_reused),
+        "materialize_trades": bool(materialize_trades),
+        "summary_only": bool(summary_only),
+        "signal_memory_mb": round(signal_memory_mb, 4),
+        "strategy_name": strategy_name,
+        "compact_result": bool(compact_result),
+        "include_equity_curve": bool(include_equity_curve),
+        "used_feature_cache_contract": bool(used_feature_cache_contract),
+    }
+    logger.info("vectorized_perf %s", perf)
     return VectorizedResult(
-        trades=trades,
-        equity_curve=np.array(equity_track, dtype=float),
+        trades=[] if compact_result else (trades if materialize_trades else []),
+        equity_curve=(np.array([initial_equity], dtype=float) if not include_equity_curve else np.array(equity_track, dtype=float)),
         peak_drawdown_pct=dd_tracker.max_drawdown_pct,
         peak_drawdown_abs=dd_tracker.max_drawdown_abs,
         summary=summary,
         skipped_trades=skipped_trades,
+        perf=perf,
     )

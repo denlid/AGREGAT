@@ -132,6 +132,8 @@ def test_state_starts_unconfigured() -> None:
         "configured": False,
         "enabled": False,
         "reason": "not_configured",
+        "backend": "software",
+        "gl_candles": False,
     }
 
 
@@ -143,6 +145,26 @@ def test_state_records_disabled_reason_for_unavailable() -> None:
     assert gpu_config.STATE["reason"] in {"unavailable_or_disabled", "env_disabled"}
     assert gpu_config.STATE["configured"] is True
     assert gpu_config.STATE["enabled"] is False
+    assert gpu_config.STATE["backend"] == "software"
+    assert gpu_config.STATE["gl_candles"] is False
+
+
+def test_should_use_gl_candles_respects_explicit_force() -> None:
+    assert gpu_config.should_use_gl_candles(force_gl_candles=True) is True
+    assert gpu_config.should_use_gl_candles(force_gl_candles=False) is False
+
+
+def test_should_use_gl_candles_uses_bars_hint_threshold() -> None:
+    assert gpu_config.should_use_gl_candles(force_gpu=True, bars_hint=500) is False
+    assert gpu_config.should_use_gl_candles(force_gpu=True, bars_hint=2_000) is True
+    assert gpu_config.should_use_gl_candles(force_gpu=True, bars_hint=20_000) is True
+
+
+def test_configure_enabled_state_records_backend_metadata() -> None:
+    enabled = gpu_config.configure_gpu_acceleration(force=True)
+    assert enabled is True
+    assert gpu_config.STATE["backend"] == "opengl"
+    assert gpu_config.STATE["gl_candles"] is True
 
 
 # ---------------------------------------------------------------------------

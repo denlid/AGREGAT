@@ -27,6 +27,7 @@ from gui.persistence import drawings_persist
 from gui.styling import style_helpers as sh
 from gui.chart_tab.axis import TimeAxisItem
 from gui.chart_tab.gl_candle import make_candlestick_item
+from gui.chart_tab.gpu_config import STATE as GPU_STATE, should_use_gl_candles
 from gui.chart_tab.items import CandlestickItem, FilledRectROI  # noqa: F401 — re-export for callers
 from gui.styling.theme import CHART_SCHEMES, get_theme, register_theme_listener
 
@@ -43,6 +44,23 @@ class ChartTab(QWidget):
         self._is_syncing = False  # prevent recursive sync loops
         self._chart_alive = True  # guard for timer callbacks after destruction
         self.destroyed.connect(lambda: setattr(self, "_chart_alive", False))
+
+        # Initialize state flags early to avoid AttributeError in event handlers
+        # that may fire during widget construction.
+        self._selection_mode = False
+        self._selection_start = None
+        self._selection_overlay = None
+        self._selection_mask_items = []
+        self._selection_rect_data = None
+        self.autofit_y = True
+        self.show_ohlc_tooltip = True  # OHLC crosshair tooltip (BUG-3 → grail feature)
+
+        # Initialize cache attributes early (Sprint 3 — array-first snapshot).
+        self._cached_snapshot = None
+        self._cache_key = None
+        self._cached_trade_marker_key = None
+        self._cached_trade_marker_payload = None
+
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
@@ -288,7 +306,7 @@ class ChartTab(QWidget):
         self.cross_label.hide()
 
         # OHLC info label — top-left corner
-        self.ohlc_label = pg.TextItem(color="#9A9AAE", anchor=(0, 1))
+        self.ohlc_label = pg.TextItem(color="#9A9AAE", anchor=(0, 0))
         self.ohlc_label.setZValue(100)
         self.plot_widget.addItem(self.ohlc_label, ignoreBounds=True)  # type: ignore[call-arg]
         self.ohlc_label.hide()
@@ -329,36 +347,98 @@ class ChartTab(QWidget):
         self.user_drawings_history = []  # undo history
         self.user_drawings_redo = []  # redo stack
         self.user_graphic_items = []  # rendered items (cleared on each redraw)
-        self.strategy_graphic_items = []
+        self.strategy_graphic_items = {}  # Dict[drawing_id -> QGraphicsItem] (Sprint 4)
         self.trade_graphic_items = []
         self.res_times = np.array([])
         self._need_autorange = True
         self._user_zoom_width = None  # User's X-zoom width (set by wheel zoom)
         self._tracked_xrange = None  # Our own X-range tracking (bypasses pyqtgraph)
-        self._cache_key = None
-        self._cached_res_df = None
+        self._cached_chart_arrays_key = None
+        self._cached_chart_arrays = None
         self._color_scheme = "Classic"
         self._last_click_pos = None
         self._brush_path = None
         self._brush_item = None
         self._is_brushing = False
-        self.autofit_y = True
-        self._selection_mode = False
-        self._selection_start = None
-        self._selection_overlay = None
-        self._selection_mask_items = []
-        self._selection_rect_data = None
 
         self._redraw_pending = False
-        self._redraw_timer = QTimer()
+        self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(60)
         self._redraw_timer.timeout.connect(self._do_deferred_redraw)
+        self._last_perf_stats = {}
+        self._perf_stats_history = []
+        self._perf_log_threshold_ms = 30.0
+        self._adaptive_lod_enabled = True
+        self._adaptive_lod_threshold_ms = 24.0
+        self._adaptive_lod_cooldown = 0
+        self._render_backend = (
+            "gl" if self.candlestick_item.__class__.__name__ == "GLCandlestickItem" else "painter"
+        )
 
         self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_clicked)
         self.engine.data_loaded.connect(self.on_data_loaded)
         self.engine.step_completed.connect(self.on_step_completed)
         self.apply_chart_theme()
+
+    def _snapshot_from_dataframe(self, df, active_tf: str, lod_level=None):
+        """Build ChartRenderSnapshot from a DataFrame (HTF fallback path).
+
+        Used when TF aggregator returns a DataFrame (HTF path). Less efficient
+        than the 1m zero-copy path, but still avoids repeated .to_numpy() calls
+        by building the snapshot once and caching it.
+        """
+        from gui.chart_tab.render_snapshot import ChartRenderSnapshot
+
+        n = len(df)
+        time_arr = df["time"].to_numpy()
+        open_arr = df["open"].to_numpy(dtype=np.float64)
+        high_arr = df["high"].to_numpy(dtype=np.float64)
+        low_arr = df["low"].to_numpy(dtype=np.float64)
+        close_arr = df["close"].to_numpy(dtype=np.float64)
+        x_arr = np.arange(n, dtype=np.float64)
+
+        return ChartRenderSnapshot(
+            time=time_arr,
+            open=open_arr,
+            high=high_arr,
+            low=low_arr,
+            close=close_arr,
+            x=x_arr,
+            n=n,
+            source_start=0,
+            source_end=n,
+            active_tf=active_tf,
+            lod_level=lod_level,
+        )
+
+    def _build_chart_arrays(self, res_df):
+        """Build immutable chart arrays from a DataFrame with identity caching.
+
+        Kept as a compatibility shim for callers/tests that predate the
+        array-first ChartRenderSnapshot path.
+        """
+        key = (id(res_df), len(res_df))
+        cached = self._cached_chart_arrays
+        if self._cached_chart_arrays_key == key and cached is not None:
+            return cached, True
+
+        n = len(res_df)
+        x = np.arange(n, dtype=np.float64)
+        open_arr = res_df["open"].to_numpy(dtype=np.float64, copy=False)
+        high_arr = res_df["high"].to_numpy(dtype=np.float64, copy=False)
+        low_arr = res_df["low"].to_numpy(dtype=np.float64, copy=False)
+        close_arr = res_df["close"].to_numpy(dtype=np.float64, copy=False)
+        candle_arr = np.column_stack((x, open_arr, close_arr, low_arr, high_arr))
+        candle_arr.setflags(write=False)
+        arrays = {
+            "x": x,
+            "close": close_arr,
+            "candle_arr": candle_arr,
+        }
+        self._cached_chart_arrays_key = key
+        self._cached_chart_arrays = arrays
+        return arrays, False
 
     def _fit_all(self):
         """Reset zoom and fit all data."""
@@ -437,10 +517,6 @@ class ChartTab(QWidget):
             # During tear-down or partial init, the plot may already be gone.
             pass
 
-    def toggle_tools(self):
-        """Toggle sidebar visibility."""
-        # The sidebar is always visible in the new layout (it's small)
-        pass
 
     # --- Drawing tool ---
     def _set_tool(self, name):
@@ -570,18 +646,40 @@ class ChartTab(QWidget):
         self.vline.setPos(mp.x())
         self.hline.setPos(mp.y())
 
-        idx = int(round(mp.x()))
-        if 0 <= idx < len(self.res_times):
-            _ = self.candlestick_item.get_ohlc_at(idx)
-
         # Price label on right side of crosshair
         vr = self.plot_widget.getViewBox().viewRect()
         self.cross_label.setText(f" {mp.y():.2f}")
         self.cross_label.setPos(vr.right() - (vr.width() * 0.01), mp.y())
         self.cross_label.show()
 
-        # OHLC overlay disabled — cleaner chart per UX preference.
-        self.ohlc_label.hide()
+        # OHLC tooltip — date + open/high/low/close at the hovered bar, tinted
+        # by candle direction. Toggleable via ``self.show_ohlc_tooltip``.
+        if not getattr(self, "show_ohlc_tooltip", True):
+            self.ohlc_label.hide()
+            return
+        idx = int(round(mp.x()))
+        if 0 <= idx < len(self.res_times):
+            ohlc = self.candlestick_item.get_ohlc_at(idx)
+            if ohlc is not None:
+                o, h, l, c = ohlc
+                up = c >= o
+                tint = "#26A69A" if up else "#EF5350"
+                try:
+                    ts = pd.Timestamp(self.res_times[idx]).strftime("%Y-%m-%d %H:%M")
+                except (ValueError, TypeError):
+                    ts = ""
+                self.ohlc_label.setHtml(
+                    f'<span style="color:#8A8A9A">{ts}</span>  '
+                    f'<span style="color:{tint}">'
+                    f"O {o:.2f}  H {h:.2f}  L {l:.2f}  C {c:.2f}</span>"
+                )
+                # Anchor at the top-left of the visible viewport.
+                self.ohlc_label.setPos(vr.left() + (vr.width() * 0.01), vr.top())
+                self.ohlc_label.show()
+            else:
+                self.ohlc_label.hide()
+        else:
+            self.ohlc_label.hide()
 
     def _snap_to_candle(self, x, y):
         """Snap x to nearest candle index, y to nearest OHLC price."""
@@ -876,18 +974,17 @@ class ChartTab(QWidget):
         idx2 = int(max(0, min(rect_data["x2"], len(self.res_times) - 1)))
         if idx2 < idx1:
             idx1, idx2 = idx2, idx1
-        res_df = self._cached_res_df if self._cached_res_df is not None else pd.DataFrame()
+        snapshot = self._cached_snapshot
         candles = []
-        if not res_df.empty:
-            for i in range(idx1, min(idx2 + 1, len(res_df))):
-                row = res_df.iloc[i]
+        if snapshot is not None and snapshot.n > 0:
+            for i in range(idx1, min(idx2 + 1, snapshot.n)):
                 candles.append(
                     {
-                        "time": str(pd.to_datetime(row["time"])),
-                        "open": float(row["open"]),
-                        "high": float(row["high"]),
-                        "low": float(row["low"]),
-                        "close": float(row["close"]),
+                        "time": str(pd.to_datetime(snapshot.time[i])),
+                        "open": float(snapshot.open[i]),
+                        "high": float(snapshot.high[i]),
+                        "low": float(snapshot.low[i]),
+                        "close": float(snapshot.close[i]),
                     }
                 )
         t_start = pd.to_datetime(self.res_times[idx1]).to_datetime64()
@@ -981,17 +1078,25 @@ class ChartTab(QWidget):
 
     def _clear_strategy_drawings(self):
         """Clear all strategy-generated drawings from engine."""
-        for i in self.strategy_graphic_items:
-            self.plot_widget.removeItem(i)
-            if hasattr(i, "deleteLater"):
-                i.deleteLater()
+        for item in self.strategy_graphic_items.values():
+            self.plot_widget.removeItem(item)
+            if hasattr(item, "deleteLater"):
+                item.deleteLater()
         self.strategy_graphic_items.clear()
         self.engine.drawings.clear()
         logger.info("🧹 Strategy drawings cleared")
         self.redraw_chart()
 
     def _draw_user_items(self, rt):
-        """Re-render user drawings from stored time/price data."""
+        """Re-render user drawings from stored time/price data.
+
+        User drawings include interactive ROI items (line, rect, brush) that
+        carry drag state, so we use clear+recreate rather than diff (Sprint 4).
+        Viewport culling skips drawings outside the visible range to reduce
+        scene churn on heavy charts.
+        """
+        from gui.chart_tab.overlay_diff import cached_time64, is_drawing_in_viewport
+
         for i in self.user_graphic_items:
             self.plot_widget.removeItem(i)
             if hasattr(i, "deleteLater"):
@@ -999,7 +1104,12 @@ class ChartTab(QWidget):
         self.user_graphic_items.clear()
         if len(rt) == 0:
             return
+        vmin, vmax = rt[0], rt[-1]
         for d in self.user_drawings:
+            # Viewport culling: skip drawings outside visible range.
+            # hline has no time coord (always visible); others are checked.
+            if d.get("type") != "hline" and not is_drawing_in_viewport(d, vmin, vmax):
+                continue
             try:
                 color = QColor(d.get("color", "#FFFFFF"))
                 w = d.get("width", 2)
@@ -1017,7 +1127,7 @@ class ChartTab(QWidget):
                     self.plot_widget.addItem(lbl)
                     self.user_graphic_items.append(lbl)
                 elif dtype == "marker":
-                    t1 = pd.to_datetime(d["t"]).to_datetime64()
+                    t1 = cached_time64(d, "t", "_t_np")
                     i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                     # Red exclamation mark above candle
                     ohlc = self.candlestick_item.get_ohlc_at(i1)
@@ -1032,15 +1142,15 @@ class ChartTab(QWidget):
                     self.plot_widget.addItem(it)
                     self.user_graphic_items.append(it)
                 elif dtype == "text":
-                    t1 = pd.to_datetime(d["t"]).to_datetime64()
+                    t1 = cached_time64(d, "t", "_t_np")
                     i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                     it = pg.TextItem(d["text"], color=color, anchor=(0.5, 0.5))
                     it.setPos(i1, d["p"])
                     self.plot_widget.addItem(it)
                     self.user_graphic_items.append(it)
                 elif dtype == "line":
-                    t1 = pd.to_datetime(d["t1"]).to_datetime64()
-                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
+                    t1 = cached_time64(d, "t1", "_t1_np")
+                    t2 = cached_time64(d, "t2", "_t2_np")
                     i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                     i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
                     it = pg.LineSegmentROI(
@@ -1055,8 +1165,8 @@ class ChartTab(QWidget):
                     self.plot_widget.addItem(it)
                     self.user_graphic_items.append(it)
                 elif dtype == "rect":
-                    t1 = pd.to_datetime(d["t1"]).to_datetime64()
-                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
+                    t1 = cached_time64(d, "t1", "_t1_np")
+                    t2 = cached_time64(d, "t2", "_t2_np")
                     i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                     i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
                     mnx, mxx = min(i1, i2), max(i1, i2)
@@ -1082,7 +1192,7 @@ class ChartTab(QWidget):
                     pts = d["points"]
                     path = QPainterPath()
                     for idx, pt in enumerate(pts):
-                        t_px = pd.to_datetime(pt["t"]).to_datetime64()
+                        t_px = cached_time64(pt, "t", "_t_np")
                         i_px = max(0, int(np.searchsorted(rt, t_px, side="right")) - 1)
                         if idx == 0:
                             path.moveTo(i_px, pt["p"])
@@ -1122,6 +1232,7 @@ class ChartTab(QWidget):
         else:
             self.price_curve.hide()
             self.candlestick_item.show()
+        self.redraw_chart()
 
     def on_data_loaded(self, total):
         for p in [
@@ -1147,6 +1258,11 @@ class ChartTab(QWidget):
         self._reset_layers()
         self._need_autorange = True
         self._cache_key = None
+        self._cached_snapshot = None
+        self._cached_chart_arrays_key = None
+        self._cached_chart_arrays = None
+        self._cached_trade_marker_key = None
+        self._cached_trade_marker_payload = None
         self._prev_res_times = None
 
     def _attach_pyramid(self) -> None:
@@ -1179,7 +1295,17 @@ class ChartTab(QWidget):
                 pass
 
     def on_tf_changed(self, tf):
+        tf = str(tf)
+        if self.visual_tf_cb.currentText() != tf:
+            prev_block = self.visual_tf_cb.blockSignals(True)
+            self.visual_tf_cb.setCurrentText(tf)
+            self.visual_tf_cb.blockSignals(prev_block)
         self._cache_key = None
+        self._cached_snapshot = None
+        self._cached_chart_arrays_key = None
+        self._cached_chart_arrays = None
+        self._cached_trade_marker_key = None
+        self._cached_trade_marker_payload = None
         # Phase 0.2 (A3) — ensure forming arrays are built for the selected TF
         # so the chart can render the in-progress candle when switching away
         # from 1m after a headless run + reset + manual stepping.
@@ -1207,34 +1333,152 @@ class ChartTab(QWidget):
         m = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
         return m.get(self.visual_tf_cb.currentText().lower(), 1)
 
+    def _build_trade_marker_payload(self, rt):
+        """Precompute trade-marker arrays once per trade/timeframe state."""
+        pos = getattr(self.engine, "position", None)
+        cp = None
+        if pos is not None:
+            try:
+                cp = self.engine.ctx.candle.get("close", pos.entry_price)
+            except Exception:
+                cp = getattr(pos, "entry_price", None)
+        key = (
+            id(rt),
+            len(rt),
+            len(self.engine.trades),
+            bool(self.show_connections_cb.isChecked()),
+            id(pos),
+            getattr(pos, "entry_index", None),
+            float(cp) if cp is not None else None,
+        )
+        cached = self._cached_trade_marker_payload
+        if self._cached_trade_marker_key == key and cached is not None:
+            return cached, True
+
+        from gui.chart_tab.markers import build_trade_marker_arrays
+
+        arrays = build_trade_marker_arrays(
+            rt=rt,
+            trades=self.engine.trades,
+            df_len=len(self.engine.df) if self.engine.df is not None else len(rt),
+            position=pos,
+            position_close_price=cp,
+            show_connections=bool(self.show_connections_cb.isChecked()),
+        )
+
+        payload = {
+            "buy_x": np.asarray(arrays.bx, dtype=np.float64),
+            "buy_y": np.asarray(arrays.by, dtype=np.float64),
+            "sell_x": np.asarray(arrays.sx, dtype=np.float64),
+            "sell_y": np.asarray(arrays.sy, dtype=np.float64),
+            "close_x": np.asarray(arrays.cx, dtype=np.float64),
+            "close_y": np.asarray(arrays.cy, dtype=np.float64),
+            "win_x": np.asarray(arrays.win_x, dtype=np.float64),
+            "win_y": np.asarray(arrays.win_y, dtype=np.float64),
+            "loss_x": np.asarray(arrays.loss_x, dtype=np.float64),
+            "loss_y": np.asarray(arrays.loss_y, dtype=np.float64),
+        }
+        self._cached_trade_marker_key = key
+        self._cached_trade_marker_payload = payload
+        return payload, False
+
+    def _phase5_backend_state(self, bars_hint: int) -> dict:
+        """Return the current backend policy snapshot used by Phase 5 adaptive rendering."""
+        want_gl = should_use_gl_candles(
+            force_gpu=bool(GPU_STATE.get("enabled", False)),
+            bars_hint=bars_hint,
+        )
+        item_name = self.candlestick_item.__class__.__name__
+        is_gl_item = item_name == "GLCandlestickItem"
+        active_backend = str((getattr(self.candlestick_item, "_paint_stats", {}) or {}).get("last_backend", self._render_backend))
+        return {
+            "gpu_enabled": bool(GPU_STATE.get("enabled", False)),
+            "gpu_backend": str(GPU_STATE.get("backend", "software")),
+            "gl_candles_requested": bool(want_gl),
+            "gl_candles_active": bool(is_gl_item),
+            "render_backend": active_backend,
+        }
+
+    def _maybe_adapt_render_budget(self, perf_stats: dict) -> dict:
+        """Phase 5 adaptive rendering guardrail.
+
+        If redraw cost exceeds the frame budget, tighten the candle LOD budget.
+        The change is sticky for a short cooldown so we do not thrash the setting.
+        """
+        decision = {
+            "adaptive_lod_applied": False,
+            "adaptive_lod_prev": int(getattr(self.candlestick_item, "_max_bars", 0)),
+            "adaptive_lod_new": int(getattr(self.candlestick_item, "_max_bars", 0)),
+            "adaptive_reason": "none",
+        }
+        if not self._adaptive_lod_enabled:
+            decision["adaptive_reason"] = "disabled"
+            return decision
+
+        if self._adaptive_lod_cooldown > 0:
+            self._adaptive_lod_cooldown -= 1
+            decision["adaptive_reason"] = "cooldown"
+            return decision
+
+        total_ms = float(perf_stats.get("total_ms", 0.0))
+        prev_budget = max(250, int(getattr(self.candlestick_item, "_max_bars", 2000)))
+        if total_ms <= self._adaptive_lod_threshold_ms:
+            decision["adaptive_reason"] = "within_budget"
+            return decision
+
+        if prev_budget <= 500:
+            decision["adaptive_reason"] = "min_budget_reached"
+            return decision
+
+        new_budget = max(500, int(prev_budget * 0.75))
+        if new_budget == prev_budget:
+            decision["adaptive_reason"] = "unchanged"
+            return decision
+
+        try:
+            self.candlestick_item.set_max_bars(new_budget)
+            self._adaptive_lod_cooldown = 5
+            decision.update(
+                adaptive_lod_applied=True,
+                adaptive_lod_prev=prev_budget,
+                adaptive_lod_new=new_budget,
+                adaptive_reason="frame_budget_exceeded",
+            )
+        except Exception:
+            logger.exception("Phase 5 adaptive LOD update failed")
+            decision["adaptive_reason"] = "error"
+        return decision
+
     # ==============================
     # Main redraw
     # ==============================
     def redraw_chart(self):
         """Redraw the current rendering window of candles."""
         import time as _time
+        from gui.chart_tab.render_snapshot import ChartRenderSnapshot
+
         t_total = _time.perf_counter()
 
         if getattr(self, "_is_roi_dragging", False):
+            self._last_perf_stats = {"skip_reason": "roi_dragging"}
             return
 
         if self.engine.df is None:
+            self._last_perf_stats = {"skip_reason": "no_data"}
             return
         idx = self.engine.current_idx
         if idx < 0:
             idx = 0
         tf = self.visual_tf_cb.currentText().lower()
-        tf_min = self._get_tf_minutes()
 
         t0 = _time.perf_counter()
         ck = (idx, tf, id(self.engine.df))
-        if ck == self._cache_key and self._cached_res_df is not None:
-            res_df = self._cached_res_df
+        cache_hit = ck == self._cache_key and self._cached_snapshot is not None
+        if cache_hit:
+            snapshot = self._cached_snapshot
         else:
             if tf != "1m" and hasattr(self.engine, "tf_aggregator"):
-                # Sync tf_aggregator to the current 1m index so forming
-                # candles are visible even before the engine has stepped
-                # (after reset / fresh data load, _current_1m_idx == -1).
+                # HTF path: still uses DataFrame (separate optimization).
                 self.engine.tf_aggregator.advance_to(idx)
                 comp = self.engine.tf_aggregator.get_completed_tail(tf, 9999999)
                 form = self.engine.tf_aggregator.get_forming(tf)
@@ -1243,26 +1487,54 @@ class ChartTab(QWidget):
                     res_df = pd.DataFrame(agg)
                 else:
                     res_df = pd.DataFrame()
+
+                # Build snapshot from HTF DataFrame (fallback path).
+                if len(res_df) > 0:
+                    snapshot = self._snapshot_from_dataframe(res_df, tf, lod_level=None)
+                else:
+                    self._last_perf_stats = {
+                        "skip_reason": "empty_htf_df",
+                        "cache_hit": cache_hit,
+                        "tf": tf,
+                        "idx": idx,
+                    }
+                    return
             else:
-                # Pass the ENTIRE history up to the current index. 
-                # OpenGL + LodPyramid will handle the performance automatically.
-                res_df = self.engine.df.iloc[0 : idx + 1].copy()
+                # 1m path: zero-copy snapshot from engine numpy arrays (S3 fast path).
+                start = 0
+                end = idx + 1
 
-            # Phase 3 — Cap the render window to avoid lag when idx is at the
-            # end of a huge dataset (e.g. after headless run with 200k+ candles).
-            # We keep a generous buffer beyond the visible area for smooth
-            # scrolling, but never the full history.
-            if len(res_df) > 5_000:
-                tail = res_df.iloc[-5_000:].reset_index(drop=True)
-                res_df = tail
+                # Cap the render window to avoid lag on huge datasets.
+                if end - start > 5_000:
+                    start = end - 5_000
 
-            if len(res_df) == 0:
-                return
+                snapshot = ChartRenderSnapshot.from_engine_arrays(
+                    time=self.engine._time,
+                    open_=self.engine._open,
+                    high=self.engine._high,
+                    low=self.engine._low,
+                    close=self.engine._close,
+                    start=start,
+                    end=end,
+                    active_tf=tf,
+                    lod_level=None,
+                )
+
             self._cache_key = ck
-            self._cached_res_df = res_df
+            self._cached_snapshot = snapshot
         t_data = _time.perf_counter() - t0
 
-        rt = res_df["time"].values
+        rt = snapshot.time
+        n = snapshot.n
+
+        if n == 0:
+            self._last_perf_stats = {
+                "skip_reason": "empty_snapshot",
+                "cache_hit": cache_hit,
+                "tf": tf,
+                "idx": idx,
+            }
+            return
 
         shift = 0
         prev_rt = getattr(self, "_prev_res_times", None)
@@ -1274,37 +1546,51 @@ class ChartTab(QWidget):
         self._prev_res_times = rt
 
         self.res_times = rt
+        t0 = _time.perf_counter()
         # Cache floating point timestamps for instant O(1) lookups during mouse scrolling
-        try:
-            self._res_ts = pd.DatetimeIndex(rt).view(np.int64) / 10**9
-        except Exception:
-            self._res_ts = np.array([pd.to_datetime(t).timestamp() for t in rt])
-            
+        self._res_ts = snapshot.time_float_seconds()
         self.time_axis.set_times(rt)
+        t_axis = _time.perf_counter() - t0
 
-        n = len(res_df)
-        x = np.arange(n)
-        cl = res_df["close"].values
+        t0 = _time.perf_counter()
+        # Build chart arrays from snapshot (zero-copy, no DataFrame overhead).
+        x = snapshot.x
+        cl = snapshot.close
+        candle_arr = None
+
+        # Guard against NaN in close prices (corrupt data).
+        if len(cl) > 0 and (np.isnan(cl[-1]) or np.all(np.isnan(cl))):
+            self._last_perf_stats = {
+                "skip_reason": "nan_close_prices",
+                "cache_hit": cache_hit,
+                "tf": tf,
+                "idx": idx,
+            }
+            return
+
+        if self.candlestick_item.isVisible():
+            candle_arr = snapshot.candle_array()
+        t_ohlc_pack = _time.perf_counter() - t0
 
         vb = self.plot_widget.getViewBox()
         vb.enableAutoRange(x=False, y=False)
 
         t0 = _time.perf_counter()
-        self.price_curve.setData(x, cl)
+        if self.price_curve.isVisible():
+            self.price_curve.setData(x, cl)
         self.current_marker.setData([n - 1], [cl[-1]])
         self.price_hline.setPos(cl[-1])
         self.price_hline.show()
 
-        o = res_df["open"].values
-        c_vals = res_df["close"].values
-        l = res_df["low"].values
-        h = res_df["high"].values
-        cd = list(zip(x, o, c_vals, l, h))
-        self.candlestick_item.set_data(cd)
-        t_candles = _time.perf_counter() - t0
+        t0 = _time.perf_counter()
+        if self.candlestick_item.isVisible():
+            self.candlestick_item.set_data(candle_arr)
+        t_candle_set = _time.perf_counter() - t0
+        t_candles = t_ohlc_pack + t_candle_set
 
         t0 = _time.perf_counter()
-        self._draw_trade_markers(rt)
+        trade_marker_payload, trade_markers_cache_hit = self._build_trade_marker_payload(rt)
+        self._draw_trade_markers(rt, payload=trade_marker_payload)
         t_markers = _time.perf_counter() - t0
 
         t0 = _time.perf_counter()
@@ -1316,25 +1602,28 @@ class ChartTab(QWidget):
         t_user = _time.perf_counter() - t0
 
         t0 = _time.perf_counter()
+        t_autofit = 0.0
         # ── Camera control ──
         cur_x = n - 1
         default_window = 150.0  # Sensible default zoom (number of bars)
-        
+
         if self._need_autorange or self._tracked_xrange is None:
             self._need_autorange = False
-            
+
             # Instead of auto-ranging everything, set a sensible default window
             # focused on the current (latest) candle.
             new_right = cur_x + 5.0
             new_left = max(-0.5, new_right - default_window)
             new_xrange = [new_left, new_right]
-            
+
             vb.setRange(xRange=new_xrange, padding=0)
             self._tracked_xrange = new_xrange
             self._user_zoom_width = default_window
-            
+
             if self.autofit_y:
-                self._autofit_y(vb, res_df, n)
+                t_fit = _time.perf_counter()
+                self._autofit_y(vb, snapshot, n)
+                t_autofit += _time.perf_counter() - t_fit
         else:
             xmin, xmax = self._tracked_xrange
             w = self._user_zoom_width if self._user_zoom_width is not None else (xmax - xmin)
@@ -1346,41 +1635,80 @@ class ChartTab(QWidget):
             # stick to the latest candle.
             # "Near edge" = within 10% of window width from the right.
             follow_threshold = xmax - (w * 0.1)
-            
+
             if cur_x >= follow_threshold:
                 new_right = cur_x + 5.0
                 new_xrange = [new_right - w, new_right]
             else:
                 new_xrange = [xmin, xmax]
-                
+
             vb.setRange(xRange=new_xrange, padding=0)
             self._tracked_xrange = new_xrange
             if self.autofit_y:
-                self._autofit_y(vb, res_df, n)
+                t_fit = _time.perf_counter()
+                self._autofit_y(vb, snapshot, n)
+                t_autofit += _time.perf_counter() - t_fit
         t_camera = _time.perf_counter() - t0
 
+        candle_stats = getattr(self.candlestick_item, "_paint_stats", {}) or {}
+        visible_lo, visible_hi = (0, 0)
+        try:
+            visible_lo, visible_hi = self.candlestick_item._visible_slice()
+        except Exception:
+            pass
+        visible_bars = max(0, int(visible_hi - visible_lo))
         t_all = _time.perf_counter() - t_total
-        if t_all > 0.030:  # Only log when redraw takes > 30ms
-            logger.info(
-                f"⏱ redraw: data={t_data*1000:.1f}ms "
-                f"candles={t_candles*1000:.1f}ms "
-                f"markers={t_markers*1000:.1f}ms "
-                f"strategy={t_strategy*1000:.1f}ms "
-                f"user_draw={t_user*1000:.1f}ms "
-                f"camera={t_camera*1000:.1f}ms "
-                f"TOTAL={t_all*1000:.1f}ms "
-                f"(n={n}, trades={len(self.engine.trades)}, drawings={len(self.engine.drawings)})"
-            )
+        perf_stats = {
+            "tf": tf,
+            "idx": int(idx),
+            "cache_hit": bool(cache_hit),
+            "trade_markers_cache_hit": bool(trade_markers_cache_hit),
+            "bars_total": int(n),
+            "bars_visible": int(visible_bars),
+            "trades_total": int(len(self.engine.trades)),
+            "drawings_total": int(len(self.engine.drawings)),
+            "markers_enabled": bool(self.show_markers_cb.isChecked()),
+            "connections_enabled": bool(self.show_connections_cb.isChecked()),
+            "backend": str(candle_stats.get("last_backend", "painter")),
+            "data_prepare_ms": round(t_data * 1000.0, 3),
+            "axis_prepare_ms": round(t_axis * 1000.0, 3),
+            "ohlc_pack_ms": round(t_ohlc_pack * 1000.0, 3),
+            "candles_set_data_ms": round(t_candle_set * 1000.0, 3),
+            "candles_total_ms": round(t_candles * 1000.0, 3),
+            "markers_ms": round(t_markers * 1000.0, 3),
+            "strategy_ms": round(t_strategy * 1000.0, 3),
+            "user_draw_ms": round(t_user * 1000.0, 3),
+            "camera_ms": round(t_camera * 1000.0, 3),
+            "autofit_ms": round(t_autofit * 1000.0, 3),
+            "candles_gen_ms": round(float(candle_stats.get("gen_time_ms", 0.0)), 3),
+            "candles_paint_ms": round(float(candle_stats.get("paint_time_ms", 0.0)), 3),
+            "candles_draw_lines_calls": int(candle_stats.get("draw_lines_calls", 0)),
+            "candles_draw_rects_calls": int(candle_stats.get("draw_rects_calls", 0)),
+            "candles_bars_drawn": int(candle_stats.get("bars_drawn", 0)),
+            "candles_bars_culled": int(candle_stats.get("bars_culled", 0)),
+            "candles_viewport_cache_hit": bool(candle_stats.get("viewport_cache_hit", False)),
+            "total_ms": round(t_all * 1000.0, 3),
+        }
+        perf_stats.update(self._phase5_backend_state(int(n)))
+        perf_stats.update(self._maybe_adapt_render_budget(perf_stats))
+        self._last_perf_stats = perf_stats
+        hist = self._perf_stats_history
+        hist.append(perf_stats)
+        if len(hist) > 120:
+            del hist[:-120]
 
-    def _autofit_y(self, vb, res_df, n):
+        if t_all * 1000.0 > self._perf_log_threshold_ms:
+            logger.info("chart_perf %s", perf_stats)
+
+    def _autofit_y(self, vb, snapshot, n):
         """Auto-fit Y axis to the high/low range of visible candles."""
         vr = vb.viewRect()
         x_left = max(0, int(vr.left()))
         x_right = min(n - 1, int(vr.right()))
         if x_right < x_left:
             return
-        visible_h = res_df["high"].values[x_left : x_right + 1]
-        visible_l = res_df["low"].values[x_left : x_right + 1]
+        visible_h = snapshot.high[x_left : x_right + 1]
+        visible_l = snapshot.low[x_left : x_right + 1]
         if len(visible_h) == 0:
             return
         y_min = float(visible_l.min())
@@ -1494,17 +1822,15 @@ class ChartTab(QWidget):
         """
         if total_rows <= 0:
             return
-        
-        timer = getattr(self, "_pager_debounce_timer", None)
-        if timer is None:
+
+        if not hasattr(self, "_pager_debounce_timer"):
             from PySide6.QtCore import QTimer
-            timer = QTimer(self)
-            timer.setSingleShot(True)
-            timer.setInterval(200) # 200ms debounce
-            timer.timeout.connect(self._do_pager_chunks_changed)
-            self._pager_debounce_timer = timer
-        
-        timer.start()
+            self._pager_debounce_timer = QTimer(self)
+            self._pager_debounce_timer.setSingleShot(True)
+            self._pager_debounce_timer.setInterval(200)
+            self._pager_debounce_timer.timeout.connect(self._do_pager_chunks_changed)
+
+        self._pager_debounce_timer.start()
 
     def _do_pager_chunks_changed(self) -> None:
         pager = getattr(self, "_data_pager", None)
@@ -1549,7 +1875,7 @@ class ChartTab(QWidget):
             self.plot_widget.removeItem(item)
         self.trade_graphic_items.clear()
 
-    def _draw_trade_markers(self, rt):
+    def _draw_trade_markers(self, rt, payload=None):
         self._clear_trade_lines()
         show = self.show_markers_cb.isChecked()
         show_l = self.show_connections_cb.isChecked()
@@ -1564,22 +1890,40 @@ class ChartTab(QWidget):
                 p.setData([], [])
             return
 
-        from gui.chart_tab.markers import build_trade_marker_arrays
-
         df = self.engine.df
         pos = self.engine.position
         cp = None
         if pos is not None:
             cp = self.engine.ctx.candle.get("close", pos.entry_price)
 
-        arrays = build_trade_marker_arrays(
-            rt=rt,
-            trades=self.engine.trades,
-            df_len=len(df),
-            position=pos,
-            position_close_price=cp,
-            show_connections=show_l,
-        )
+        if payload is None:
+            from gui.chart_tab.markers import build_trade_marker_arrays
+
+            arrays = build_trade_marker_arrays(
+                rt=rt,
+                trades=self.engine.trades,
+                df_len=len(df),
+                position=pos,
+                position_close_price=cp,
+                show_connections=show_l,
+            )
+        else:
+            arrays = type(
+                "_MarkerPayload",
+                (),
+                {
+                    "bx": payload["buy_x"],
+                    "by": payload["buy_y"],
+                    "sx": payload["sell_x"],
+                    "sy": payload["sell_y"],
+                    "cx": payload["close_x"],
+                    "cy": payload["close_y"],
+                    "win_x": payload["win_x"],
+                    "win_y": payload["win_y"],
+                    "loss_x": payload["loss_x"],
+                    "loss_y": payload["loss_y"],
+                },
+            )()
 
         # Open-position SL line is the only piece of per-position graphics
         # that still goes through ``trade_graphic_items``; everything else
@@ -1611,93 +1955,119 @@ class ChartTab(QWidget):
     # Strategy drawings
     # ==============================
     def _draw_strategy(self, rt):
-        for item in self.strategy_graphic_items:
-            self.plot_widget.removeItem(item)
-        self.strategy_graphic_items.clear()
+        """Render strategy drawings with diff reconciliation (Sprint 4).
+
+        Instead of clear+recreate, compute diff between old and new drawings
+        and only add/remove changed items. Reuses existing items when possible.
+        """
+        from gui.chart_tab.overlay_diff import drawing_id, diff_overlays, is_drawing_in_viewport
+
         hidden = {tag for tag, act in self.layer_cbs.items() if not act.isChecked()}
         if len(rt) == 0:
+            # No visible data — remove all strategy items.
+            for item in self.strategy_graphic_items.values():
+                self.plot_widget.removeItem(item)
+            self.strategy_graphic_items.clear()
             return
+
         vmin, vmax = rt[0], rt[-1]
+
+        # Filter drawings: visible in viewport + not hidden by layer toggle.
+        visible_drawings = []
         for d in self.engine.drawings:
             dtag = d.get("tag", "")
             if dtag and dtag in hidden:
                 continue
-            try:
-                # Use pre-cached numpy datetime64 (set by engine.add_drawing)
-                t1 = d.get("_t_np") or d.get("_t1_np")
-                if t1 is None:
-                    tk = "t" if "t" in d else "t1"
-                    t1 = pd.to_datetime(d[tk]).to_datetime64()
-                if "_t2_np" in d:
-                    t2 = d["_t2_np"]
-                    if t1 < vmin and t2 < vmin:
-                        continue
-                    if t1 > vmax and t2 > vmax:
-                        continue
-                elif "t2" in d:
-                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    if t1 < vmin and t2 < vmin:
-                        continue
-                    if t1 > vmax and t2 > vmax:
-                        continue
-                else:
-                    if t1 < vmin or t1 > vmax:
-                        continue
-                i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
-                p1 = d.get("p", d.get("p1"))
-                rc = d.get("color", "white")
-                if isinstance(rc, str) and rc.startswith("rgba"):
-                    try:
-                        pts = [
-                            float(p.strip())
-                            for p in rc.replace("rgba(", "").replace(")", "").split(",")
-                        ]
-                        color = QColor(int(pts[0]), int(pts[1]), int(pts[2]), int(pts[3] * 255))
-                    except (ValueError, IndexError, TypeError):
-                        color = QColor("white")
-                else:
-                    color = QColor(rc)
-                if not color.isValid():
-                    color = QColor("white")
+            if not is_drawing_in_viewport(d, vmin, vmax):
+                continue
+            visible_drawings.append(d)
 
-                if d["type"] == "line":
-                    t2 = d.get("_t2_np")
-                    if t2 is None:
-                        t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
-                    it = pg.PlotDataItem(
-                        [i1, i2], [p1, d["p2"]], pen=pg.mkPen(color, width=d.get("width", 1))
-                    )
-                    self.plot_widget.addItem(it)
-                    self.strategy_graphic_items.append(it)
-                elif d["type"] == "rect":
-                    t2 = d.get("_t2_np")
-                    if t2 is None:
-                        t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
-                    p2 = d["p2"]
-                    mnx, mxx = min(i1, i2), max(i1, i2)
-                    mny, mxy = min(p1, p2), max(p1, p2)
-                    brush = None
-                    if d.get("fill", True):
-                        fc = QColor(color)
-                        fc.setAlphaF(d.get("opacity", 0.3))
-                        brush = pg.mkBrush(fc)
-                    it = QGraphicsRectItem(
-                        float(mnx), float(mny), float(mxx - mnx) or 1.0, float(mxy - mny)
-                    )
-                    it.setPen(pg.mkPen(color))
-                    if brush:
-                        it.setBrush(brush)
-                    self.plot_widget.addItem(it)
-                    self.strategy_graphic_items.append(it)
-                elif d["type"] == "text":
-                    it = pg.TextItem(d["text"], color=color, anchor=(0.5, 0))
-                    it.setPos(i1, p1)
-                    self.plot_widget.addItem(it)
-                    self.strategy_graphic_items.append(it)
-            except Exception as e:
-                logger.error(f"Draw: {e}")
+        # Compute diff: which items to remove, keep, add.
+        old_ids = self.strategy_graphic_items  # Dict[id -> item]
+        to_remove, to_keep, to_add = diff_overlays(old_ids, visible_drawings)
+
+        # Remove items no longer in the scene.
+        for rid in to_remove:
+            item = old_ids.pop(rid)
+            self.plot_widget.removeItem(item)
+
+        # Add new items.
+        for d in to_add:
+            item = self._create_strategy_item(d, rt)
+            if item is not None:
+                did = drawing_id(d)
+                self.strategy_graphic_items[did] = item
+
+    def _create_strategy_item(self, d: dict, rt):
+        """Create a QGraphicsItem for a strategy drawing dict.
+
+        Extracted from the old _draw_strategy loop for reuse in diff reconciliation.
+        """
+        try:
+            # Time coordinate resolution (use cached _t_np if available).
+            t1 = d.get("_t_np") or d.get("_t1_np")
+            if t1 is None:
+                tk = "t" if "t" in d else "t1"
+                t1 = pd.to_datetime(d[tk]).to_datetime64()
+            i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
+            p1 = d.get("p", d.get("p1"))
+
+            # Color parsing.
+            rc = d.get("color", "white")
+            if isinstance(rc, str) and rc.startswith("rgba"):
+                try:
+                    pts = [
+                        float(p.strip())
+                        for p in rc.replace("rgba(", "").replace(")", "").split(",")
+                    ]
+                    color = QColor(int(pts[0]), int(pts[1]), int(pts[2]), int(pts[3] * 255))
+                except (ValueError, IndexError, TypeError):
+                    color = QColor("white")
+            else:
+                color = QColor(rc)
+            if not color.isValid():
+                color = QColor("white")
+
+            # Create item by type.
+            if d["type"] == "line":
+                t2 = d.get("_t2_np")
+                if t2 is None:
+                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
+                i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
+                it = pg.PlotDataItem(
+                    [i1, i2], [p1, d["p2"]], pen=pg.mkPen(color, width=d.get("width", 1))
+                )
+                self.plot_widget.addItem(it)
+                return it
+            elif d["type"] == "rect":
+                t2 = d.get("_t2_np")
+                if t2 is None:
+                    t2 = pd.to_datetime(d["t2"]).to_datetime64()
+                i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
+                p2 = d["p2"]
+                mnx, mxx = min(i1, i2), max(i1, i2)
+                mny, mxy = min(p1, p2), max(p1, p2)
+                brush = None
+                if d.get("fill", True):
+                    fc = QColor(color)
+                    fc.setAlphaF(d.get("opacity", 0.3))
+                    brush = pg.mkBrush(fc)
+                it = QGraphicsRectItem(
+                    float(mnx), float(mny), float(mxx - mnx) or 1.0, float(mxy - mny)
+                )
+                it.setPen(pg.mkPen(color))
+                if brush:
+                    it.setBrush(brush)
+                self.plot_widget.addItem(it)
+                return it
+            elif d["type"] == "text":
+                it = pg.TextItem(d["text"], color=color, anchor=(0.5, 0))
+                it.setPos(i1, p1)
+                self.plot_widget.addItem(it)
+                return it
+        except Exception as e:
+            logger.error(f"Draw strategy item: {e}")
+            return None
 
     # ==============================
     # Trade focus navigation
@@ -1723,6 +2093,9 @@ class ChartTab(QWidget):
         Intended for navigation from Trades tab popups; must never raise.
         If *force* is True, re-navigate even if the same trade was already focused.
         """
+        if not self._chart_alive:
+            return
+
         trade_id = getattr(trade, "id", None)
         if not force and hasattr(self, "_last_focused_trade") and self._last_focused_trade == trade_id:
             return
@@ -1862,8 +2235,6 @@ class ChartTab(QWidget):
                     self._trade_focus_clear_timer.timeout.connect(
                         self._clear_trade_focus_highlight
                     )
-                elif self._trade_focus_clear_timer is not None and not self._chart_alive:
-                    return
                 self._trade_focus_clear_timer.start(10000)
             except Exception:
                 pass

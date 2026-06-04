@@ -15,6 +15,7 @@ import sys
 from typing import Any, Dict
 
 import numpy as np
+import pandas as pd
 import pytest
 
 # Headless safety: shared_memory needs ``/dev/shm`` to exist on
@@ -26,9 +27,29 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+from engine.execution.execution import ExecutionModel  # noqa: E402
+from engine.execution.prepared_dataset import prepare_vectorized_dataset  # noqa: E402
+from engine.models.models import AssetConfig  # noqa: E402
 from engine.optimization import shared_arrays  # noqa: E402
 from engine.optimization.optimizer import grid_search  # noqa: E402
 from engine.optimization.shared_arrays import SharedArrayBundle  # noqa: E402
+
+
+def _asset_for_prepared() -> AssetConfig:
+    return AssetConfig(
+        name="TEST",
+        point_value=1.0,
+        tick_size=1.0,
+        buffer=0.0,
+        max_lots_per_100k=10,
+        currency="USD",
+        min_lot=0.01,
+        lot_step=0.01,
+        spread_points=0.0,
+        commission_per_lot=0.0,
+        close_on_weekend=False,
+        enforce_trading_hours=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +173,46 @@ def test_grid_search_reads_shared_data_from_workers() -> None:
     for run in result.runs:
         i = run.params["i"]
         assert run.metrics["profit_factor"] == pytest.approx(close[i])
+        assert run.metrics["n"] == n
+
+
+@pytest.mark.skipif(not _spawnable(), reason="spawn context not available")
+def test_prepared_dataset_bundle_reads_shared_data_from_workers() -> None:
+    n = 128
+    close = np.linspace(100.0, 120.0, n)
+    df = pd.DataFrame(
+        {
+            "time": pd.date_range("2024-01-01", periods=n, freq="min"),
+            "Open": close,
+            "High": close + 1.0,
+            "Low": close - 1.0,
+            "Close": close,
+            "Volume": 1.0,
+        }
+    )
+    prep = prepare_vectorized_dataset(
+        df,
+        asset=_asset_for_prepared(),
+        execution_model=ExecutionModel("Optimistic"),
+    )
+
+    with prep.to_shared_array_bundle() as bundle:
+        assert bundle.bundle_name.startswith("agregat_prepared_")
+        idxs = [0, 7, 21, 63, 100]
+        result = grid_search(
+            _runner_reads_shared,
+            {"__bundle__": [bundle.bundle_name], "i": idxs},
+            score_key="profit_factor",
+            higher_is_better=True,
+            n_workers=2,
+            mp_chunk_size=2,
+            shared_arrays=bundle,
+        )
+
+    assert len(result.runs) == len(idxs)
+    for run in result.runs:
+        i = run.params["i"]
+        assert run.metrics["profit_factor"] == pytest.approx(prep.close[i])
         assert run.metrics["n"] == n
 
 

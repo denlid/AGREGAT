@@ -23,7 +23,7 @@ Design notes:
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -44,6 +44,9 @@ from engine.models.models import (
 from engine.analytics.stats_accumulator import DrawdownTracker, StatsAccumulator
 from engine.data.tf_aggregator import TimeframeAggregator
 from engine.execution.vectorized_engine import VectorizedResult
+
+if TYPE_CHECKING:
+    from engine.execution.prepared_dataset import PreparedDataset
 
 logger = logging.getLogger("StrategyTester.engine.backtest")
 
@@ -97,27 +100,35 @@ class BacktestCore:
     def _refresh_numpy_columns(self) -> None:
         """Re-bind the NumPy storage from ``self.df`` and refresh the
         DataView's column dict.
+
+        Sprint 3.1: Uses float32 for OHLC arrays (50% memory save) when
+        AGREGAT_USE_FLOAT32 env var is set. Precision loss is negligible
+        for price data (<0.00003).
         """
+        import os
+        use_float32 = os.environ.get("AGREGAT_USE_FLOAT32", "").lower() in ("1", "true", "yes")
+        price_dtype = np.float32 if use_float32 else np.float64
+
         df = self.df
         if df is None or len(df) == 0:
-            self._open = np.empty(0, dtype=np.float64)
-            self._high = np.empty(0, dtype=np.float64)
-            self._low = np.empty(0, dtype=np.float64)
-            self._close = np.empty(0, dtype=np.float64)
-            self._volume = np.empty(0, dtype=np.float64)
+            self._open = np.empty(0, dtype=price_dtype)
+            self._high = np.empty(0, dtype=price_dtype)
+            self._low = np.empty(0, dtype=price_dtype)
+            self._close = np.empty(0, dtype=price_dtype)
+            self._volume = np.empty(0, dtype=price_dtype)
             self._time = np.empty(0, dtype="datetime64[ns]")
             # Phase 1.4 — per-bar spread overrides (points). Empty when
             # the data source has no ``spread`` column.
-            self._spread_per_bar = np.empty(0, dtype=np.float64)
+            self._spread_per_bar = np.empty(0, dtype=price_dtype)
         else:
-            self._open = df["open"].to_numpy(dtype=np.float64, copy=False)
-            self._high = df["high"].to_numpy(dtype=np.float64, copy=False)
-            self._low = df["low"].to_numpy(dtype=np.float64, copy=False)
-            self._close = df["close"].to_numpy(dtype=np.float64, copy=False)
+            self._open = df["open"].to_numpy(dtype=price_dtype, copy=False)
+            self._high = df["high"].to_numpy(dtype=price_dtype, copy=False)
+            self._low = df["low"].to_numpy(dtype=price_dtype, copy=False)
+            self._close = df["close"].to_numpy(dtype=price_dtype, copy=False)
             volume = (
-                df["volume"].to_numpy(dtype=np.float64, copy=False)
+                df["volume"].to_numpy(dtype=price_dtype, copy=False)
                 if "volume" in df.columns
-                else np.zeros(len(df), dtype=np.float64)
+                else np.zeros(len(df), dtype=price_dtype)
             )
             self._volume = volume
             self._time = pd.to_datetime(df["time"]).to_numpy()
@@ -126,10 +137,10 @@ class BacktestCore:
             # stays False and the legacy fixed spread is used.
             if "spread" in df.columns:
                 self._spread_per_bar = df["spread"].to_numpy(
-                    dtype=np.float64, copy=False
+                    dtype=price_dtype, copy=False
                 )
             else:
-                self._spread_per_bar = np.empty(0, dtype=np.float64)
+                self._spread_per_bar = np.empty(0, dtype=price_dtype)
         # Re-bind the DataView's dict in place so existing references
         # (e.g. ``ctx.data``) automatically pick up the new arrays.
         cols = self.data._arrays  # noqa: SLF001 — intentional internal handshake
@@ -183,6 +194,10 @@ class BacktestCore:
     # Lifecycle
     # ------------------------------------------------------------------
     def __init__(self) -> None:
+        import os
+        use_float32 = os.environ.get("AGREGAT_USE_FLOAT32", "").lower() in ("1", "true", "yes")
+        price_dtype = np.float32 if use_float32 else np.float64
+
         self.df: Optional[pd.DataFrame] = None
         self.df_full: Optional[pd.DataFrame] = (
             None  # untouched copy for date-range filtering
@@ -199,11 +214,12 @@ class BacktestCore:
         # (per-bar reads) and strategies via :class:`DataView`. Empty
         # placeholders are installed up front so ``ctx.data`` has a
         # usable shape even before any candle is fed.
-        self._open = np.empty(0, dtype=np.float64)
-        self._high = np.empty(0, dtype=np.float64)
-        self._low = np.empty(0, dtype=np.float64)
-        self._close = np.empty(0, dtype=np.float64)
-        self._volume = np.empty(0, dtype=np.float64)
+        # Sprint 3.1: Uses float32 when AGREGAT_USE_FLOAT32=1 (50% memory save)
+        self._open = np.empty(0, dtype=price_dtype)
+        self._high = np.empty(0, dtype=price_dtype)
+        self._low = np.empty(0, dtype=price_dtype)
+        self._close = np.empty(0, dtype=price_dtype)
+        self._volume = np.empty(0, dtype=price_dtype)
         self._time = np.empty(0, dtype="datetime64[ns]")
 
         self.current_idx = -1
@@ -1361,7 +1377,12 @@ class BacktestCore:
     # ------------------------------------------------------------------
     # Vectorised (Quant) execution mode
     # ------------------------------------------------------------------
-    def run_vectorized(self) -> Optional[VectorizedResult]:
+    def run_vectorized(
+        self,
+        *,
+        prepared: Optional[PreparedDataset] = None,
+        optimizer_mode: bool = False,
+    ) -> Optional[VectorizedResult]:
         """Execute the loaded strategy via the fast-quant vectorised engine.
 
         Mirrors the on-candle ``run_to_end`` path — the engine state
@@ -1370,12 +1391,44 @@ class BacktestCore:
         GUI (or any subscriber) refreshes just like after a Visual run.
         Returns the raw :class:`engine.vectorized_engine.VectorizedResult`
         for callers that want to inspect the equity curve directly.
+
+        Parameters
+        ----------
+        prepared
+            Optional pre-built :class:`PreparedDataset` for the loaded ``df``.
+            When supplied, the engine skips the numpy-extract + mask-build
+            stages — the key reuse path for optimizer sweeps over one dataset
+            (Roadmap v2 / S0.2).
+        optimizer_mode
+            When True, runs in summary-only fast mode: no ``Trade`` objects,
+            no equity curve, no engine-state materialization. Returns the bare
+            :class:`VectorizedResult` (``summary`` + ``perf`` only). Use for
+            parameter sweeps where only metrics matter. The default (False)
+            keeps the full GUI single-run behaviour unchanged.
         """
         from engine.execution.vectorized_engine import run_vectorized as _run_vec
 
         if self.df is None or self.strategy is None:
             logger.warning("run_vectorized: data or strategy not loaded")
             return None
+
+        # Optimizer fast path: skip Trade materialization + state replay
+        # entirely and return summary/perf only. We must NOT call self.reset()
+        # or touch GUI state here — sweeps run this thousands of times and the
+        # caller only consumes result.summary. (Roadmap v2 / S0.1)
+        if optimizer_mode:
+            return _run_vec(
+                self.df,
+                self.strategy,
+                asset=self.asset_config,
+                execution_model=self.execution_model,
+                initial_equity=self.initial_equity,
+                risk_pct=self.risk_pct,
+                prepared=prepared,
+                summary_only=True,
+                compact_result=True,
+                include_equity_curve=False,
+            )
 
         # Reset state before a fresh quant run (clears trades + equity).
         self.reset()
@@ -1386,6 +1439,7 @@ class BacktestCore:
             execution_model=self.execution_model,
             initial_equity=self.initial_equity,
             risk_pct=self.risk_pct,
+            prepared=prepared,
         )
 
         # Materialise the result into engine state expected by the GUI tabs.

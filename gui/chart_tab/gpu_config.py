@@ -47,6 +47,8 @@ STATE: dict = {
     "configured": False,  # has configure_gpu_acceleration been called?
     "enabled": False,  # did pyqtgraph end up in OpenGL mode?
     "reason": "not_configured",  # short tag explaining the decision
+    "backend": "software",  # selected chart backend family
+    "gl_candles": False,  # whether shader-backed candles are requested
 }
 
 
@@ -57,28 +59,73 @@ def _reset_state_for_tests() -> None:
     STATE["configured"] = False
     STATE["enabled"] = False
     STATE["reason"] = "not_configured"
+    STATE["backend"] = "software"
+    STATE["gl_candles"] = False
+    if hasattr(configure_gpu_acceleration, "_configured"):
+        delattr(configure_gpu_acceleration, "_configured")
 
 
 from engine.utils.env_flag import truthy_env
+
+
+def should_use_gl_candles(
+    *,
+    force_gpu: Optional[bool] = None,
+    force_gl_candles: Optional[bool] = None,
+    bars_hint: Optional[int] = None,
+) -> bool:
+    """Decide whether the shader-backed candle renderer should be requested.
+
+    Phase 5 production hardening: unify the pyqtgraph OpenGL switch and the
+    candle-shader switch into one predictable policy.
+
+    Rules:
+    * explicit ``force_gl_candles`` wins;
+    * otherwise a truthy ``AGREGAT_GL_CANDLES`` wins;
+    * otherwise GL candles are enabled only when GPU mode is enabled/requested
+      *and* the chart is large enough to benefit.
+
+    ``bars_hint`` is advisory only; when omitted we conservatively assume the
+    caller can still benefit from GL candles if GPU was explicitly requested.
+    """
+    if force_gl_candles is not None:
+        return bool(force_gl_candles)
+
+    env_pref = truthy_env(os.environ.get("AGREGAT_GL_CANDLES"))
+    if env_pref is not None:
+        return bool(env_pref)
+
+    if force_gpu is None:
+        gpu_env = truthy_env(os.environ.get(_ENV_VAR))
+        gpu_enabled = bool(gpu_env) if gpu_env is not None else is_opengl_available()
+    else:
+        gpu_enabled = bool(force_gpu)
+
+    if not gpu_enabled:
+        return False
+
+    if bars_hint is None:
+        return True
+    return int(bars_hint) >= 2_000
 
 def is_opengl_available() -> bool:
     """Best-effort check that pyqtgraph can switch to its OpenGL
     backend without crashing.
 
-    pyqtgraph's OpenGL viewport drags ``PySide6.QtOpenGLWidgets`` and
-    a working ``QOpenGLContext``. On a Linux CI runner without a GPU
-    or on a stripped-down PySide6 install the imports raise
-    :class:`ImportError`. We treat any failure here as "GPU path
-    unavailable" and let the caller fall back.
+    Important: avoid creating a real ``QOpenGLContext`` here. On some
+    Windows/PySide combinations (and notably on Python 3.14 CI boxes)
+    ``QOpenGLContext.create()`` may crash the process with a native
+    access violation instead of raising a Python exception. For the
+    bootstrap decision we only need a conservative import-level probe.
+
+    If the OpenGL bindings import, we treat the GPU path as *potentially*
+    available and let the actual widget/backend setup decide later. Any
+    later failure is already handled by :func:`configure_gpu_acceleration`.
     """
     try:
         import pyqtgraph as _pg  # noqa: F401
         from PySide6 import QtOpenGLWidgets as _QtOpenGLWidgets  # noqa: F401
-        from PySide6.QtGui import QOpenGLContext, QSurfaceFormat
-        ctx = QOpenGLContext()
-        ctx.setFormat(QSurfaceFormat.defaultFormat())
-        if not ctx.create():
-            return False
+        from PySide6.QtGui import QOpenGLContext  # noqa: F401
     except Exception as exc:  # noqa: BLE001 — diagnostic only
         logger.debug("OpenGL probe failed: %r", exc)
         return False
@@ -124,7 +171,7 @@ def configure_gpu_acceleration(force: Optional[bool] = None) -> bool:
     if force is None:
         env_pref = truthy_env(os.environ.get(_ENV_VAR))
         if env_pref is False:
-            STATE.update(configured=True, enabled=False, reason="env_disabled")
+            STATE.update(configured=True, enabled=False, reason="env_disabled", backend="software", gl_candles=False)
             try:
                 import pyqtgraph as pg
 
@@ -137,7 +184,7 @@ def configure_gpu_acceleration(force: Optional[bool] = None) -> bool:
         want_enable = bool(force)
 
     if not want_enable:
-        STATE.update(configured=True, enabled=False, reason="unavailable_or_disabled")
+        STATE.update(configured=True, enabled=False, reason="unavailable_or_disabled", backend="software", gl_candles=False)
         try:
             import pyqtgraph as pg
 
@@ -152,11 +199,17 @@ def configure_gpu_acceleration(force: Optional[bool] = None) -> bool:
         pg.setConfigOptions(useOpenGL=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to enable pyqtgraph OpenGL backend: %r", exc)
-        STATE.update(configured=True, enabled=False, reason="setconfig_failed")
+        STATE.update(configured=True, enabled=False, reason="setconfig_failed", backend="software", gl_candles=False)
         return False
 
     configure_gpu_acceleration._configured = True
-    STATE.update(configured=True, enabled=True, reason="enabled")
+    STATE.update(
+        configured=True,
+        enabled=True,
+        reason="enabled",
+        backend="opengl",
+        gl_candles=should_use_gl_candles(force_gpu=True),
+    )
     logger.info("Chart GPU acceleration: pyqtgraph OpenGL backend enabled")
     return True
 
@@ -165,4 +218,5 @@ __all__ = [
     "STATE",
     "configure_gpu_acceleration",
     "is_opengl_available",
+    "should_use_gl_candles",
 ]
