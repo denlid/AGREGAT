@@ -900,6 +900,9 @@ class ChartTab(QWidget):
             self.candlestick_item.show()
 
     def on_data_loaded(self, total):
+        symbol = getattr(self.engine.asset_config, "name", "default")
+        self.drawing_ctrl.set_symbol(symbol)
+
         for p in [
             self.price_curve,
             self.current_marker,

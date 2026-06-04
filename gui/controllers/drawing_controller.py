@@ -5,7 +5,9 @@ Strategy drawings (engine.drawings) remain in ChartTab — they are read-only an
 engine-owned, not interactive.
 """
 
+import copy
 import logging
+import sys
 from typing import List, Optional
 
 import numpy as np
@@ -367,19 +369,41 @@ class DrawingController(QObject):
     @is_roi_dragging.setter
     def is_roi_dragging(self, val: bool) -> None:
         self._is_roi_dragging = val
-        from PySide6.QtWidgets import QApplication
-        if val:
-            if not getattr(self, "_cursor_overridden", False):
-                QApplication.setOverrideCursor(Qt.CursorShape.ClosedHandCursor)
-                self._cursor_overridden = True
-        else:
-            if getattr(self, "_cursor_overridden", False):
+        try:
+            from PySide6.QtWidgets import QApplication
+            if val:
+                if not getattr(self, "_cursor_overridden", False):
+                    QApplication.setOverrideCursor(Qt.CursorShape.ClosedHandCursor)
+                    self._cursor_overridden = True
+            else:
+                if getattr(self, "_cursor_overridden", False):
+                    QApplication.restoreOverrideCursor()
+                    self._cursor_overridden = False
+        except Exception as e:
+            logger.error("Error setting is_roi_dragging cursor: %s", e)
+
+    def __del__(self) -> None:
+        # Prevent stuck ClosedHandCursor by restoring on destruction
+        if getattr(self, "_cursor_overridden", False):
+            try:
+                from PySide6.QtWidgets import QApplication
                 QApplication.restoreOverrideCursor()
-                self._cursor_overridden = False
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Tool configuration
     # ------------------------------------------------------------------
+
+    def set_plot_widget(self, plot_widget: pg.PlotWidget) -> None:
+        """Assign the PlotWidget reference to the controller."""
+        self._pw = plot_widget
+
+    def set_symbol(self, symbol: str) -> None:
+        """Set the active asset symbol and load its drawings."""
+        self._persist_key = symbol
+        self.load()
+        self._mark_dirty()
 
     def set_tool(self, name: str) -> None:
         self.current_tool = name
@@ -388,6 +412,7 @@ class DrawingController(QObject):
     def cancel(self) -> None:
         self._finish_drag(cancelled=True)
         self.set_tool("None")
+        self.is_roi_dragging = False
 
     def pick_color(self, parent=None) -> None:
         c = QColorDialog.getColor(self._draw_color, parent, "Drawing Color")
@@ -407,23 +432,23 @@ class DrawingController(QObject):
     def undo(self) -> None:
         if not self._history:
             return
-        self._redo.append(list(self.user_drawings))
+        self._redo.append(copy.deepcopy(self.user_drawings))
         self.user_drawings = self._history.pop()
-        drawings_persist.save(self.user_drawings)
+        drawings_persist.save(self.user_drawings, self._persist_key)
         self._mark_dirty()
         self.drawings_changed.emit()
 
     def redo(self) -> None:
         if not self._redo:
             return
-        self._history.append(list(self.user_drawings))
+        self._history.append(copy.deepcopy(self.user_drawings))
         self.user_drawings = self._redo.pop()
-        drawings_persist.save(self.user_drawings)
+        drawings_persist.save(self.user_drawings, self._persist_key)
         self._mark_dirty()
         self.drawings_changed.emit()
 
     def _save_state(self) -> None:
-        self._history.append(list(self.user_drawings))
+        self._history.append(copy.deepcopy(self.user_drawings))
         if len(self._history) > _MAX_UNDO:
             self._history.pop(0)
         self._redo.clear()
@@ -434,10 +459,10 @@ class DrawingController(QObject):
     # ------------------------------------------------------------------
 
     def load(self) -> None:
-        self.user_drawings = drawings_persist.load()
+        self.user_drawings = drawings_persist.load(self._persist_key)
 
     def save(self) -> None:
-        drawings_persist.save(self.user_drawings)
+        drawings_persist.save(self.user_drawings, self._persist_key)
 
     # ------------------------------------------------------------------
     # Clear
@@ -757,6 +782,19 @@ class DrawingController(QObject):
     def _clear_items(self) -> None:
         for item in self._graphic_items:
             try:
+                # Disconnect signals to prevent reference cycles and memory leaks
+                for sig_name in (
+                    "sigPositionChanged",
+                    "sigPositionChangeFinished",
+                    "sigRegionChangeStarted",
+                    "sigRegionChangeFinished",
+                ):
+                    if hasattr(item, sig_name):
+                        try:
+                            getattr(item, sig_name).disconnect()
+                        except Exception:
+                            pass
+
                 self._pw.removeItem(item)
                 if hasattr(item, "deleteLater"):
                     item.deleteLater()
