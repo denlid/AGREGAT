@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui.controllers.settings_binding import SettingsBinding
+from gui.controllers.settings_registry import ALL_KEYS, DEFAULTS
 from gui.persistence import settings_persist
 from gui.styling.theme import CHART_SCHEMES, register_theme_listener
 
@@ -530,49 +532,56 @@ class SettingsTab(QWidget):
         self.sub_tabs.addTab(ai_pane, "AI")
         main_layout.addWidget(self.sub_tabs)
 
+        # --- SettingsBinding — автоматичний capture/apply/reset/wire ---
+        self._bind = SettingsBinding()
+        self._bind.bind("theme", self.theme_cb)
+        self._bind.bind("chart_scheme", self.colors_cb)
+        self._bind.bind("font_size", self.font_size_spin)
+        self._bind.bind("timezone", self.tz_spin)
+        self._bind.bind("render_window", self.render_win)
+        self._bind.bind("cache_size", self.cache_size_spin)
+        self._bind.bind("batch_size", self.batch_size_spin)
+        self._bind.bind("show_grid", self.show_grid_cb)
+        self._bind.bind("crosshair", self.crosshair_cb)
+        self._bind.bind("autofit_y", self.autofit_y_cb)
+        self._bind.bind("initial_equity", self.equity_spin)
+        self._bind.bind("risk_pct", self.risk_pct_spin)
+        self._bind.bind("max_lots_per_100k", self.max_lots_spin)
+        self._bind.bind("exec_profile", self.exec_profile_cb)
+        self._bind.bind("exec_spread_points", self.spread_spin)
+        self._bind.bind("exec_commission_per_lot", self.commission_spin)
+        self._bind.bind("exec_slippage_points", self.slippage_spin)
+        self._bind.bind("fast_mode", self.fast_mode_cb)
+        self._bind.bind("log_level", self.log_level_cb)
+        self._bind.bind("auto_save_logs", self.auto_save_logs_cb)
+        self._bind.bind("max_log_lines", self.max_log_lines_spin)
+        self._bind.bind("ai_provider", self.ai_provider_cb)
+        self._bind.bind("ai_model", self.ai_model_cb)
+        self._bind.bind("ai_api_key", self.ai_api_key_le)
+        self._bind.bind("ai_custom_base_url", self.ai_custom_base_url_le)
+        self._bind.bind("ai_custom_extra_body", self.ai_custom_extra_body_le)
+        self._bind.bind("ai_max_tokens", self.ai_max_tokens_spin)
+
         # Wire persistence — every relevant signal saves the full snapshot.
         self._wire_persistence_signals()
+
+        # Валідація: перевіряємо що всі ключі з реєстру зареєстровані
+        # (крім тих, що управляються вручну)
+        try:
+            self._bind.validate(ALL_KEYS, exclude={"last_csv", "last_strat", "current_idx",
+                                                     "view_range", "chart_colors", "show_markers",
+                                                     "chart_mode", "timeframe", "asset",
+                                                     "show_volume", "last_asset",
+                                                     "strategy_params"})
+        except RuntimeError as e:
+            logger.warning(f"SettingsBinding validation: {e}")
 
         register_theme_listener(self._apply_theme)
 
     def _wire_persistence_signals(self) -> None:
-        widgets_text = [
-            self.theme_cb,
-            self.colors_cb,
-            self.exec_profile_cb,
-            self.log_level_cb,
-            self.ai_model_cb,
-        ]
-        self.ai_api_key_le.textChanged.connect(self._persist)
-        self.ai_custom_base_url_le.textChanged.connect(self._persist)
-        self.ai_custom_extra_body_le.textChanged.connect(self._persist)
-        widgets_value = [
-            self.font_size_spin,
-            self.equity_spin,
-            self.risk_pct_spin,
-            self.max_lots_spin,
-            self.tz_spin,
-            self.render_win,
-            self.cache_size_spin,
-            self.batch_size_spin,
-            self.max_log_lines_spin,
-            self.spread_spin,
-            self.commission_spin,
-            self.slippage_spin,
-        ]
-        widgets_toggle = [
-            self.fast_mode_cb,
-            self.auto_save_logs_cb,
-            self.show_grid_cb,
-            self.crosshair_cb,
-            self.autofit_y_cb,
-        ]
-        for w in widgets_text:
-            w.currentTextChanged.connect(self._persist)
-        for w in widgets_value:
-            w.valueChanged.connect(self._persist)
-        for w in widgets_toggle:
-            w.toggled.connect(self._persist)
+        """Підключити сигнали зміни до self._persist через SettingsBinding."""
+        # Автоматично підключаємо всі зареєстровані віджети
+        self._bind.wire_all(self._persist)
 
     def _normalize_loaded_ai_settings(self, settings: dict) -> dict:
         out = dict(settings)
@@ -646,38 +655,22 @@ class SettingsTab(QWidget):
 
     # ---- Persistence (Phase 2) ----
     def _capture_settings(self) -> dict:
-        """Return current widget state as a settings dict."""
+        """Return current widget state as a settings dict.
+
+        Uses :class:`SettingsBinding` for automatic capture of registered
+        widgets, then adds engine-derived values on top.
+        """
         em = getattr(self.engine, "execution_model", None)
-        snapshot = {
-            "theme": self.theme_cb.currentText(),
-            "chart_scheme": self.colors_cb.currentText(),
-            "font_size": self.font_size_spin.value(),
-            "initial_equity": self.equity_spin.value(),
-            "risk_pct": self.risk_pct_spin.value(),
-            "max_lots_per_100k": self.max_lots_spin.value(),
-            "timezone": self.tz_spin.value(),
-            "render_window": self.render_win.value(),
-            "cache_size": self.cache_size_spin.value(),
-            "batch_size": self.batch_size_spin.value(),
-            "log_level": self.log_level_cb.currentText(),
-            "ai_provider": self.ai_provider_cb.currentText(),
-            "ai_model": self.ai_model_cb.currentText().strip(),
-            "ai_api_key": self.ai_api_key_le.text(),
-            "ai_custom_base_url": self.ai_custom_base_url_le.text(),
-            "ai_custom_extra_body": self.ai_custom_extra_body_le.text(),
-            "ai_max_tokens": self.ai_max_tokens_spin.value(),
-            "fast_mode": self.fast_mode_cb.isChecked(),
-            "auto_save_logs": self.auto_save_logs_cb.isChecked(),
-            "max_log_lines": self.max_log_lines_spin.value(),
-            "show_grid": self.show_grid_cb.isChecked(),
-            "crosshair": self.crosshair_cb.isChecked(),
-            "autofit_y": self.autofit_y_cb.isChecked(),
+        # Автоматично збираємо всі зареєстровані віджети
+        snapshot = dict(DEFAULTS)
+        snapshot.update(self._bind.capture_all())
+        # Додаємо значення, які не прив'язані до віджетів напряму
+        snapshot.update({
             "last_asset": getattr(self.engine.asset_config, "name", "DE40"),
-            "exec_profile": self.exec_profile_cb.currentText(),
             "exec_spread_points": em.spread_points if em else None,
             "exec_commission_per_lot": em.commission_per_lot if em else None,
             "exec_slippage_points": em.slippage_points if em else None,
-        }
+        })
         # Strategy params — persisted under the strategy class name so
         # multiple strategies can be remembered independently.
         strategy = getattr(self.engine, "strategy", None)
@@ -691,65 +684,38 @@ class SettingsTab(QWidget):
         return snapshot
 
     def _persist(self) -> None:
-        """Save current settings to disk (called after every user change)."""
+        """Save current settings to disk (called after every user change).
+
+        Delegates to :meth:`SettingsController.save` if available,
+        otherwise writes directly (fallback).
+        """
         try:
-            settings_persist.save(self._capture_settings())
+            if self.pw and hasattr(self.pw, "settings_controller"):
+                self.pw.settings_controller.save()
+            else:
+                settings_persist.save(self._capture_settings())
         except Exception as e:
             logger.debug(f"Settings persistence failed: {e!r}")
 
     def apply_persisted(self, settings: dict) -> None:
-        """Apply a settings dict to the UI (call after `__init__`)."""
+        """Apply a settings dict to the UI (call after `__init__`).
+
+        Uses :class:`SettingsBinding` for automatic apply of registered
+        widgets, then handles special cases (AI combo, visibility).
+        """
         # Block all signals to avoid triggering _persist() with a partially-applied
         # snapshot (which would overwrite later keys with default/stale values).
-        widgets_to_block = [
-            self.theme_cb, self.colors_cb, self.font_size_spin, self.equity_spin,
-            self.risk_pct_spin, self.max_lots_spin, self.tz_spin, self.render_win,
-            self.cache_size_spin, self.batch_size_spin, self.log_level_cb,
-            self.ai_provider_cb,
-            self.ai_model_cb,
-            self.ai_custom_base_url_le,
-            self.ai_custom_extra_body_le,
-            self.ai_api_key_le,
-            self.ai_max_tokens_spin,
-            self.fast_mode_cb,
-            self.auto_save_logs_cb, self.max_log_lines_spin, self.show_grid_cb,
-            self.crosshair_cb, self.autofit_y_cb, self.exec_profile_cb,
-            self.spread_spin, self.commission_spin, self.slippage_spin,
-        ]
-        for w in widgets_to_block:
+        for w in self._bind.widgets_to_block():
             w.blockSignals(True)
         try:
             settings = self._normalize_loaded_ai_settings(dict(settings))
-            self.theme_cb.setCurrentText(settings.get("theme", "dark"))
-            self.colors_cb.setCurrentText(settings.get("chart_scheme", "Classic"))
-            self.font_size_spin.setValue(int(settings.get("font_size", 11)))
-            self.equity_spin.setValue(int(settings.get("initial_equity", 100_000)))
-            self.risk_pct_spin.setValue(float(settings.get("risk_pct", 1.0)))
-            self.max_lots_spin.setValue(float(settings.get("max_lots_per_100k", 12)))
-            self.tz_spin.setValue(int(settings.get("timezone", 0)))
-            self.render_win.setValue(int(settings.get("render_window", 300)))
-            self.cache_size_spin.setValue(int(settings.get("cache_size", 1000)))
-            self.batch_size_spin.setValue(int(settings.get("batch_size", 5000)))
-            self.log_level_cb.setCurrentText(settings.get("log_level", "INFO"))
-            self.ai_provider_cb.setCurrentText(settings.get("ai_provider", "OpenAI"))
+            # Автоматичне застосування через binding
+            self._bind.apply_all(settings, DEFAULTS)
+            # Спеціальні випадки (AI combo, видимість)
             self._repopulate_ai_model_combo(
                 select_model=settings.get("ai_model") or "gpt-4o"
             )
-            self.ai_custom_base_url_le.setText(settings.get("ai_custom_base_url", ""))
-            self.ai_custom_extra_body_le.setText(settings.get("ai_custom_extra_body", ""))
             self._update_ai_custom_visibility()
-            self.ai_api_key_le.setText(settings.get("ai_api_key", ""))
-            try:
-                self.ai_max_tokens_spin.setValue(int(settings.get("ai_max_tokens", 16384)))
-            except Exception:
-                self.ai_max_tokens_spin.setValue(16384)
-            self.fast_mode_cb.setChecked(bool(settings.get("fast_mode", False)))
-            self.auto_save_logs_cb.setChecked(bool(settings.get("auto_save_logs", True)))
-            self.max_log_lines_spin.setValue(int(settings.get("max_log_lines", 5000)))
-            self.show_grid_cb.setChecked(bool(settings.get("show_grid", True)))
-            self.crosshair_cb.setChecked(bool(settings.get("crosshair", True)))
-            self.autofit_y_cb.setChecked(bool(settings.get("autofit_y", True)))
-            self.exec_profile_cb.setCurrentText(settings.get("exec_profile", "Optimistic"))
             em = getattr(self.engine, "execution_model", None)
             if em is not None:
                 em.spread_points = settings.get("exec_spread_points")
@@ -758,7 +724,7 @@ class SettingsTab(QWidget):
         except Exception as e:
             logger.debug(f"Could not fully apply persisted settings: {e!r}")
         finally:
-            for w in widgets_to_block:
+            for w in self._bind.widgets_to_block():
                 w.blockSignals(False)
             # One single save after all values are applied.
             self._persist()
@@ -1182,34 +1148,10 @@ class SettingsTab(QWidget):
         logger.info(f"🔤 Font size: {int(n)} pt")
 
     def _reset_defaults(self):
-        """Reset all settings to defaults."""
-        self.theme_cb.setCurrentText("dark")
-        self.colors_cb.setCurrentText("Classic")
-        self.tz_spin.setValue(0)
-        self.render_win.setValue(300)
-        self.equity_spin.setValue(100_000)
-        self.risk_pct_spin.setValue(1.0)
-        self.max_lots_spin.setValue(12)
-        self.font_size_spin.setValue(11)
-        self.show_grid_cb.setChecked(True)
-        self.crosshair_cb.setChecked(True)
-        self.autofit_y_cb.setChecked(True)
-        self.fast_mode_cb.setChecked(False)
-        self.cache_size_spin.setValue(1000)
-        self.batch_size_spin.setValue(5000)
-        self.log_level_cb.setCurrentText("INFO")
-        self.auto_save_logs_cb.setChecked(True)
-        self.max_log_lines_spin.setValue(5000)
-        self.exec_profile_cb.setCurrentText("Optimistic")
-        self.spread_spin.setValue(0.0)
-        self.commission_spin.setValue(0.0)
-        self.slippage_spin.setValue(0.0)
-        self.ai_provider_cb.blockSignals(True)
-        self.ai_provider_cb.setCurrentText("OpenAI")
-        self.ai_provider_cb.blockSignals(False)
+        """Reset all settings to defaults using SettingsBinding."""
+        # Автоматичне скидання через binding
+        self._bind.reset_all(DEFAULTS)
+        # Спеціальні випадки (AI combo, видимість)
         self._repopulate_ai_model_combo(select_model="gpt-4o")
-        self.ai_custom_base_url_le.clear()
-        self.ai_custom_extra_body_le.clear()
         self._update_ai_custom_visibility()
-        self.ai_api_key_le.clear()
         logger.info("🔄 Settings reset to defaults")

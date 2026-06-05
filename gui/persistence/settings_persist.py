@@ -1,14 +1,13 @@
 """
 GUI settings persistence — `saves/settings.json` (project-local).
 
-Stores user preferences that survive across sessions:
-    theme, chart_scheme, font_size, initial_equity, risk_pct, max_lots_per_100k,
-    timezone, render_window, batch_size, log_level, fast_mode,
-    auto_save_logs, max_log_lines, show_grid, crosshair, show_volume,
-    last_asset, exec profile + cost overrides.
+Stores user preferences that survive across sessions.
 
 The file is rewritten *atomically* (write tmp → rename) so a crash mid-save
 never leaves a half-written config behind.
+
+All setting keys & defaults are defined in
+:mod:`gui.controllers.settings_registry`.
 """
 
 from __future__ import annotations
@@ -18,46 +17,14 @@ import logging
 import os
 from typing import Any, Dict
 
+from gui.controllers.settings_registry import ALL_KEYS, DEFAULTS
+
 logger = logging.getLogger("StrategyTester.settings_persist")
 
 
 def config_path() -> str:
     app_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     return os.path.join(app_dir, "saves", "settings.json")
-
-
-# Defaults are intentionally identical to the Settings UI's reset values so
-# `load()` on a fresh install reproduces the legacy out-of-the-box behaviour.
-DEFAULTS: Dict[str, Any] = {
-    "theme": "dark",
-    "chart_scheme": "Classic",
-    "font_size": 11,
-    "initial_equity": 100_000,
-    "risk_pct": 1.0,
-    "max_lots_per_100k": 12,
-    "timezone": 0,
-    "render_window": 300,
-    "cache_size": 1000,
-    "batch_size": 5000,
-    "log_level": "INFO",
-    "fast_mode": False,
-    "auto_save_logs": True,
-    "max_log_lines": 5000,
-    "show_grid": True,
-    "crosshair": True,
-    "show_volume": False,
-    "last_asset": "DE40",
-    "exec_profile": "Optimistic",
-    "exec_spread_points": None,
-    "exec_commission_per_lot": None,
-    "exec_slippage_points": None,
-    "ai_provider": "OpenAI",
-    "ai_model": "gpt-4o",
-    "ai_api_key": "",
-    "ai_custom_base_url": "",
-    "ai_custom_extra_body": "",
-    "ai_max_tokens": 16384,
-}
 
 
 def load() -> Dict[str, Any]:
@@ -69,7 +36,8 @@ def load() -> Dict[str, Any]:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         merged = dict(DEFAULTS)
-        merged.update({k: v for k, v in data.items() if k in DEFAULTS})
+        # Беремо тільки ті ключі з файлу, які є в реєстрі
+        merged.update({k: v for k, v in data.items() if k in ALL_KEYS})
         return merged
     except (OSError, json.JSONDecodeError) as e:
         logger.warning(f"Could not read {path}: {e!r}; using defaults.")
@@ -94,7 +62,8 @@ def save(settings: Dict[str, Any]) -> None:
         except (OSError, json.JSONDecodeError):
             existing = {}
     payload = dict(existing)
-    payload.update({k: settings.get(k, DEFAULTS[k]) for k in DEFAULTS})
+    # Оновлюємо тільки ті ключі, які є в реєстрі
+    payload.update({k: settings.get(k, DEFAULTS[k]) for k in ALL_KEYS})
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str)
