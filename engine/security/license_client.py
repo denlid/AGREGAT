@@ -70,12 +70,26 @@ HEARTBEAT_INTERVAL = 60  # 1 minute
 CACHE_DIR = Path.home() / ".agregat"
 CACHE_FILE = CACHE_DIR / "license_cache.enc"
 
-# P1-10: Cache encryption key — derived from hardware + env secret.
-# Replaces hardcoded salt with environment-configurable secret.
-_CACHE_KEY_SALT = os.environ.get(
-    "AGREGAT_CACHE_SECRET",
-    "dev_fallback_salt_do_not_use_in_production"
-).encode()
+# CRIT-05: Cache encryption key — MUST be set via environment variable in production.
+# The previous hardcoded fallback ("dev_fallback_salt_do_not_use_in_production") was
+# trivially extractable from binaries, allowing fingerprint prediction and cache forgery.
+# Now FAIL-CLOSED: production startup blocked without AGREGAT_CACHE_SECRET.
+_CACHE_SECRET_ENV = os.environ.get("AGREGAT_CACHE_SECRET", "")
+_APP_ENV_LICENSE = os.environ.get("APP_ENV", "production").lower()
+
+if not _CACHE_SECRET_ENV:
+    if _APP_ENV_LICENSE == "production":
+        raise RuntimeError(
+            "CRIT-05: AGREGAT_CACHE_SECRET environment variable is required in production. "
+            "Generate with: python -c 'import secrets; print(secrets.token_hex(32))'"
+        )
+    # Development-only fallback: machine-specific (not portable)
+    _CACHE_KEY_SALT = hashlib.sha256(
+        f"DEV_CACHE_{platform.node()}_{uuid.getnode()}".encode()
+    ).digest()
+else:
+    _CACHE_KEY_SALT = _CACHE_SECRET_ENV.encode()
+
 _CACHE_KEY_PREFIX = b"\x41\x47\x52\x45\x47\x41\x54"  # AGREGAT
 
 
@@ -444,22 +458,44 @@ def clear_license_cache() -> None:
         pass
 
 
-# ─── P0-2: TLS Certificate Pinning ────────────────────────────────────
+# ─── P0-2 / MED-01: TLS Certificate Pinning ────────────────────────────
+# MED-01 FIX: Certificate pinning is now ENABLED by default in production.
+# Previously: pinning was disabled by default (empty _EXPECTED_CERT_SHA256),
+# making the client vulnerable to MITM attacks via compromised CAs.
+# Now: A bundled default fingerprint is used. Override via AGREGAT_CERT_PIN env var.
+# Set AGREGAT_CERT_PIN="" to explicitly disable (development only).
 
 # SHA256 fingerprint of the expected server certificate.
 # Obtain via: openssl s_client -connect license.agregat.io:443 | openssl x509 -fingerprint -sha256 -noout
-# Set to empty string to disable pinning (NOT recommended for production).
-_EXPECTED_CERT_SHA256 = os.environ.get("AGREGAT_CERT_PIN", "")
+#
+# IMPORTANT: Update this value when the server certificate is renewed!
+# The default below should be set to the actual production cert fingerprint
+# before building the client binary.
+_BUNDLED_CERT_SHA256 = (
+    "BUNDLED_CERT_FINGERPRINT_REPLACE_BEFORE_BUILD"
+)
 
-# P2-14: Warn if certificate pinning is not configured in production
-if not _EXPECTED_CERT_SHA256:
-    import logging as _logging_cert
-    _app_env_cert = os.environ.get("APP_ENV", "production").lower()
-    if _app_env_cert == "production":
-        _logging_cert.getLogger(__name__).warning(
-            "P2-14: TLS certificate pinning not configured. "
-            "Set AGREGAT_CERT_PIN env var for production security. "
-            "Without pinning, a compromised CA could enable MITM attacks."
+# AGREGAT_CERT_PIN env var overrides the bundled fingerprint.
+# If explicitly set to empty string, pinning is disabled (dev only).
+_cert_pin_env = os.environ.get("AGREGAT_CERT_PIN", None)
+
+if _cert_pin_env is not None:
+    # Env var explicitly set — use it (even if empty to disable)
+    _EXPECTED_CERT_SHA256 = _cert_pin_env
+else:
+    # Env var not set — use bundled default
+    _EXPECTED_CERT_SHA256 = _BUNDLED_CERT_SHA256
+
+# MED-01: Validate pinning configuration in production
+_app_env_cert = os.environ.get("APP_ENV", "production").lower()
+if _app_env_cert == "production":
+    if not _EXPECTED_CERT_SHA256 or _EXPECTED_CERT_SHA256 == "BUNDLED_CERT_FINGERPRINT_REPLACE_BEFORE_BUILD":
+        import logging as _logging_cert
+        _logging_cert.getLogger(__name__).error(
+            "MED-01: TLS certificate pinning not properly configured for production. "
+            "Either set AGREGAT_CERT_PIN env var or update _BUNDLED_CERT_SHA256 in "
+            "license_client.py before building. Without pinning, a compromised CA "
+            "could enable MITM attacks on license verification."
         )
 
 

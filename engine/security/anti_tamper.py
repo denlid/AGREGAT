@@ -19,6 +19,7 @@ Protection layers:
 
 import hashlib
 import os
+import struct
 import sys
 import time
 from pathlib import Path
@@ -295,23 +296,137 @@ def detect_iat_hooks() -> list[str]:
         else:
             return hooks
         
-        # P2-13: IAT hook detection is INCOMPLETE — this is a stub implementation.
-        # A full implementation would:
-        # 1. Walk the Import Directory Table (IMAGE_DIRECTORY_ENTRY_IMPORT)
-        # 2. For each imported DLL, walk the IAT entries
-        # 3. Check if each function pointer points within the expected DLL's address range
-        # 4. Flag any pointers that point outside legitimate module ranges
-        #
-        # Current implementation only parses the PE header but doesn't check IAT entries.
-        # This provides NO protection against IAT hooking attacks.
-        #
-        # TODO: Implement full IAT walking. Reference:
-        # https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#import-directory-table
-        import logging as _log_iat
-        _log_iat.getLogger(__name__).debug(
-            "P2-13: detect_iat_hooks() is a stub — IAT entries are NOT checked. "
-            "Full implementation required for production anti-tamper protection."
-        )
+        # HIGH-04 FIX: Full IAT walking implementation
+        # Walk the Import Directory Table and verify each IAT entry points
+        # to a legitimate module address range.
+        
+        # Get optional header to find Import Directory
+        # COFF header: SizeOfOptionalHeader at offset 20
+        opt_header_size = ctypes.c_uint16.from_address(pe_base + 4 + 16).value
+        optional_header = pe_base + 4 + 20
+        
+        # Determine PE32 vs PE32+ (Magic at start of optional header)
+        magic = ctypes.c_uint16.from_address(optional_header).value
+        if magic == 0x10B:  # PE32
+            # Import Directory at offset 104 from optional header start
+            import_dir_offset = optional_header + 104
+        elif magic == 0x20B:  # PE32+
+            # Import Directory at offset 120 from optional header start
+            import_dir_offset = optional_header + 120
+        else:
+            return hooks
+        
+        # IMAGE_DIRECTORY_ENTRY_IMPORT: VirtualAddress and Size
+        import_rva = ctypes.c_uint32.from_address(import_dir_offset).value
+        import_size = ctypes.c_uint32.from_address(import_dir_offset + 4).value
+        
+        if not import_rva or not import_size:
+            return hooks
+        
+        # Enumerate all loaded modules to build address range map
+        MAX_MODULES = 1024
+        all_modules = (ctypes.wintypes.HMODULE * MAX_MODULES)()
+        cb_needed = ctypes.wintypes.DWORD()
+        
+        module_ranges = {}  # {dll_name_lower: (base, end)}
+        
+        h_process = ctypes.windll.kernel32.GetCurrentProcess()
+        
+        if ctypes.windll.psapi.EnumProcessModules(
+            h_process,
+            ctypes.byref(all_modules),
+            ctypes.sizeof(all_modules),
+            ctypes.byref(cb_needed),
+        ):
+            num_mods = cb_needed.value // ctypes.sizeof(ctypes.wintypes.HMODULE)
+            for i in range(min(num_mods, MAX_MODULES)):
+                mod_path_buf = ctypes.create_unicode_buffer(260)
+                if ctypes.windll.psapi.GetModuleFileNameExW(
+                    h_process, all_modules[i], mod_path_buf, 260
+                ):
+                    mod_name = os.path.basename(mod_path_buf.value).lower()
+                    mod_base = ctypes.cast(all_modules[i], ctypes.c_void_p).value
+                    # Get module size
+                    mod_info_buf = ctypes.create_string_buffer(1024)
+                    if ctypes.windll.psapi.GetModuleInformation(
+                        h_process, all_modules[i], mod_info_buf, 1024
+                    ):
+                        mod_size = ctypes.c_uint32.from_address(
+                            ctypes.addressof(mod_info_buf) + ctypes.sizeof(ctypes.c_void_p)
+                        ).value
+                        module_ranges[mod_name] = (mod_base, mod_base + mod_size)
+        
+        # Walk import descriptors (each is 20 bytes)
+        import_dir = base + import_rva
+        descriptor_idx = 0
+        
+        while descriptor_idx * 20 < import_size:
+            desc = import_dir + descriptor_idx * 20
+            
+            # OriginalFirstThunk (INT), TimeDateStamp, ForwarderChain, Name, FirstThunk (IAT)
+            orig_first_thunk_rva = ctypes.c_uint32.from_address(desc).value
+            name_rva = ctypes.c_uint32.from_address(desc + 12).value
+            first_thunk_rva = ctypes.c_uint32.from_address(desc + 16).value
+            
+            if not orig_first_thunk_rva and not first_thunk_rva:
+                break  # End of import descriptors
+            
+            if not name_rva or not first_thunk_rva:
+                descriptor_idx += 1
+                continue
+            
+            # Get DLL name
+            dll_name_ptr = base + name_rva
+            try:
+                dll_name = ctypes.string_at(dll_name_ptr, 256).split(b'\x00')[0].decode('ascii', errors='ignore').lower()
+            except Exception:
+                descriptor_idx += 1
+                continue
+            
+            # Get the expected DLL address range
+            expected_range = module_ranges.get(dll_name)
+            
+            # Walk IAT entries (array of pointers, terminated by NULL)
+            iat_ptr = base + first_thunk_rva
+            thunk_idx = 0
+            
+            while True:
+                try:
+                    func_ptr = ctypes.c_void_p.from_address(iat_ptr + thunk_idx * ctypes.sizeof(ctypes.c_void_p)).value
+                except Exception:
+                    break
+                
+                if not func_ptr:
+                    break  # End of IAT for this DLL
+                
+                # Skip forwarded imports (ordinal-based, high bit set on 32-bit)
+                is_64bit = struct.calcsize("P") == 8
+                if not is_64bit and (func_ptr & 0x80000000):
+                    thunk_idx += 1
+                    continue
+                
+                # Check if function pointer points within the expected DLL range
+                if expected_range:
+                    dll_base, dll_end = expected_range
+                    if func_ptr < dll_base or func_ptr > dll_end:
+                        # Pointer outside expected DLL range — possible IAT hook
+                        # Try to find which module it actually points to
+                        actual_module = "unknown"
+                        for mod_name, (mb, me) in module_ranges.items():
+                            if mb <= func_ptr <= me:
+                                actual_module = mod_name
+                                break
+                        
+                        hooks.append(
+                            f"iat_hook:{dll_name}[{thunk_idx}] "
+                            f"ptr=0x{func_ptr:X} "
+                            f"expected_range=0x{dll_base:X}-0x{dll_end:X} "
+                            f"actual_module={actual_module}"
+                        )
+                
+                thunk_idx += 1
+            
+            descriptor_idx += 1
         
     except Exception:
         pass

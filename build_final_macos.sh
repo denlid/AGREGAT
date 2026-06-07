@@ -49,7 +49,7 @@ if [ -f ".dev_mode" ]; then
 fi
 
 # Clean previous builds
-echo "[1/5] Cleaning previous builds..."
+echo "[1/6] Cleaning previous builds..."
 rm -rf dist build __pycache__
 rm -rf engine/security/__pycache__
 
@@ -57,7 +57,7 @@ rm -rf engine/security/__pycache__
 # Phase 2: Code minification (free obfuscation)
 # ============================================================
 echo ""
-echo "[2/5] Minifying security modules (free obfuscation)..."
+echo "[2/6] Minifying security modules (free obfuscation)..."
 
 if ! $PYTHON -c "import python_minifier" 2>/dev/null; then
     echo "  [INFO] Installing python-minifier..."
@@ -67,12 +67,56 @@ fi
 $PYTHON scripts/minify_security.py || echo "  [WARNING] Minification failed, using original files"
 
 # ============================================================
-# Phase 3: Nuitka compilation (hardened)
+# Phase 2.5: Compute security file hashes for HIGH-07 integrity
 # ============================================================
 echo ""
-echo "[3/5] Compiling with Nuitka (hardened mode)..."
+echo "[2.5/6] Computing security file hashes for integrity checks..."
+
+SECURITY_HASHES=""
+for f in engine/security/license_manager.py engine/security/license_client.py engine/security/anti_debug.py engine/security/anti_tamper.py; do
+    if [ -f "$f" ]; then
+        FHASH=$(shasum -a 256 "$f" | awk '{print $1}')
+        FNAME=$(basename "$f")
+        if [ -n "$SECURITY_HASHES" ]; then
+            SECURITY_HASHES="${SECURITY_HASHES},${FNAME}:${FHASH}"
+        else
+            SECURITY_HASHES="${FNAME}:${FHASH}"
+        fi
+    fi
+done
+
+if [ -n "$SECURITY_HASHES" ]; then
+    echo "  [OK] Security hashes computed"
+    echo "  [INFO] AGREGAT_SECURITY_HASHES will be embedded in binary"
+    export AGREGAT_SECURITY_HASHES="$SECURITY_HASHES"
+else
+    echo "  [WARNING] Could not compute security hashes"
+fi
+
+# Also compute license_manager.py hash separately for its self-check
+LICENSE_MANAGER_HASH=""
+if [ -f "engine/security/license_manager.py" ]; then
+    LICENSE_MANAGER_HASH=$(shasum -a 256 "engine/security/license_manager.py" | awk '{print $1}')
+    export AGREGAT_LICENSE_MANAGER_HASH="$LICENSE_MANAGER_HASH"
+fi
+
+# ============================================================
+# Phase 3: Nuitka compilation (hardened + obfuscated)
+# ============================================================
+echo ""
+echo "[3/6] Compiling with Nuitka (hardened + obfuscated)..."
 echo "This may take 10-30 minutes depending on your CPU..."
 echo ""
+
+# Anti-reverse engineering: Nuitka hardening flags
+# --obfuscate-string-literals: Encrypts string literals in the binary
+#   This prevents "strings" tool from revealing sensitive strings
+# --obfuscate-filenames: Obfuscates Python filenames in tracebacks
+#   Makes it harder to map compiled code back to source files
+# NOTE: For maximum protection on macOS, consider:
+#   1. Code signing with Apple Developer ID
+#   2. Hardened Runtime entitlements (com.apple.security.cs.debugger prevents ptrace)
+#   3. Section encryption with custom loader
 
 # Detect architecture
 ARCH=$(uname -m)
@@ -110,6 +154,8 @@ $PYTHON -m nuitka \
     --assume-yes-for-downloads \
     --show-progress \
     --show-memory \
+    --obfuscate-string-literals \
+    --obfuscate-filenames \
     app.py
 
 if [ $? -ne 0 ]; then

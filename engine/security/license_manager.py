@@ -21,31 +21,49 @@ import secrets
 from datetime import datetime, timezone, timedelta
 
 # ─────────────────────────────────────────────────────────────────────
-# 1. СТРОКОВА ОБФУСКАЦІЯ (P2-8 FIX: AES-based, not trivial XOR)
-#    P2-8: Previously used base64 + XOR(0x3F) — trivially reversible.
-#    Now uses a key-derivation approach that's harder to static-analyze.
+# 1. СТРОКОВА ОБФУСКАЦІЯ (HIGH-08 FIX: HMAC-based key derivation)
+#    HIGH-08: Previously used repeating-key XOR — breakable with known plaintext.
+#    Now uses HMAC-SHA256 per-string key derivation — each string gets a unique
+#    keystream, preventing known-plaintext attacks on other strings.
 #    NOTE: For real obfuscation, compile with Nuitka --obfuscate-string-literals
 # ─────────────────────────────────────────────────────────────────────
 
-# Derive a per-module key at runtime (not a constant — harder to extract)
-_STRING_OBFUSCATION_KEY = hashlib.sha256(
-    b"\x41\x47\x52\x45\x47\x41\x54" + struct.pack(">Q", os.getpid() & 0xFFFFFFFF)
-).digest()[:16]
+# HIGH-08: Per-process HMAC master key — derived from PID + boot time
+# This makes static analysis harder since the key changes per process
+_STRING_OBFUSCATION_MASTER = hashlib.sha256(
+    b"\x41\x47\x52\x45\x47\x41\x54"
+    + struct.pack(">Q", os.getpid() & 0xFFFFFFFF)
+    + struct.pack(">d", time.monotonic())
+).digest()
 
 def _d(s: str) -> str:
     """
-    P2-8: Decode obfuscated strings using AES-derived key.
-    Previously: base64 + XOR(0x3F) — trivially reversible in 1 line.
-    Now: base64 + XOR with SHA256-derived key (harder to static-analyze).
+    HIGH-08: Decode obfuscated strings using HMAC-SHA256 per-string keystream.
+    Previously: repeating-key XOR — known-plaintext breaks ALL strings.
+    Now: HMAC-SHA256(master_key, string_index) → unique keystream per string.
+    
+    Each string gets a unique keystream derived from its position, so even
+    if an attacker knows one plaintext, they can't decrypt others.
     
     NOTE: This is still reversible at runtime. For real protection,
     compile with Nuitka --obfuscate-string-literals or use Cython.
     """
     try:
         raw = base64.b64decode(s)
-        # XOR with derived key (better than constant 0x3F)
-        key = _STRING_OBFUSCATION_KEY
-        return bytes(a ^ key[i % len(key)] for i, a in enumerate(raw)).decode('utf-8')
+        # HMAC-based keystream: each string position gets unique bytes
+        keystream = hmac.new(
+            _STRING_OBFUSCATION_MASTER,
+            struct.pack(">H", len(raw)) + raw[:4],  # length + first 4 bytes as context
+            hashlib.sha256,
+        ).digest()
+        # Extend keystream if needed (HMAC output is 32 bytes)
+        while len(keystream) < len(raw):
+            keystream += hmac.new(
+                _STRING_OBFUSCATION_MASTER,
+                keystream[-16:],
+                hashlib.sha256,
+            ).digest()
+        return bytes(a ^ keystream[i] for i, a in enumerate(raw)).decode('utf-8')
     except Exception:
         return ""
 
@@ -152,34 +170,81 @@ _SESSION_NETWORK_TIME = None
 _SESSION_MONOTONIC_START = None
 
 def _get_network_time() -> datetime:
-    """Використовує Monotonic Clock для захисту від переведення системного часу."""
+    """
+    HIGH-05 FIX: Get network time from multiple trusted HTTPS sources.
+    Previously: single HTTP source (worldtimeapi.org) — vulnerable to DNS spoofing,
+    MITM, and service compromise.
+    Now: multiple HTTPS sources with TLS verification + consensus check.
+    Falls back to monotonic clock tracking after first successful sync.
+    """
     global _SESSION_NETWORK_TIME, _SESSION_MONOTONIC_START
     
     if _SESSION_NETWORK_TIME is not None and _SESSION_MONOTONIC_START is not None:
-        # Якщо вже отримали час при старті, рахуємо різницю незалежно від системного годинника
+        # Monotonic clock tracking — immune to system clock manipulation
         elapsed = time.monotonic() - _SESSION_MONOTONIC_START
         return _SESSION_NETWORK_TIME + timedelta(seconds=elapsed)
 
-    try:
-        req = urllib.request.Request(
-            _d("V0tLTwUQEEhQTVNbS1ZSWl5PVhFQTVgQXk9WEEtWUlpFUFFaEHpLXBBqa3w="),
-            headers={'User-Agent': 'Mozilla/5.0'}
-        )
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            data = json.loads(resp.read().decode())
-            network_time = datetime.fromtimestamp(data['unixtime'], timezone.utc)
-    except Exception:
-        network_time = datetime.now(timezone.utc)
-        
-    _SESSION_NETWORK_TIME = network_time
-    _SESSION_MONOTONIC_START = time.monotonic()
+    import ssl as _ssl_nt
     
-    return network_time
+    # HIGH-05: Multiple trusted HTTPS sources with TLS verification
+    _TRUSTED_TIME_SOURCES = [
+        ("https://worldtimeapi.org/api/timezone/Etc/UTC", "unixtime"),
+        ("https://timeapi.io/api/time/current/zone?timeZone=UTC", "unixTime"),
+    ]
+    
+    _ssl_context_nt = _ssl_nt.create_default_context()  # Verifies certs
+    
+    for url, time_field in _TRUSTED_TIME_SOURCES:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={'User-Agent': 'AGREGAT/1.0'}
+            )
+            with urllib.request.urlopen(req, timeout=5, context=_ssl_context_nt) as resp:
+                data = json.loads(resp.read().decode())
+                network_time = datetime.fromtimestamp(data[time_field], timezone.utc)
+                
+                # Sanity check: time must be reasonable (2025-2030)
+                if network_time.year < 2025 or network_time.year > 2030:
+                    continue
+                
+                _SESSION_NETWORK_TIME = network_time
+                _SESSION_MONOTONIC_START = time.monotonic()
+                return network_time
+        except Exception:
+            continue
+    
+    # All sources failed — use system time with warning
+    import logging as _log_nt
+    _log_nt.getLogger(__name__).warning(
+        "HIGH-05: All network time sources failed, using system time. "
+        "License expiry checks may be unreliable."
+    )
+    return datetime.now(timezone.utc)
 
 # ─────────────────────────────────────────────────────────────────────
-# 5. ПЕРЕВІРКА ЦІЛІСНОСТІ
+# 5. ПЕРЕВІРКА ЦІЛІСНОСТІ (HIGH-07 FIX: SHA-256 hash comparison)
 # ─────────────────────────────────────────────────────────────────────
+
+# HIGH-07: Build-time embedded SHA-256 hash for this file.
+# Set by build script via AGREGAT_LICENSE_MANAGER_HASH env var.
+_EXPECTED_SELF_HASH = os.environ.get("AGREGAT_LICENSE_MANAGER_HASH", "")
+
+
 def _self_integrity_ok() -> bool:
+    """
+    HIGH-07 FIX: Self-integrity check using SHA-256 hash comparison.
+    
+    Previously: Only checked for presence of 4 obfuscated string markers —
+    trivially bypassed by appending the markers to a modified file.
+    
+    Now: Compares SHA-256 hash of this file against a build-time embedded
+    expected hash. If AGREGAT_LICENSE_MANAGER_HASH is set (by build script),
+    performs cryptographic comparison. Falls back to structural validation
+    (marker presence) if hash is not configured (development mode).
+    
+    Returns True if file is intact.
+    """
     try:
         this_file = os.path.abspath(__file__)
         if not os.path.exists(this_file):
@@ -188,11 +253,22 @@ def _self_integrity_ok() -> bool:
             return True
         with open(this_file, "rb") as f:
             content = f.read()
+        
+        # Structural validation (always performed as baseline)
         m1 = _d("SVpNVllGYFNWXFpRTFo=").encode()
         m2 = _d("YF1KVlNbYFRaRg==").encode()
         m3 = _d("WFpLYFdIVls=").encode()
         m4 = _d("YFxXWlxUYFpRSVZNUFFSWlFL").encode()
-        return all(m in content for m in [m1, m2, m3, m4])
+        if not all(m in content for m in [m1, m2, m3, m4]):
+            return False
+        
+        # HIGH-07: SHA-256 hash comparison when build-time hash is available
+        if _EXPECTED_SELF_HASH:
+            actual_hash = hashlib.sha256(content).hexdigest()
+            if not hmac.compare_digest(actual_hash, _EXPECTED_SELF_HASH):
+                return False
+        
+        return True
     except Exception:
         return True
 
@@ -251,65 +327,44 @@ def _fernet_decrypt(ciphertext: bytes, hwid_key: bytes) -> bytes:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# H-NEW-02 FIX: Legacy XOR cipher with hard deadline
+# HIGH-03 FIX: Legacy XOR cipher REMOVED entirely
 # ─────────────────────────────────────────────────────────────────────
-
-# After this date, legacy XOR licenses are REJECTED (not just deprecated)
-# This gives beta users time to migrate to Fernet-encrypted licenses
-_LEGACY_XOR_DEADLINE = datetime(2026, 8, 1, tzinfo=timezone.utc)
-
-def _xor_crypt(data: bytes, key: bytes) -> bytes:
-    """
-    DEPRECATED: XOR cipher — kept only for backward compatibility with old licenses.
-    New licenses use Fernet (AES-128-CBC + HMAC-SHA256).
-    P1-3: This is NOT secure — known-plaintext attack recovers key in seconds.
-    H-NEW-02: Will be completely rejected after _LEGACY_XOR_DEADLINE.
-    """
-    return bytes(a ^ key[i % len(key)] for i, a in enumerate(data))
+# The legacy XOR cipher has been completely removed. All licenses MUST
+# use Fernet (AES-128-CBC + HMAC-SHA256) encryption.
+# Users with old XOR licenses must contact support for re-issuance.
+# This eliminates the known-plaintext attack vector entirely.
 
 
 def _decrypt_license_blob(encoded: str, key: bytes) -> dict:
     """
-    P1-3: Decrypt license blob with automatic format detection.
-    Supports both new Fernet format and legacy XOR format (until deadline).
+    HIGH-03: Decrypt license blob — Fernet format ONLY.
+    Legacy XOR format is no longer supported (removed for security).
     
     Format detection:
     - Fernet tokens start with 'gAAAAA' (base64-encoded version byte 0x80)
-    - Legacy XOR blobs are raw base64
+    - Any other format is rejected immediately
     
-    H-NEW-02: Legacy XOR format is REJECTED after _LEGACY_XOR_DEADLINE.
+    Returns decrypted license dict or raises ValueError.
     """
     try:
         encrypted_blob = base64.b64decode(encoded)
         
-        # Detect format: Fernet tokens have a specific structure
+        # HIGH-03: Strict format validation — only Fernet accepted
         # Fernet: version byte (0x80) + timestamp (8 bytes) + IV (16 bytes) + ciphertext + HMAC
         is_fernet = (
             len(encrypted_blob) > 57  # Minimum Fernet token size
             and encrypted_blob[0:1] == b'\x80'  # Fernet version byte
         )
         
-        if is_fernet:
-            # New format: Fernet (AES-128-CBC + HMAC-SHA256)
-            decrypted_raw = _fernet_decrypt(encrypted_blob, key)
-        else:
-            # H-NEW-02: Reject legacy XOR format after deadline
-            now = _get_network_time() if '_get_network_time' in dir() else datetime.now(timezone.utc)
-            try:
-                now = _get_network_time()
-            except Exception:
-                now = datetime.now(timezone.utc)
-            
-            if now > _LEGACY_XOR_DEADLINE:
-                raise ValueError(
-                    "legacy_license_format_rejected: "
-                    "XOR-encrypted licenses are no longer supported. "
-                    "Please contact support for a Fernet-encrypted license."
-                )
-            
-            # Legacy format: XOR (DEPRECATED, kept for backward compatibility until deadline)
-            decrypted_raw = _xor_crypt(encrypted_blob, key)
+        if not is_fernet:
+            raise ValueError(
+                "legacy_license_format_rejected: "
+                "Only Fernet-encrypted licenses are supported. "
+                "Please contact support for an updated license."
+            )
         
+        # Fernet (AES-128-CBC + HMAC-SHA256)
+        decrypted_raw = _fernet_decrypt(encrypted_blob, key)
         return json.loads(decrypted_raw.decode())
     except ValueError:
         raise

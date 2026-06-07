@@ -38,12 +38,12 @@
     </div>
 </div>
 
-{# P2-15: CSP nonce for inline script #}
+{# HIGH-02: CSP nonce for inline script. MFA token stored in HttpOnly cookie server-side — NOT in JS. #}
 <script nonce="{{ request.state.csp_nonce if request and hasattr(request.state, 'csp_nonce') else '' }}">
-// P2-16: MFA session token stored in JS variable — acceptable for beta.
-// In production, consider using sessionStorage (cleared on tab close)
-// instead of a global variable, to reduce XSS exposure window.
-let mfaSessionToken = '';
+// HIGH-02 FIX: MFA session token is stored in an HttpOnly cookie (admin_mfa_token)
+// set by the server on login response. JavaScript NEVER touches the token.
+// The server reads the cookie directly on MFA verify.
+// Only the email is stored in JS (non-sensitive, needed for UX).
 let mfaEmail = '';
 
 async function doLogin() {
@@ -74,7 +74,7 @@ async function doLogin() {
         }
 
         if (data.status === 'mfa_required') {
-            mfaSessionToken = data.session_token || '';
+            // HIGH-02: Token is in HttpOnly cookie (admin_mfa_token) — JS doesn't touch it
             mfaEmail = email;
             document.getElementById('step-password').style.display = 'none';
             document.getElementById('step-mfa').style.display = 'block';
@@ -99,11 +99,11 @@ async function doMFAVerify() {
     }
 
     try {
+        // HIGH-02: session_token NOT sent in body — server reads from HttpOnly cookie
         const resp = await fetch('/admin/auth/mfa/verify', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                session_token: mfaSessionToken,
                 totp_code: totpCode || null,
                 backup_code: backupCode || null,
             }),
@@ -116,9 +116,6 @@ async function doMFAVerify() {
             errEl.style.display = 'block';
             return;
         }
-
-        // Set email cookie for MFA flow
-        document.cookie = `admin_email=${mfaEmail}; path=/; secure; samesite=strict`;
 
         window.location.href = '/admin/dashboard';
     } catch (e) {

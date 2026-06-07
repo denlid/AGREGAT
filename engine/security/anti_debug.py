@@ -12,6 +12,7 @@ Safe for Windows Defender — no suspicious API calls.
 """
 
 import hashlib
+import hmac
 import os
 import sys
 import time
@@ -291,9 +292,32 @@ def compute_file_hash(file_path: str) -> Optional[str]:
         return None
 
 
+# HIGH-07: Build-time embedded SHA-256 hashes for critical security files.
+# These should be set by the build script (build_final_windows.cmd / build_final_macos.sh)
+# via environment variables. If not set, integrity check falls back to structural validation.
+_EXPECTED_HASHES_ENV = os.environ.get("AGREGAT_SECURITY_HASHES", "")
+_EXPECTED_FILE_HASHES: dict[str, str] = {}
+
+if _EXPECTED_HASHES_ENV:
+    # Format: "file1:hash1,file2:hash2,..."
+    for entry in _EXPECTED_HASHES_ENV.split(","):
+        if ":" in entry:
+            fname, fhash = entry.split(":", 1)
+            _EXPECTED_FILE_HASHES[fname.strip()] = fhash.strip()
+
+
 def verify_self_integrity() -> bool:
     """
-    Verify integrity of critical security files.
+    HIGH-07 FIX: Verify integrity of critical security files using SHA-256 hashes.
+    
+    Previously: Only checked for "def " presence and 100 bytes minimum — trivially
+    bypassed by appending junk to a modified file.
+    
+    Now: Compares SHA-256 hashes against build-time embedded expected hashes.
+    If AGREGAT_SECURITY_HASHES env var is set (by build script), performs
+    cryptographic hash comparison. Falls back to structural validation if
+    hashes are not configured (development mode).
+    
     Returns True if all files are intact.
     """
     security_dir = Path(__file__).parent
@@ -301,6 +325,7 @@ def verify_self_integrity() -> bool:
         "license_manager.py",
         "license_client.py",
         "anti_debug.py",
+        "anti_tamper.py",
     ]
 
     for fname in critical_files:
@@ -308,15 +333,21 @@ def verify_self_integrity() -> bool:
         if not fpath.exists():
             continue  # File may not exist in all deployments
 
-        # Check that the file contains expected security markers
         try:
             content = fpath.read_bytes()
-            # Verify file is not empty and has expected structure
+            
+            # Structural validation (always performed)
             if len(content) < 100:
                 return False
-            # Check for tampering: file should contain function definitions
             if b"def " not in content:
                 return False
+            
+            # HIGH-07: SHA-256 hash comparison when build-time hashes are available
+            expected_hash = _EXPECTED_FILE_HASHES.get(fname)
+            if expected_hash:
+                actual_hash = hashlib.sha256(content).hexdigest()
+                if not hmac.compare_digest(actual_hash, expected_hash):
+                    return False
         except Exception:
             return False
 

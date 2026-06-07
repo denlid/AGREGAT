@@ -48,8 +48,10 @@ class Settings(BaseSettings):
     encryption_key: str
 
     # ─── Admin Owner ───
-    owner_email: str = "alephxau@gmail.com"
-    owner_password_salt: str = "CHANGE_ME_IN_PRODUCTION"
+    # CRIT-02: Owner email MUST be set via OWNER_EMAIL env var in production.
+    # Never hardcode personal emails in source code.
+    owner_email: str = ""
+    owner_password_salt: str = ""
 
     # ─── Rate Limits (JSON dict) ───
     # Format: {"endpoint_name": {"max_requests": N, "window_seconds": N}}
@@ -130,12 +132,20 @@ def _validate_production_settings() -> None:
             "Set ALLOWED_ORIGINS=https://your-domain.com in .env"
         )
     
-    # Default salt check
-    _temp_salt = os.environ.get("OWNER_PASSWORD_SALT", "").strip()
-    if _temp_salt == "CHANGE_ME_IN_PRODUCTION":
+    # CRIT-02: OWNER_EMAIL must be set in production
+    _temp_owner_email = os.environ.get("OWNER_EMAIL", "").strip()
+    if not _temp_owner_email:
         errors.append(
-            "OWNER_PASSWORD_SALT is still set to default value. "
-            "Generate a random salt and update .env"
+            "OWNER_EMAIL is not set — superuser access will be unavailable. "
+            "Set OWNER_EMAIL=your@email.com in .env"
+        )
+    
+    # Default salt check — must be set (not empty) in production
+    _temp_salt = os.environ.get("OWNER_PASSWORD_SALT", "").strip()
+    if not _temp_salt:
+        errors.append(
+            "OWNER_PASSWORD_SALT is not set. "
+            "Generate a random salt: python -c 'import secrets; print(secrets.token_hex(32))'"
         )
     
     if errors:

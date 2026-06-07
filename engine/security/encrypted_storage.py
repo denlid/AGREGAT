@@ -46,24 +46,28 @@ except ImportError:
 
 # ─── Configuration ─────────────────────────────────────────────────────
 
-# P0-7: Application-level secret — from environment or embedded fallback.
-# In production, set AGREGAT_STORAGE_SECRET env var for proper key derivation.
-# The embedded fallback is intentionally weak to force production configuration.
+# CRIT-04: Application-level secret — MUST be set via environment variable.
+# The previous hardcoded fallback (b"AGREGAT_SECRET_KEY") was trivially
+# extractable from compiled binaries using `strings` or a hex editor.
+# Now FAIL-CLOSED: production startup blocked without AGREGAT_STORAGE_SECRET.
 _APP_SECRET_ENV = os.environ.get("AGREGAT_STORAGE_SECRET", "")
-_APP_SECRET = _APP_SECRET_ENV.encode() if _APP_SECRET_ENV else (
-    b"\x41\x47\x52\x45\x47\x41\x54\x5f\x53\x45\x43\x52\x45\x54\x5f\x4b\x45\x59"
-)
+_APP_ENV_MODE = os.environ.get("APP_ENV", "production").lower()
 
-# P0-7: Warn if using embedded secret in production
 if not _APP_SECRET_ENV:
-    import logging as _logging_storage
-    _app_env_storage = os.environ.get("APP_ENV", "production").lower()
-    if _app_env_storage == "production":
-        _logging_storage.getLogger(__name__).warning(
-            "P0-7: Using embedded storage secret in production. "
-            "Set AGREGAT_STORAGE_SECRET env var for proper security. "
-            "Embedded secrets can be extracted from compiled binaries."
+    if _APP_ENV_MODE == "production":
+        raise RuntimeError(
+            "CRIT-04: AGREGAT_STORAGE_SECRET environment variable is required in production. "
+            "Generate with: python -c 'import secrets; print(secrets.token_hex(32))' "
+            "and set it in your environment before starting the application."
         )
+    # Development-only fallback: derived from machine-specific data
+    # This is intentionally NOT portable across machines
+    import uuid as _uuid_dev
+    _APP_SECRET = hashlib.sha256(
+        f"DEV_FALLBACK_{platform.node()}_{_uuid_dev.getnode()}".encode()
+    ).digest()
+else:
+    _APP_SECRET = _APP_SECRET_ENV.encode()
 
 # Storage directory
 STORAGE_DIR = Path.home() / ".agregat"

@@ -7,6 +7,7 @@ and security configuration into a single runnable application.
 
 import json
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -178,6 +179,23 @@ async def body_size_limit_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+# ─── LOW-08: Request ID Middleware ─────────────────────────────────────
+# Generate a unique ID per request for tracing and debugging.
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """
+    LOW-08: Generate a unique X-Request-ID for every request.
+    This enables request tracing across logs, error reports, and audit trails.
+    If the client sends an X-Request-ID, it is preserved (for distributed tracing).
+    """
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
 # ─── P1-7: CSP Nonce Generation ───────────────────────────────────────
 # Generate a unique nonce per request for inline script execution.
 # This replaces 'unsafe-inline' with 'nonce-XXX' in CSP.
@@ -275,6 +293,15 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
     
+    # ─── MED-03: CSP Report-Only ────────────────────────────────────
+    # Send CSP violation reports without blocking. Useful for testing
+    # new CSP policies before enforcing them.
+    # Set CSP_REPORT_URI in .env to receive reports (e.g., https://report-uri.com)
+    csp_report_uri = getattr(settings, "csp_report_uri", "") or ""
+    if csp_report_uri:
+        csp_report_directives = csp_directives + [f"report-uri {csp_report_uri}", f"report-to csp-endpoint"]
+        response.headers["Content-Security-Policy-Report-Only"] = "; ".join(csp_report_directives)
+    
     return response
 
 # Request logging middleware
@@ -294,11 +321,63 @@ async def request_logging_middleware(request: Request, call_next):
 
     return response
 
-# ─── Exception Handlers ────────────────────────────────────────────────
+# ─── Exception Handlers (MED-09: Security headers on error pages) ──────
+
+def _apply_security_headers_to_response(response: Response, request: Request) -> Response:
+    """
+    MED-09: Apply security headers to error responses.
+    FastAPI's default exception handlers bypass middleware, so error responses
+    lack security headers. This function ensures all error responses include
+    the same security headers as normal responses.
+    """
+    # CSP with nonce (if available)
+    csp_nonce = getattr(request.state, "csp_nonce", None)
+    nonce_directive = f"'nonce-{csp_nonce}'" if csp_nonce else "'none'"
+    
+    response.headers["Content-Security-Policy"] = (
+        f"default-src 'none'; "
+        f"script-src {nonce_directive}; "
+        f"style-src {nonce_directive}; "
+        f"frame-ancestors 'none'; "
+        f"base-uri 'none'; "
+        f"form-action 'none'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
+    
+    # Include request ID for tracing
+    request_id = getattr(request.state, "request_id", None)
+    if request_id:
+        response.headers["X-Request-ID"] = request_id
+    
+    return response
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    MED-09: HTTP exception handler with security headers.
+    Ensures 4xx/5xx JSON responses include security headers.
+    """
+    response = JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+    return _apply_security_headers_to_response(response, request)
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """Catch-all exception handler for unhandled errors."""
+    """
+    MED-09: Catch-all exception handler with security headers.
+    Ensures all error responses include security headers.
+    """
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
 
     # Log to audit trail
@@ -316,15 +395,17 @@ async def global_exception_handler(request: Request, exc: Exception):
                     "path": str(request.url.path),
                     "method": request.method,
                     "error_type": type(exc).__name__,
+                    "request_id": getattr(request.state, "request_id", "unknown"),
                 },
             )
     except Exception as log_err:
         logger.error(f"Failed to log error event: {log_err}")
 
-    return JSONResponse(
+    response = JSONResponse(
         status_code=500,
         content={"detail": "internal_server_error"},
     )
+    return _apply_security_headers_to_response(response, request)
 
 # ─── Routers ───────────────────────────────────────────────────────────
 

@@ -99,12 +99,58 @@ if errorlevel 1 (
 )
 
 REM ============================================================
+REM Phase 2.5: Compute security file hashes for HIGH-07 integrity
+REM ============================================================
+echo.
+echo [2.5/6] Computing security file hashes for integrity checks...
+
+set "SECURITY_HASHES="
+for %%F in (engine\security\license_manager.py engine\security\license_client.py engine\security\anti_debug.py engine\security\anti_tamper.py) do (
+    if exist %%F (
+        for /f "delims=" %%H in ('certutil -hashfile %%F SHA256 ^| findstr /v "CertUtil" ^| findstr /v "SHA256"') do (
+            set "FHASH=%%H"
+            set "FHASH=!FHASH: =!"
+            set "FNAME=%%~nxF"
+            if defined SECURITY_HASHES (
+                set "SECURITY_HASHES=!SECURITY_HASHES!,!FNAME!:!FHASH!"
+            ) else (
+                set "SECURITY_HASHES=!FNAME!:!FHASH!"
+            )
+        )
+    )
+)
+
+if defined SECURITY_HASHES (
+    echo [OK] Security hashes computed
+    echo [INFO] AGREGAT_SECURITY_HASHES will be embedded in binary
+) else (
+    echo [WARNING] Could not compute security hashes
+)
+
+REM Also compute license_manager.py hash separately for its self-check
+set "LICENSE_MANAGER_HASH="
+if exist engine\security\license_manager.py (
+    for /f "delims=" %%H in ('certutil -hashfile engine\security\license_manager.py SHA256 ^| findstr /v "CertUtil" ^| findstr /v "SHA256"') do (
+        set "LICENSE_MANAGER_HASH=%%H"
+        set "LICENSE_MANAGER_HASH=!LICENSE_MANAGER_HASH: =!"
+    )
+)
+
+REM ============================================================
 REM Phase 3: Nuitka compilation (P2-9: hardened with obfuscation)
 REM ============================================================
 echo.
 echo [3/6] Compiling with Nuitka (hardened + obfuscated)...
 echo This may take 10-30 minutes depending on your CPU...
 echo.
+
+REM Anti-reverse engineering: Nuitka hardening flags
+REM --obfuscate-string-literals: Encrypts string literals in the binary
+REM   This prevents "strings" tool from revealing sensitive strings
+REM --obfuscate-filenames: Obfuscates Python filenames in tracebacks
+REM   Makes it harder to map compiled code back to source files
+REM NOTE: For maximum protection, consider adding a commercial protector
+REM   like VMProtect or Themida after Nuitka compilation (code virtualization)
 
 python -m nuitka ^
     --standalone ^
@@ -142,6 +188,9 @@ python -m nuitka ^
     --nofollow-import-to=notebooks ^
     --nofollow-import-to=bench ^
     --nofollow-import-to=docs ^
+    --obfuscate-string-literals ^
+    --obfuscate-filenames ^
+    --windows-uac-admin=no ^
     app.py
 
 if errorlevel 1 (

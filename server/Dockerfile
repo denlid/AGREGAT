@@ -70,9 +70,11 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONSAFEPATH=1
 
-# Health check (uses curl instead of httpx to avoid Python overhead)
+# HIGH-10 FIX: Use HTTPS for health check with -k flag (self-signed cert in container)
+# Previously: HTTP health check — traffic between health checker and app was unencrypted
+# Now: HTTPS with -k (skip cert verification — cert is self-signed inside container)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -fk https://localhost:8000/health || exit 1
 
 # Expose port
 EXPOSE 8000

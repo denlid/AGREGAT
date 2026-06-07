@@ -1,12 +1,24 @@
 # AGREGAT Security Policy
 # https://securitytxt.org/
+#
+# LOW-01 FIX: Removed references to non-existent resources
+# (security-policy, pgp-key.asc, hall-of-fame pages).
+# These fields are commented out until the resources are created.
 
 Contact: mailto:security@agregat.app
 Preferred-Languages: en, uk
 Canonical: https://agregat.app/.well-known/security.txt
-Policy: https://agregat.app/security-policy
-Encryption: https://agregat.app/pgp-key.asc
-Acknowledgments: https://agregat.app/hall-of-fame
+
+# Policy: https://agregat.app/security-policy
+# TODO: Create security policy page before uncommenting
+
+# Encryption: https://agregat.app/pgp-key.asc
+# TODO: Publish PGP key before uncommenting
+
+# Acknowledgments: https://agregat.app/hall-of-fame
+# TODO: Create hall of fame page before uncommenting
+
+Expires: 2027-01-01T00:00:00.000Z
 
 # Bug Bounty (Beta)
 # We offer small rewards for critical security vulnerabilities.
@@ -20,7 +32,7 @@ Acknowledgments: https://agregat.app/hall-of-fame
 # Out of Scope
 # - Social engineering
 # - Physical attacks
-# - Third-party services (Supabase, Neon, etc.)
+# - Third-party services
 # - Denial of service (rate limiting is in place)
 
 # Reporting Guidelines

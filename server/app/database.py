@@ -18,40 +18,66 @@ from app.config import settings
 # Supabase/Neon provide SSL by default; self-hosted should configure certs.
 
 def _get_engine_kwargs():
-    """Build engine kwargs with SSL enforcement for production."""
+    """Build engine kwargs with SSL enforcement for production.
+    
+    CRIT-03: SSL mode 'require' with CERT_NONE is a MITM vulnerability.
+    In production, default to 'verify-full' with CERT_REQUIRED.
+    The 'require' mode (no cert validation) is blocked in production.
+    """
+    import ssl as _ssl
+    
     kwargs = {
         "echo": settings.debug,
-        "pool_size": 10,
-        "max_overflow": 20,
-        "pool_pre_ping": True,   # Verify connections before use
-        "pool_recycle": 3600,    # Recycle connections every hour
+        "pool_size": 20,          # MED-10: explicit pool size
+        "max_overflow": 10,       # MED-10: explicit max overflow
+        "pool_pre_ping": True,    # Verify connections before use
+        "pool_recycle": 3600,     # Recycle connections every hour
     }
     
-    # P2-4: Enforce SSL in production (unless explicitly disabled)
     is_production = not settings.debug
-    ssl_mode = os.environ.get("DB_SSL_MODE", "require" if is_production else "disable")
+    ssl_mode = os.environ.get("DB_SSL_MODE", "verify-full" if is_production else "disable")
     
-    if ssl_mode != "disable":
-        # For asyncpg: connect_args with ssl parameter
-        import ssl as _ssl
-        ssl_context = _ssl.create_default_context()
-        
-        # If custom CA cert is provided, use it
+    # CRIT-03: Block 'require' mode in production (MITM vulnerability)
+    if is_production and ssl_mode == "require":
+        import sys
+        print("FATAL: DB_SSL_MODE='require' is not allowed in production (MITM risk).", file=sys.stderr)
+        print("Use 'verify-full' (default) or 'verify-ca' with DB_SSL_CA_CERT.", file=sys.stderr)
+        sys.exit(1)
+    
+    if ssl_mode == "disable":
+        return kwargs
+    
+    # Build SSL context
+    ssl_context = _ssl.create_default_context()
+    
+    if ssl_mode == "verify-full":
+        # Full verification: cert + hostname (most secure)
         ca_cert = os.environ.get("DB_SSL_CA_CERT")
         if ca_cert and os.path.exists(ca_cert):
             ssl_context.load_verify_locations(ca_cert)
-        else:
-            # Use system CA certs (works with Supabase, Neon, etc.)
-            ssl_context.check_hostname = True
-            ssl_context.verify_mode = _ssl.CERT_REQUIRED
-        
-        # ssl_mode: require | verify-ca | verify-full
-        if ssl_mode == "require":
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = _ssl.CERT_NONE
-        
-        kwargs["connect_args"] = {"ssl": ssl_context}
+        # else: use system CA certs (Supabase, Neon, AWS RDS, etc.)
+        ssl_context.check_hostname = True
+        ssl_context.verify_mode = _ssl.CERT_REQUIRED
     
+    elif ssl_mode == "verify-ca":
+        # Verify cert but not hostname (for internal networks)
+        ca_cert = os.environ.get("DB_SSL_CA_CERT")
+        if ca_cert and os.path.exists(ca_cert):
+            ssl_context.load_verify_locations(ca_cert)
+        elif is_production:
+            import sys
+            print("FATAL: DB_SSL_MODE='verify-ca' requires DB_SSL_CA_CERT in production.", file=sys.stderr)
+            sys.exit(1)
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = _ssl.CERT_REQUIRED
+    
+    else:
+        # Unknown ssl_mode — fail closed
+        import sys
+        print(f"FATAL: Unknown DB_SSL_MODE='{ssl_mode}'. Use: disable, verify-ca, verify-full", file=sys.stderr)
+        sys.exit(1)
+    
+    kwargs["connect_args"] = {"ssl": ssl_context}
     return kwargs
 
 
