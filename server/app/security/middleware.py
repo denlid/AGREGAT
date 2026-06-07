@@ -35,9 +35,19 @@ import time
 from typing import Optional, Dict, List, Callable, Set
 from dataclasses import dataclass, field
 
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request
-from starlette.responses import Response
+try:
+    from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+    from starlette.requests import Request
+    from starlette.responses import Response
+    HAS_STARLETTE = True
+except ImportError:
+    HAS_STARLETTE = False
+    class BaseHTTPMiddleware:
+        pass
+    class Request:
+        pass
+    class Response:
+        pass
 
 logger = logging.getLogger(__name__)
 

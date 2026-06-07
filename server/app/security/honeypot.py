@@ -42,9 +42,22 @@ from enum import Enum
 from typing import Optional, Dict, List, Set, Tuple
 from ipaddress import ip_address, IPv4Address, IPv6Address
 
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request
-from starlette.responses import Response, JSONResponse
+try:
+    from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+    from starlette.requests import Request
+    from starlette.responses import Response, JSONResponse
+    HAS_STARLETTE = True
+except ImportError:
+    HAS_STARLETTE = False
+    # Stubs for when starlette isn't installed
+    class BaseHTTPMiddleware:
+        pass
+    class Request:
+        pass
+    class Response:
+        pass
+    class JSONResponse(Response):
+        pass
 
 logger = logging.getLogger(__name__)
 

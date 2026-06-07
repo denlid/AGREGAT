@@ -51,7 +51,24 @@ except ImportError:
 # extractable from compiled binaries using `strings` or a hex editor.
 # Now FAIL-CLOSED: production startup blocked without AGREGAT_STORAGE_SECRET.
 _APP_SECRET_ENV = os.environ.get("AGREGAT_STORAGE_SECRET", "")
-_APP_ENV_MODE = os.environ.get("APP_ENV", "production").lower()
+
+# Detect if running from compiled binary (same logic as license_client.py)
+def _detect_compiled_storage() -> bool:
+    """Reliable detection of compiled binary vs source code execution."""
+    if getattr(sys, 'frozen', False):
+        return True
+    builtins_obj = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
+    if '__compiled__' in builtins_obj:
+        return True
+    if not __file__.endswith('.py'):
+        return True
+    return False
+
+_IS_COMPILED_STORAGE = _detect_compiled_storage()
+_APP_ENV_MODE = os.environ.get(
+    "APP_ENV",
+    "production" if _IS_COMPILED_STORAGE else "development",
+).lower()
 
 if not _APP_SECRET_ENV:
     if _APP_ENV_MODE == "production":

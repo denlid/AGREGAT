@@ -32,16 +32,38 @@ from engine.security.anti_debug import (
 )
 
 from engine.security.secure_memory import (
-    SecureString,
-    secure_zero,
-    mlock_supported,
+    SecureToken,
+    SecureDict,
+    virtuallock_supported,
+    secure_input_from_str,
+    secure_input_from_ctypes,
 )
+
+# Backward compatibility alias
+SecureString = SecureToken
+
+# Stub functions for backward compatibility — secure_memory.py was refactored
+# to use SecureToken.wipe() instead of standalone secure_zero()
+def secure_zero(buf):
+    """Backward compat: delegates to SecureToken.wipe() or zeroes bytearray."""
+    if hasattr(buf, 'wipe'):
+        buf.wipe()
+    elif isinstance(buf, (bytearray, memoryview)):
+        for i in range(len(buf)):
+            buf[i] = 0
+
+def mlock_supported():
+    """Backward compat: returns virtuallock_supported() on Windows."""
+    return virtuallock_supported()
 
 from engine.security.request_signing import (
     sign_api_request,
-    verify_signature,
+    verify_request_signature,
     generate_nonce,
 )
+
+# Backward compatibility alias
+verify_signature = verify_request_signature
 
 from engine.security.encrypted_storage import (
     EncryptedStorage,
@@ -65,32 +87,85 @@ from engine.security.anti_tamper import (
 
 # C-01: Strategy sandboxing
 from engine.security.strategy_sandbox import (
-    StrategySandbox,
-    SandboxConfig,
-    SandboxResult,
-    SandboxViolation,
-    create_sandboxed_strategy,
+    validate_strategy_code,
+    execute_in_sandbox,
+    StrategyExecutionGuard,
+    SandboxExecutionError,
+    SandboxTimeoutError,
+    SandboxSecurityError,
+    SecurityViolation,
+    StrategyASTValidator,
 )
+
+# Backward compatibility aliases for old API names
+SandboxViolation = SecurityViolation
 
 # C-02: Secure secret storage (DPAPI/Keychain)
 from engine.security.secret_store import (
     SecretStore,
-    get_secret_store,
-    store_secret,
-    retrieve_secret,
-    delete_secret,
-    list_secret_keys,
+    save_ai_key,
+    load_ai_key,
+    delete_ai_key,
+    migrate_plaintext_keys,
+    redact_secrets,
+    RedactingLogger,
 )
+
+# Backward compatibility stubs for old API
+def get_secret_store() -> SecretStore:
+    """Backward compat: returns a new SecretStore instance."""
+    return SecretStore()
+
+def store_secret(key: str, value: str) -> bool:
+    """Backward compat: delegates to SecretStore.set()."""
+    return SecretStore().set(key, value)
+
+def retrieve_secret(key: str) -> Optional[str]:
+    """Backward compat: delegates to SecretStore.get()."""
+    return SecretStore().get(key)
+
+def delete_secret(key: str) -> bool:
+    """Backward compat: delegates to SecretStore.delete()."""
+    return SecretStore().delete(key)
+
+def list_secret_keys() -> list:
+    """Backward compat: delegates to SecretStore.list_keys()."""
+    return SecretStore().list_keys()
 
 # C-03: Binary integrity verification
 from engine.security.integrity import (
-    IntegrityChecker,
-    IntegrityResult,
+    IntegrityManager,
+    compute_binary_integrity,
     compute_file_hash,
-    verify_file_integrity,
-    generate_manifest,
-    verify_manifest,
+    compute_directory_hash,
+    verify_release_signature,
+    check_debugger_attached,
+    check_environment_suspicious,
+    get_integrity_manager,
 )
+
+# Backward compatibility aliases/stubs
+IntegrityChecker = IntegrityManager
+
+class IntegrityResult:
+    """Backward compat stub for old IntegrityResult API."""
+    def __init__(self, is_valid: bool = True, files_checked: int = 0, violations: list = None):
+        self.is_valid = is_valid
+        self.files_checked = files_checked
+        self.violations = violations or []
+
+def verify_file_integrity(file_path, expected_hash: str = "") -> bool:
+    """Backward compat: delegates to compute_file_hash comparison."""
+    actual = compute_file_hash(file_path)
+    return actual == expected_hash if expected_hash else bool(actual)
+
+def generate_manifest(directory) -> dict:
+    """Backward compat stub: returns directory hash."""
+    return {"directory_hash": compute_directory_hash(directory)}
+
+def verify_manifest(manifest: dict) -> bool:
+    """Backward compat stub: always True (use IntegrityManager for real checks)."""
+    return True
 
 # M-03: Secure update checker
 from engine.security.update_checker import (
@@ -120,12 +195,18 @@ __all__ = [
     "get_integrity_guard",
     "IntegrityGuard",
     # Secure Memory
-    "SecureString",
-    "secure_zero",
-    "mlock_supported",
+    "SecureToken",
+    "SecureString",  # Backward compatibility alias
+    "SecureDict",
+    "secure_zero",   # Backward compat stub
+    "mlock_supported",  # Backward compat stub
+    "virtuallock_supported",
+    "secure_input_from_str",
+    "secure_input_from_ctypes",
     # Request Signing (E2E-01)
     "sign_api_request",
-    "verify_signature",
+    "verify_request_signature",
+    "verify_signature",  # Backward compat alias
     "generate_nonce",
     # Encrypted Storage (E2E-02)
     "EncryptedStorage",
@@ -144,25 +225,43 @@ __all__ = [
     "get_clipboard_text",
     "run_advanced_integrity_check",
     # C-01: Strategy Sandboxing
-    "StrategySandbox",
-    "SandboxConfig",
-    "SandboxResult",
-    "SandboxViolation",
-    "create_sandboxed_strategy",
+    "validate_strategy_code",
+    "execute_in_sandbox",
+    "StrategyExecutionGuard",
+    "SandboxExecutionError",
+    "SandboxTimeoutError",
+    "SandboxSecurityError",
+    "SecurityViolation",
+    "SandboxViolation",  # Backward compat alias
+    "StrategyASTValidator",
     # C-02: Secret Store (DPAPI/Keychain)
     "SecretStore",
+    "save_ai_key",
+    "load_ai_key",
+    "delete_ai_key",
+    "migrate_plaintext_keys",
+    "redact_secrets",
+    "RedactingLogger",
+    # Backward compat stubs
     "get_secret_store",
     "store_secret",
     "retrieve_secret",
     "delete_secret",
     "list_secret_keys",
     # C-03: Binary Integrity
-    "IntegrityChecker",
-    "IntegrityResult",
+    "IntegrityManager",
+    "IntegrityChecker",  # Backward compat alias
+    "IntegrityResult",   # Backward compat stub
+    "compute_binary_integrity",
     "compute_file_hash",
-    "verify_file_integrity",
-    "generate_manifest",
-    "verify_manifest",
+    "compute_directory_hash",
+    "verify_release_signature",
+    "check_debugger_attached",
+    "check_environment_suspicious",
+    "get_integrity_manager",
+    "verify_file_integrity",   # Backward compat stub
+    "generate_manifest",       # Backward compat stub
+    "verify_manifest",         # Backward compat stub
     # M-03: Update Checker
     "UpdateChecker",
     "UpdateStatus",

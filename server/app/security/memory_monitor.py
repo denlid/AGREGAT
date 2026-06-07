@@ -43,9 +43,21 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Optional, Dict, Callable, List, Tuple
 
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request
-from starlette.responses import Response, JSONResponse
+try:
+    from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+    from starlette.requests import Request
+    from starlette.responses import Response, JSONResponse
+    HAS_STARLETTE = True
+except ImportError:
+    HAS_STARLETTE = False
+    class BaseHTTPMiddleware:
+        pass
+    class Request:
+        pass
+    class Response:
+        pass
+    class JSONResponse(Response):
+        pass
 
 logger = logging.getLogger(__name__)
 

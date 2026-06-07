@@ -75,7 +75,28 @@ CACHE_FILE = CACHE_DIR / "license_cache.enc"
 # trivially extractable from binaries, allowing fingerprint prediction and cache forgery.
 # Now FAIL-CLOSED: production startup blocked without AGREGAT_CACHE_SECRET.
 _CACHE_SECRET_ENV = os.environ.get("AGREGAT_CACHE_SECRET", "")
-_APP_ENV_LICENSE = os.environ.get("APP_ENV", "production").lower()
+
+# Detect if running from compiled binary (PyInstaller/Nuitka) vs source.
+# Compiled binaries default to "production"; source defaults to "development".
+def _detect_compiled() -> bool:
+    """Reliable detection of compiled binary vs source code execution."""
+    # PyInstaller sets sys.frozen = True
+    if getattr(sys, 'frozen', False):
+        return True
+    # Nuitka adds __compiled__ to builtins
+    builtins_obj = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)
+    if '__compiled__' in builtins_obj:
+        return True
+    # Fallback: source files end with .py, compiled modules don't
+    if not __file__.endswith('.py'):
+        return True
+    return False
+
+_IS_COMPILED = _detect_compiled()
+_APP_ENV_LICENSE = os.environ.get(
+    "APP_ENV",
+    "production" if _IS_COMPILED else "development",
+).lower()
 
 if not _CACHE_SECRET_ENV:
     if _APP_ENV_LICENSE == "production":
@@ -270,18 +291,21 @@ _PRODUCTION_PUBLIC_KEY_B64 = (
 def _validate_production_key() -> bool:
     """
     P0-6: Validate that the Ed25519 public key is properly configured.
-    In production, raises RuntimeError if placeholder is still present.
-    In development, returns False to allow testing without a real key.
+    In production (compiled binary), raises RuntimeError if placeholder is still present.
+    In development (running from source), returns False to allow testing without a real key.
+    
+    Uses the same _IS_COMPILED detection as the cache secret logic.
     """
     if _PRODUCTION_PUBLIC_KEY_B64 == "PLACEHOLDER_REPLACE_WITH_ACTUAL_KEY":
-        app_env = os.environ.get("APP_ENV", "production").lower()
-        if app_env == "production":
+        # Only enforce in production (compiled binaries)
+        # Source code runs default to development — no key needed
+        if _IS_COMPILED:
             raise RuntimeError(
                 "FATAL: Ed25519 public key not configured for production build. "
                 "Run: python server/scripts/generate_signing_key.py and embed the key "
                 "in engine/security/license_client.py (_PRODUCTION_PUBLIC_KEY_B64)."
             )
-        return False
+        return False  # Dev mode — placeholder is OK
     try:
         raw = base64.b64decode(_PRODUCTION_PUBLIC_KEY_B64)
         if len(raw) != 32:
