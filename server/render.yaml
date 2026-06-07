@@ -1,0 +1,90 @@
+# ============================================================
+# AGREGAT Server — Render.com Infrastructure as Code
+# ============================================================
+# One-click deploy: https://render.com/docs/infrastructure-as-code
+#
+# Usage:
+#   1. Push this file to GitHub
+#   2. Render Dashboard → New → Blueprint
+#   3. Select your repo → Render reads render.yaml automatically
+#   4. Fill in env vars → Deploy
+# ============================================================
+
+services:
+  # ─── FastAPI License Server ───────────────────────────────
+  - type: web
+    name: agregat-server
+    env: python
+    region: frankfurt  # EU region — closest to Ukraine
+    plan: free         # Free tier: 750 hrs/month, sleeps after 15 min idle
+
+    # Build settings
+    rootDir: server
+    buildCommand: pip install -r requirements.txt
+
+    # Start command — Render injects $PORT automatically
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+    # Health check — Render uses this to verify deployment
+    healthCheckPath: /health
+
+    # Auto-deploy on push to main branch
+    autoDeploy: true
+
+    # Environment variables (secrets configured in Render Dashboard)
+    envVars:
+      # Mode
+      - key: DEBUG
+        value: "false"
+
+      # Database (Supabase — set in Dashboard as Secret)
+      - key: DATABASE_URL
+        sync: false  # Must be set manually in Render Dashboard
+
+      # Secrets (set in Dashboard — NEVER hardcode)
+      - key: JWT_SECRET
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: OWNER_PASSWORD_SALT
+        sync: false
+      - key: ACTIVATION_KEY_PEPPER
+        sync: false
+      - key: FINGERPRINT_PEPPER
+        sync: false
+
+      # Admin
+      - key: OWNER_EMAIL
+        sync: false
+
+      # Server
+      - key: SERVER_HOST
+        value: "0.0.0.0"
+
+      # SSL for Supabase
+      - key: DB_SSL_MODE
+        value: "verify-full"
+
+      # CORS — open for beta testing
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: ALLOWED_HOSTS
+        value: "*"
+
+      # Logging
+      - key: LOG_LEVEL
+        value: "INFO"
+      - key: LOG_FORMAT
+        value: "json"
+
+      # Rate limiting
+      - key: RATE_LIMIT_REQUESTS_PER_MINUTE
+        value: "60"
+      - key: RATE_LIMIT_AUTH_PER_MINUTE
+        value: "5"
+
+      # Heartbeat
+      - key: HEARTBEAT_INTERVAL_SECONDS
+        value: "120"
+      - key: HEARTBEAT_GRACE_PERIOD_SECONDS
+        value: "420"
