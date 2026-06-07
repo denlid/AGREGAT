@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}AGREGAT Admin{% endblock %}</title>
-    <style>
+    {# P2-15: CSP nonce for inline styles — nonce is injected by nonce_middleware #}
+    <style nonce="{{ request.state.csp_nonce if request and hasattr(request.state, 'csp_nonce') else '' }}">
         :root {
             --bg-primary: #0a0e17;
             --bg-secondary: #111827;
@@ -159,6 +160,7 @@
 </head>
 <body>
     {% block body %}{% endblock %}
+    {# P2-15: CSP nonce for inline scripts — all inline JS must use nonce attribute #}
     {% block extra_scripts %}{% endblock %}
 </body>
 </html>

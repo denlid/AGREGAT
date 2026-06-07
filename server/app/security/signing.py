@@ -41,27 +41,70 @@ def _ensure_key_dir() -> None:
     _KEY_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _get_key_password() -> Optional[bytes]:
+    """
+    P1-9: Get password for encrypting the private key at rest.
+    
+    In production, set AGREGAT_SIGNING_KEY_PASSWORD env var.
+    If not set, the key is stored unencrypted (with a warning).
+    """
+    pwd = os.environ.get("AGREGAT_SIGNING_KEY_PASSWORD", "")
+    if pwd:
+        return pwd.encode()
+    return None
+
+
 def generate_signing_keypair() -> tuple[str, str]:
     """
-    Generate a new Ed25519 keypair for license receipt signing.
+    P1-9: Generate a new Ed25519 keypair for license receipt signing.
     Returns (private_key_pem, public_key_pem).
+    
+    The private key is encrypted at rest using AES-256-CBC with a password
+    from AGREGAT_SIGNING_KEY_PASSWORD env var. If not set, a warning is logged.
     
     Run this ONCE during server setup:
         python -c "from app.security.signing import generate_signing_keypair; generate_signing_keypair()"
     """
+    import logging as _log_keygen
     _ensure_key_dir()
     
     private_key = Ed25519PrivateKey.generate()
+    
+    # P1-9: Encrypt private key at rest with password from env
+    password = _get_key_password()
+    if password:
+        from cryptography.hazmat.primitives.serialization import (
+            BestAvailableEncryption,
+            Encoding,
+            PrivateFormat,
+        )
+        encryption_algo = BestAvailableEncryption(password)
+        _log_keygen.getLogger(__name__).info(
+            "P1-9: Private key encrypted at rest with password."
+        )
+    else:
+        from cryptography.hazmat.primitives.serialization import (
+            NoEncryption,
+            Encoding,
+            PrivateFormat,
+        )
+        encryption_algo = NoEncryption()
+        _log_keygen.getLogger(__name__).warning(
+            "P1-9: Private key stored WITHOUT password encryption. "
+            "Set AGREGAT_SIGNING_KEY_PASSWORD env var for production security. "
+            "If the server is compromised, the signing key can be stolen."
+        )
+    
     private_pem = private_key.private_bytes(
-        encoding=__import__("cryptography.hazmat.primitives.serialization", fromlist=["Encoding"]).Encoding.PEM,
-        format=__import__("cryptography.hazmat.primitives.serialization", fromlist=["PrivateFormat"]).PrivateFormat.PKCS8,
-        encryption_algorithm=__import__("cryptography.hazmat.primitives.serialization", fromlist=["NoEncryption"]).NoEncryption(),
+        encoding=Encoding.PEM,
+        format=PrivateFormat.PKCS8,
+        encryption_algorithm=encryption_algo,
     )
     
     public_key = private_key.public_key()
     public_pem = public_key.public_bytes(
-        encoding=__import__("cryptography.hazmat.primitives.serialization", fromlist=["Encoding"]).Encoding.PEM,
-        format=__import__("cryptography.hazmat.primitives.serialization", fromlist=["PublicFormat"]).PublicFormat.SubjectPublicKeyInfo,
+        encoding=Encoding.PEM,
+        format=PublicFormat.SubjectPublicKeyInfo,
     )
     
     _PRIVATE_KEY_PATH.write_bytes(private_pem)
@@ -72,7 +115,13 @@ def generate_signing_keypair() -> tuple[str, str]:
 
 
 def load_private_key() -> Ed25519PrivateKey:
-    """Load the Ed25519 private key for signing."""
+    """
+    P1-9: Load the Ed25519 private key for signing.
+    
+    If the key was encrypted with a password, the password is read from
+    AGREGAT_SIGNING_KEY_PASSWORD env var. If the password is wrong or missing,
+    this will raise an exception (fail-closed).
+    """
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
     
     if not _PRIVATE_KEY_PATH.exists():
@@ -82,7 +131,20 @@ def load_private_key() -> Ed25519PrivateKey:
         )
     
     pem = _PRIVATE_KEY_PATH.read_bytes()
-    return load_pem_private_key(pem, password=None)
+    password = _get_key_password()
+    
+    # P1-9: Try with password first; if key is unencrypted, password=None works
+    try:
+        return load_pem_private_key(pem, password=password)
+    except (ValueError, TypeError) as e:
+        # If password-protected but wrong/missing password, fail-closed
+        import logging as _log_load
+        _log_load.getLogger(__name__).error(
+            "P1-9: Failed to load signing key: %s. "
+            "Check AGREGAT_SIGNING_KEY_PASSWORD env var.",
+            str(e),
+        )
+        raise
 
 
 def load_public_key() -> Ed25519PublicKey:

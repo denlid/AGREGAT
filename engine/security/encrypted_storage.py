@@ -46,9 +46,24 @@ except ImportError:
 
 # ─── Configuration ─────────────────────────────────────────────────────
 
-# Application-level secret (embedded in binary at build time)
-# CHANGE THIS before production release!
-_APP_SECRET = b"\x41\x47\x52\x45\x47\x41\x54\x5f\x53\x45\x43\x52\x45\x54\x5f\x4b\x45\x59"
+# P0-7: Application-level secret — from environment or embedded fallback.
+# In production, set AGREGAT_STORAGE_SECRET env var for proper key derivation.
+# The embedded fallback is intentionally weak to force production configuration.
+_APP_SECRET_ENV = os.environ.get("AGREGAT_STORAGE_SECRET", "")
+_APP_SECRET = _APP_SECRET_ENV.encode() if _APP_SECRET_ENV else (
+    b"\x41\x47\x52\x45\x47\x41\x54\x5f\x53\x45\x43\x52\x45\x54\x5f\x4b\x45\x59"
+)
+
+# P0-7: Warn if using embedded secret in production
+if not _APP_SECRET_ENV:
+    import logging as _logging_storage
+    _app_env_storage = os.environ.get("APP_ENV", "production").lower()
+    if _app_env_storage == "production":
+        _logging_storage.getLogger(__name__).warning(
+            "P0-7: Using embedded storage secret in production. "
+            "Set AGREGAT_STORAGE_SECRET env var for proper security. "
+            "Embedded secrets can be extracted from compiled binaries."
+        )
 
 # Storage directory
 STORAGE_DIR = Path.home() / ".agregat"
@@ -87,10 +102,10 @@ def _dpapi_protect(data: bytes) -> Optional[bytes]:
         
         output_data = DATA_BLOB()
         
-        # CRYPTPROTECT_UI_FORBIDDEN = don't show UI prompts
-        # CRYPTPROTECT_LOCAL_MACHINE = bind to machine (not domain)
+        # P2-9: CRYPTPROTECT_UI_FORBIDDEN = don't show UI prompts
+        # REMOVED CRYPTPROTECT_LOCAL_MACHINE — binds to user credentials instead
+        # of machine, providing better security (requires user login to decrypt)
         CRYPTPROTECT_UI_FORBIDDEN = 0x1
-        CRYPTPROTECT_LOCAL_MACHINE = 0x4
         
         result = ctypes.windll.crypt32.CryptProtectData(
             ctypes.byref(input_data),
@@ -98,7 +113,7 @@ def _dpapi_protect(data: bytes) -> Optional[bytes]:
             None,  # Optional entropy
             None,  # Reserved
             None,  # Prompt struct
-            CRYPTPROTECT_UI_FORBIDDEN | CRYPTPROTECT_LOCAL_MACHINE,
+            CRYPTPROTECT_UI_FORBIDDEN,  # P2-9: User-bound, not machine-bound
             ctypes.byref(output_data),
         )
         
@@ -266,10 +281,36 @@ class EncryptedStorage:
             
             fernet = Fernet(self._fernet_key)
             encrypted_data = self._file.read_bytes()
-            decrypted = fernet.decrypt(encrypted_data, ttl=None)
+            # P2-10: TTL = 30 days for persistent storage (not session data)
+            # Fernet tokens include a timestamp; old tokens are rejected.
+            # 30 days balances security with usability for persistent storage.
+            decrypted = fernet.decrypt(encrypted_data, ttl=2592000)
             self._cache = json.loads(decrypted.decode())
-        except (InvalidToken, json.JSONDecodeError, Exception):
-            # InvalidToken = tampered data or wrong key (different hardware)
+        except InvalidToken:
+            # P2-11: Log decryption failure for forensic analysis
+            # InvalidToken = tampered data, wrong key, or expired TTL
+            import logging as _log_load
+            _log_load.getLogger(__name__).warning(
+                "P2-11: Encrypted storage decryption failed (namespace=%s). "
+                "Possible causes: data tampering, hardware change, or expired TTL.",
+                self._namespace,
+            )
+            self._cache = {}
+        except json.JSONDecodeError:
+            import logging as _log_json
+            _log_json.getLogger(__name__).warning(
+                "P2-11: Encrypted storage JSON decode failed (namespace=%s). "
+                "Data may be corrupted.",
+                self._namespace,
+            )
+            self._cache = {}
+        except Exception as e:
+            # P2-11: Log unexpected errors (don't silently swallow)
+            import logging as _log_exc
+            _log_exc.getLogger(__name__).error(
+                "P2-11: Unexpected error loading encrypted storage (namespace=%s): %s",
+                self._namespace, str(e),
+            )
             self._cache = {}
     
     def _save(self) -> None:
@@ -362,9 +403,13 @@ def secure_delete(key: str, namespace: str = "default") -> None:
 
 def secure_delete_file(file_path: Path, passes: int = 3) -> bool:
     """
-    Securely delete a file by overwriting with random data before unlinking.
+    P2-12: Securely delete a file by overwriting with random data before unlinking.
     
-    This prevents forensic recovery of deleted files.
+    WARNING: On SSDs with wear leveling, overwriting may NOT destroy the original
+    data (the SSD controller may write to a new physical block). For SSDs,
+    consider using full-disk encryption (BitLocker/FileVault) instead.
+    
+    This method is effective on HDDs but provides limited protection on SSDs.
     
     Args:
         file_path: Path to the file to delete
@@ -377,6 +422,14 @@ def secure_delete_file(file_path: Path, passes: int = 3) -> bool:
     
     try:
         file_size = file_path.stat().st_size
+        
+        # P2-12: Warn about SSD limitations
+        import logging as _log_ssd
+        _log_ssd.getLogger(__name__).debug(
+            "P2-12: Secure delete on %s. Note: SSD wear leveling may prevent "
+            "complete data destruction. Use full-disk encryption for SSDs.",
+            file_path,
+        )
         
         for i in range(passes):
             with open(file_path, "wb") as f:

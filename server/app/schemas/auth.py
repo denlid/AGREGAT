@@ -4,6 +4,7 @@ AGREGAT Server — Auth Schemas
 Request/response models for authentication endpoints.
 """
 
+import json
 import re
 from datetime import datetime
 from typing import Optional
@@ -100,11 +101,53 @@ class HeartbeatResponse(BaseModel):
 
 
 class StrategyRegisterRequest(BaseModel):
-    """POST /v1/strategies/register"""
+    """
+    POST /v1/strategies/register
+    
+    M-NEW-06 FIX: Size limits added to prevent storage abuse.
+    Previously: no limits on strategy_code, file_name, metadata — attacker could
+    send megabytes of data to fill up the database.
+    """
     strategy_hash: str = Field(..., min_length=32, max_length=64)
-    strategy_code: Optional[str] = None
-    file_name: Optional[str] = None
+    # M-NEW-06: Limit strategy code to 50KB (reasonable for Python strategy files)
+    strategy_code: Optional[str] = Field(None, max_length=50_000)
+    # M-NEW-06: Limit filename to 255 chars (filesystem standard)
+    file_name: Optional[str] = Field(None, max_length=255)
     metadata: Optional[dict] = {}
+
+    @field_validator("strategy_code")
+    @classmethod
+    def validate_strategy_code_size(cls, v: Optional[str]) -> Optional[str]:
+        """M-NEW-06: Reject strategy code exceeding 50KB."""
+        if v and len(v.encode("utf-8")) > 50_000:
+            raise ValueError("strategy_code exceeds maximum size of 50KB")
+        return v
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata_size(cls, v: Optional[dict]) -> Optional[dict]:
+        """M-NEW-06: Reject metadata exceeding 10KB when serialized."""
+        if v:
+            try:
+                serialized_size = len(json.dumps(v).encode("utf-8"))
+                if serialized_size > 10_000:
+                    raise ValueError("metadata exceeds maximum size of 10KB")
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"metadata must be valid JSON-serializable dict: {e}")
+        return v
+
+    @field_validator("file_name")
+    @classmethod
+    def validate_file_name_safety(cls, v: Optional[str]) -> Optional[str]:
+        """M-NEW-06: Prevent path traversal in file_name."""
+        if v:
+            # Block path traversal attempts
+            if ".." in v or "/" in v or "\\" in v:
+                raise ValueError("file_name must not contain path separators or '..'")
+            # Only allow safe characters
+            if not re.match(r'^[a-zA-Z0-9_\-\. ]+$', v):
+                raise ValueError("file_name contains invalid characters")
+        return v
 
 
 class StrategyRegisterResponse(BaseModel):

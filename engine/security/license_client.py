@@ -70,8 +70,12 @@ HEARTBEAT_INTERVAL = 60  # 1 minute
 CACHE_DIR = Path.home() / ".agregat"
 CACHE_FILE = CACHE_DIR / "license_cache.enc"
 
-# Encryption key derived from hardware (same as license_manager.py)
-_CACHE_KEY_SALT = b"\x77\x88\xAA\xBB"
+# P1-10: Cache encryption key — derived from hardware + env secret.
+# Replaces hardcoded salt with environment-configurable secret.
+_CACHE_KEY_SALT = os.environ.get(
+    "AGREGAT_CACHE_SECRET",
+    "dev_fallback_salt_do_not_use_in_production"
+).encode()
 _CACHE_KEY_PREFIX = b"\x41\x47\x52\x45\x47\x41\x54"  # AGREGAT
 
 
@@ -240,13 +244,40 @@ def get_app_version() -> str:
 #   3. Replace the _PRODUCTION_PUBLIC_KEY_B64 value below
 #   4. Rebuild the desktop client binary
 #
-# P0-1: Ed25519 public key — MUST be set before production build.
+# P0-6: Ed25519 public key — MUST be set before production build.
 # Generate with: python server/scripts/generate_signing_key.py
-# The placeholder below is a valid Ed25519 public key for testing.
+# The placeholder below will cause a RuntimeError in production builds.
 # REPLACE THIS with your actual server public key before shipping!
 _PRODUCTION_PUBLIC_KEY_B64 = (
-    "PLACEHOLDER_REPLACE_WITH_ACTUAL_KEY"  # P0-1: Generate and embed before build
+    "PLACEHOLDER_REPLACE_WITH_ACTUAL_KEY"  # P0-6: Generate and embed before build
 )
+
+
+def _validate_production_key() -> bool:
+    """
+    P0-6: Validate that the Ed25519 public key is properly configured.
+    In production, raises RuntimeError if placeholder is still present.
+    In development, returns False to allow testing without a real key.
+    """
+    if _PRODUCTION_PUBLIC_KEY_B64 == "PLACEHOLDER_REPLACE_WITH_ACTUAL_KEY":
+        app_env = os.environ.get("APP_ENV", "production").lower()
+        if app_env == "production":
+            raise RuntimeError(
+                "FATAL: Ed25519 public key not configured for production build. "
+                "Run: python server/scripts/generate_signing_key.py and embed the key "
+                "in engine/security/license_client.py (_PRODUCTION_PUBLIC_KEY_B64)."
+            )
+        return False
+    try:
+        raw = base64.b64decode(_PRODUCTION_PUBLIC_KEY_B64)
+        if len(raw) != 32:
+            raise ValueError(f"Invalid Ed25519 key length: {len(raw)} bytes (expected 32)")
+        return True
+    except Exception as e:
+        raise RuntimeError(f"Invalid Ed25519 public key format: {e}")
+
+
+_PRODUCTION_KEY_VALID = _validate_production_key()
 
 
 def _get_server_public_key() -> str:
@@ -419,6 +450,17 @@ def clear_license_cache() -> None:
 # Obtain via: openssl s_client -connect license.agregat.io:443 | openssl x509 -fingerprint -sha256 -noout
 # Set to empty string to disable pinning (NOT recommended for production).
 _EXPECTED_CERT_SHA256 = os.environ.get("AGREGAT_CERT_PIN", "")
+
+# P2-14: Warn if certificate pinning is not configured in production
+if not _EXPECTED_CERT_SHA256:
+    import logging as _logging_cert
+    _app_env_cert = os.environ.get("APP_ENV", "production").lower()
+    if _app_env_cert == "production":
+        _logging_cert.getLogger(__name__).warning(
+            "P2-14: TLS certificate pinning not configured. "
+            "Set AGREGAT_CERT_PIN env var for production security. "
+            "Without pinning, a compromised CA could enable MITM attacks."
+        )
 
 
 def _get_ssl_context_for_pinning():

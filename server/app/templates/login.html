@@ -38,7 +38,11 @@
     </div>
 </div>
 
-<script>
+{# P2-15: CSP nonce for inline script #}
+<script nonce="{{ request.state.csp_nonce if request and hasattr(request.state, 'csp_nonce') else '' }}">
+// P2-16: MFA session token stored in JS variable — acceptable for beta.
+// In production, consider using sessionStorage (cleared on tab close)
+// instead of a global variable, to reduce XSS exposure window.
 let mfaSessionToken = '';
 let mfaEmail = '';
 

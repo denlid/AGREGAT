@@ -48,15 +48,21 @@ def validate_fingerprint(fp: str) -> tuple[bool, str]:
 
 def hash_fingerprint(fp: str, pepper: str = "") -> str:
     """
-    MH-09: Hash fingerprint with optional server-side pepper (HMAC-SHA256).
+    P1-11: Hash fingerprint with server-side pepper (HMAC-SHA256).
     
     SECURITY: Raw hardware fingerprints are sensitive tracking data.
     Storing HMAC(pepper, fingerprint) prevents DB leaks from exposing
     raw hardware identifiers. The pepper is stored in .env, not in DB.
     
-    When pepper is empty (dev/legacy), falls back to plain SHA-256.
+    P1-11: In production, pepper is REQUIRED. Without it, a DB leak
+    exposes raw fingerprints that can be reversed via rainbow tables.
+    In development, falls back to SHA-256 with a warning.
     """
+    import os as _os_fp
+    import logging as _log_fp
+    
     normalized = normalize_fingerprint(fp)
+    
     if pepper:
         import hmac as _hmac
         return _hmac.new(
@@ -64,6 +70,21 @@ def hash_fingerprint(fp: str, pepper: str = "") -> str:
             normalized.encode(),
             hashlib.sha256,
         ).hexdigest()
+    
+    # P1-11: No pepper — check environment
+    app_env = _os_fp.environ.get("APP_ENV", "production").lower()
+    if app_env == "production":
+        _log_fp.getLogger(__name__).error(
+            "P1-11: hash_fingerprint called without pepper in production! "
+            "Set FINGERPRINT_PEPPER in config.py. Falling back to SHA-256 "
+            "(INSECURE — fingerprints can be reversed via rainbow tables)."
+        )
+    else:
+        _log_fp.getLogger(__name__).warning(
+            "P1-11: hash_fingerprint called without pepper in development. "
+            "Set FINGERPRINT_PEPPER for production deployment."
+        )
+    
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 

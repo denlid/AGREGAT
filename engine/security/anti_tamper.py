@@ -295,9 +295,23 @@ def detect_iat_hooks() -> list[str]:
         else:
             return hooks
         
-        # Check loaded modules for legitimate ranges
-        # (simplified — full implementation would walk all module ranges)
-        # For now, just check if IAT entries point to system DLLs or our module
+        # P2-13: IAT hook detection is INCOMPLETE — this is a stub implementation.
+        # A full implementation would:
+        # 1. Walk the Import Directory Table (IMAGE_DIRECTORY_ENTRY_IMPORT)
+        # 2. For each imported DLL, walk the IAT entries
+        # 3. Check if each function pointer points within the expected DLL's address range
+        # 4. Flag any pointers that point outside legitimate module ranges
+        #
+        # Current implementation only parses the PE header but doesn't check IAT entries.
+        # This provides NO protection against IAT hooking attacks.
+        #
+        # TODO: Implement full IAT walking. Reference:
+        # https://docs.microsoft.com/en-us/windows/win32/debug/pe-format#import-directory-table
+        import logging as _log_iat
+        _log_iat.getLogger(__name__).debug(
+            "P2-13: detect_iat_hooks() is a stub — IAT entries are NOT checked. "
+            "Full implementation required for production anti-tamper protection."
+        )
         
     except Exception:
         pass

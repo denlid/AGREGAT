@@ -552,7 +552,16 @@ async def admin_verify_mfa(
                 else:
                     remaining_codes.append(enc_code)
             else:
-                # Legacy plaintext code — direct comparison
+                # P3-6: Legacy plaintext backup code — INSECURE.
+                # Backup codes should always be encrypted at rest with Fernet.
+                # Plaintext codes in the DB can be stolen if the database is compromised.
+                import logging as _log_backup
+                _log_backup.getLogger(__name__).warning(
+                    "P3-6: Plaintext backup code found for user %s. "
+                    "Backup codes should be Fernet-encrypted. "
+                    "Regenerate MFA for this user to encrypt backup codes.",
+                    email,
+                )
                 if enc_code.upper() == backup_code.upper():
                     is_valid = True
                 else:

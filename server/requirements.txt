@@ -49,4 +49,4 @@ structlog==24.4.0
 # ─── Testing ───
 pytest==8.3.4
 pytest-asyncio==0.24.0
-httpx==0.28.1
+# P3-4: httpx removed from here — already listed above under HTTP Client section

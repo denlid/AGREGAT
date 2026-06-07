@@ -118,18 +118,34 @@ def _check_environment() -> bool:
 # 4. HWID
 # ─────────────────────────────────────────────────────────────────────
 def get_hwid() -> str:
+    """
+    H-NEW-03 FIX: Use shell=False with absolute path to prevent command injection.
+    Previously: shell=True — vulnerable to PATH manipulation / DLL hijacking.
+    Now: shell=False with explicit wmic.exe path + CREATE_NO_WINDOW flag.
+    """
     try:
         import subprocess
+        # H-NEW-03: Absolute path to wmic, shell=False — prevents PATH injection
+        system_root = os.environ.get("SYSTEMROOT", "C:\\Windows")
+        wmic_path = os.path.join(system_root, "System32", "wbem", "wmic.exe")
+        
+        if not os.path.isfile(wmic_path):
+            raise FileNotFoundError(f"wmic not found at {wmic_path}")
+        
         output = subprocess.check_output(
-            _d("SFJWXB9cTE9NUFtKXEsfWFpLH0pKVls="), shell=True, stderr=subprocess.DEVNULL
+            [wmic_path, "csproduct", "get", "UUID"],
+            shell=False,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
         ).decode()
         uuid_str = output.split('\n')[1].strip()
         if not uuid_str or uuid_str == "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF":
-            raise ValueError()
+            raise ValueError("invalid_system_uuid")
         return hashlib.sha256(uuid_str.encode()).hexdigest()[:16].upper()
     except Exception:
-        import uuid
-        mac = str(uuid.getnode())
+        # Fallback: MAC address hash (less reliable but safe)
+        import uuid as _uuid
+        mac = str(_uuid.getnode())
         return hashlib.sha256(mac.encode()).hexdigest()[:16].upper()
 
 _SESSION_NETWORK_TIME = None
@@ -234,13 +250,20 @@ def _fernet_decrypt(ciphertext: bytes, hwid_key: bytes) -> bytes:
         raise ValueError("license_decryption_failed")
 
 
-# Keep XOR for BACKWARD COMPATIBILITY with old license files
-# New licenses use Fernet; old licenses fall back to XOR
+# ─────────────────────────────────────────────────────────────────────
+# H-NEW-02 FIX: Legacy XOR cipher with hard deadline
+# ─────────────────────────────────────────────────────────────────────
+
+# After this date, legacy XOR licenses are REJECTED (not just deprecated)
+# This gives beta users time to migrate to Fernet-encrypted licenses
+_LEGACY_XOR_DEADLINE = datetime(2026, 8, 1, tzinfo=timezone.utc)
+
 def _xor_crypt(data: bytes, key: bytes) -> bytes:
     """
     DEPRECATED: XOR cipher — kept only for backward compatibility with old licenses.
     New licenses use Fernet (AES-128-CBC + HMAC-SHA256).
     P1-3: This is NOT secure — known-plaintext attack recovers key in seconds.
+    H-NEW-02: Will be completely rejected after _LEGACY_XOR_DEADLINE.
     """
     return bytes(a ^ key[i % len(key)] for i, a in enumerate(data))
 
@@ -248,11 +271,13 @@ def _xor_crypt(data: bytes, key: bytes) -> bytes:
 def _decrypt_license_blob(encoded: str, key: bytes) -> dict:
     """
     P1-3: Decrypt license blob with automatic format detection.
-    Supports both new Fernet format and legacy XOR format.
+    Supports both new Fernet format and legacy XOR format (until deadline).
     
     Format detection:
     - Fernet tokens start with 'gAAAAA' (base64-encoded version byte 0x80)
     - Legacy XOR blobs are raw base64
+    
+    H-NEW-02: Legacy XOR format is REJECTED after _LEGACY_XOR_DEADLINE.
     """
     try:
         encrypted_blob = base64.b64decode(encoded)
@@ -268,10 +293,26 @@ def _decrypt_license_blob(encoded: str, key: bytes) -> dict:
             # New format: Fernet (AES-128-CBC + HMAC-SHA256)
             decrypted_raw = _fernet_decrypt(encrypted_blob, key)
         else:
-            # Legacy format: XOR (DEPRECATED, kept for backward compatibility)
+            # H-NEW-02: Reject legacy XOR format after deadline
+            now = _get_network_time() if '_get_network_time' in dir() else datetime.now(timezone.utc)
+            try:
+                now = _get_network_time()
+            except Exception:
+                now = datetime.now(timezone.utc)
+            
+            if now > _LEGACY_XOR_DEADLINE:
+                raise ValueError(
+                    "legacy_license_format_rejected: "
+                    "XOR-encrypted licenses are no longer supported. "
+                    "Please contact support for a Fernet-encrypted license."
+                )
+            
+            # Legacy format: XOR (DEPRECATED, kept for backward compatibility until deadline)
             decrypted_raw = _xor_crypt(encrypted_blob, key)
         
         return json.loads(decrypted_raw.decode())
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(f"decryption_failed: {e}")
 

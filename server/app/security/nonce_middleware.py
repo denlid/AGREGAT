@@ -137,9 +137,20 @@ async def check_nonce(redis_client, nonce: str) -> tuple[bool, str]:
         else:
             return False, "nonce_reused (replay attack)"
     except Exception as e:
-        # Redis unavailable — fail open for availability, but log it
-        # In high-security mode, you might want to fail closed instead
-        return True, f"redis_unavailable ({e})"
+        # P1-8: Redis unavailable — FAIL-CLOSED in production to prevent replay attacks.
+        # Fail-open allows attackers to replay requests when Redis is down.
+        # In development, fail-open is acceptable for testing.
+        import logging as _log_nonce
+        import os as _os_nonce
+        _log_nonce.getLogger(__name__).error(
+            "P1-8: Redis unavailable for nonce check: %s. "
+            "Failing CLOSED — requests will be rejected.",
+            str(e),
+        )
+        _app_env_nonce = _os_nonce.environ.get("APP_ENV", "production").lower()
+        if _app_env_nonce == "development":
+            return True, f"redis_unavailable_dev ({e})"
+        return False, f"redis_unavailable_fail_closed ({e})"
 
 
 # ─── Middleware ────────────────────────────────────────────────────────

@@ -47,18 +47,38 @@ SEVERITY_LOW = "🟢 LOW"
 
 # ─── Alert Formatting ──────────────────────────────────────────────────
 
+def _escape_telegram_markdown(text: str) -> str:
+    """
+    P1-12: Escape special characters for Telegram Markdown.
+    
+    Prevents Markdown injection attacks where user-controlled data
+    (e.g., email addresses, IP addresses) could contain Markdown
+    special characters that break formatting or inject links.
+    
+    Telegram Markdown special chars: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    """
+    import re
+    # Escape all Telegram MarkdownV2 special characters
+    return re.sub(r'([_\*\[\]\(\)~`>#\+\-=\|\{\}\.!\])', r'\\\1', str(text))
+
+
 def _format_telegram_alert(severity: str, title: str, details: dict) -> str:
-    """Format alert for Telegram (Markdown)."""
+    """
+    P1-12: Format alert for Telegram (MarkdownV2 with escaped values).
+    
+    All user-controlled values are escaped to prevent Markdown injection.
+    """
     lines = [
         f"🔒 *AGREGAT Security Alert*",
         f"",
-        f"*{severity}*: {title}",
-        f"*Time*: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"*{_escape_telegram_markdown(severity)}*: {_escape_telegram_markdown(title)}",
+        f"*Time*: {datetime.now(timezone.utc).strftime('%Y\\-%m\\-%d %H:%M:%S UTC')}",
         f"",
     ]
     
     for key, value in details.items():
-        lines.append(f"*{key}*: `{value}`")
+        escaped_value = _escape_telegram_markdown(value)
+        lines.append(f"*{_escape_telegram_markdown(key)}*: `{escaped_value}`")
     
     return "\n".join(lines)
 
@@ -100,11 +120,12 @@ def _send_telegram(message: str) -> bool:
             with httpx.Client(timeout=10.0) as client:
                 resp = client.post(
                     TELEGRAM_WEBHOOK_URL,
-                    json={"text": message, "parse_mode": "Markdown"},
+                    # P1-12: Use MarkdownV2 for proper escaping support
+                    json={"text": message, "parse_mode": "MarkdownV2"},
                 )
                 return resp.status_code == 200
         else:
-            data = json.dumps({"text": message, "parse_mode": "Markdown"}).encode()
+            data = json.dumps({"text": message, "parse_mode": "MarkdownV2"}).encode()
             req = urllib.request.Request(
                 TELEGRAM_WEBHOOK_URL,
                 data=data,
