@@ -2,8 +2,13 @@
 AGREGAT Server — V1 Auth API
 
 License activation, token refresh, logout.
+
+P1-1: Tightened rate limiting on activation (3 attempts per 5 min).
+P1-2: Audit logging for all client auth events.
+P1-5: Session fixation protection (revoke old sessions on re-activation).
 """
 
+import hashlib
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +43,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
     "/activate",
     response_model=ActivateResponse,
     responses={400: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
-    dependencies=[Depends(rate_limit_dependency("activate", max_requests=5, window_seconds=300))],
+    # P1-1: Strict rate limiting on activation (3 attempts per 5 min per IP)
+    dependencies=[Depends(rate_limit_dependency("activate", max_requests=3, window_seconds=300))],
 )
 async def activate(
     req: ActivateRequest,
@@ -48,6 +54,10 @@ async def activate(
     """
     Activate a license key on a device.
     Returns access_token + refresh_token + entitlements.
+    
+    P1-1: Rate limited to 3 attempts per 5 minutes per IP.
+    P1-2: Audit logged for all activation attempts (success + failure).
+    P1-5: Previous sessions for this device are revoked (session fixation protection).
     """
     # Validate fingerprint
     is_valid, reason = validate_fingerprint(req.device_fingerprint)
@@ -72,6 +82,19 @@ async def activate(
         )
     except ValueError as e:
         error_code = str(e)
+        
+        # P1-2: Audit log failed activation attempts
+        await log_event(
+            db,
+            action="client.activation_failed",
+            ip_hash=ip_hash,
+            payload={
+                "email_prefix": req.email[:3] + "***" if req.email else "",
+                "error": error_code,
+                "device_fp_hash": hashlib.sha256(req.device_fingerprint.encode()).hexdigest()[:16] if req.device_fingerprint else "",
+            },
+        )
+        
         status_codes = {
             "invalid_key": status.HTTP_400_BAD_REQUEST,
             "license_expired": status.HTTP_403_FORBIDDEN,
@@ -84,6 +107,18 @@ async def activate(
             status_code=status_codes.get(error_code, status.HTTP_400_BAD_REQUEST),
             detail=error_code,
         )
+
+    # P1-2: Audit log successful activation
+    await log_event(
+        db,
+        action="client.activated",
+        ip_hash=ip_hash,
+        payload={
+            "user_id": result["user_id"],
+            "device_fp_hash": hashlib.sha256(req.device_fingerprint.encode()).hexdigest()[:16] if req.device_fingerprint else "",
+            "tier": result.get("license_tier", ""),
+        },
+    )
 
     # C-01: Return signed receipt — required for client-side verification
     return ActivateResponse(
@@ -127,12 +162,23 @@ async def refresh(
 
 @router.post("/logout", response_model=LogoutResponse)
 async def logout_endpoint(
+    request: Request,
     session=Depends(get_current_session),
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Logout: revoke current session."""
     await logout(db, session.id, user.id)
+    
+    # P1-2: Audit log logout
+    await log_event(
+        db,
+        action="client.logout",
+        actor_user_id=user.id,
+        ip_hash=get_ip_hash(request),
+        payload={"session_id": str(session.id)},
+    )
+    
     return LogoutResponse(status="logged_out")
 
 

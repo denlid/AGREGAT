@@ -3,6 +3,10 @@ AGREGAT Server — JWT Token Management
 
 Opaque token strategy: tokens are random strings stored server-side.
 No sensitive data in tokens. Server is source of truth.
+
+P2-5: Device fingerprint binding — access tokens include a hash of the
+device fingerprint. If a token is stolen and used from a different device,
+the fingerprint mismatch will cause rejection.
 """
 
 import hashlib
@@ -15,8 +19,17 @@ import jwt as pyjwt
 from app.config import settings
 
 
-def generate_access_token(session_id: str, user_id: str) -> str:
-    """Generate short-lived access token (5 min)."""
+def generate_access_token(
+    session_id: str,
+    user_id: str,
+    device_fingerprint_hash: Optional[str] = None,
+) -> str:
+    """
+    Generate short-lived access token (5 min).
+    
+    P2-5: Optionally includes device fingerprint hash for binding.
+    If device_fingerprint_hash is provided, the token is bound to that device.
+    """
     payload = {
         "sub": str(user_id),
         "sid": str(session_id),
@@ -25,6 +38,11 @@ def generate_access_token(session_id: str, user_id: str) -> str:
         "exp": datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_access_token_expire_minutes),
         "jti": secrets.token_hex(16),
     }
+    
+    # P2-5: Bind token to device fingerprint (if provided)
+    if device_fingerprint_hash:
+        payload["dfp"] = device_fingerprint_hash
+    
     return pyjwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
@@ -38,12 +56,31 @@ def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def verify_access_token(token: str) -> Optional[dict]:
-    """Verify and decode access token. Returns payload or None."""
+def verify_access_token(
+    token: str,
+    device_fingerprint_hash: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Verify and decode access token. Returns payload or None.
+    
+    P2-5: If device_fingerprint_hash is provided, verifies that the token
+    is bound to the same device. Mismatch = token stolen/replayed.
+    """
     try:
         payload = pyjwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
         if payload.get("type") != "access":
             return None
+        
+        # P2-5: Verify device fingerprint binding
+        token_dfp = payload.get("dfp")
+        if token_dfp and device_fingerprint_hash:
+            # Token is bound to a device — verify match
+            if token_dfp != device_fingerprint_hash:
+                return None  # Fingerprint mismatch — token stolen
+        elif token_dfp and not device_fingerprint_hash:
+            # Token is bound but no fingerprint provided — reject
+            return None
+        
         return payload
     except (pyjwt.ExpiredSignatureError, pyjwt.InvalidTokenError):
         return None

@@ -15,7 +15,7 @@ from app.schemas.admin import (
     MFAVerifyRequest,
     MFASetupResponse,
 )
-from app.api.deps import get_ip_hash, get_user_agent_hash, require_admin, require_csrf_token, store_admin_session, remove_admin_session, store_mfa_token, verify_mfa_token, consume_mfa_token, rate_limit_dependency
+from app.api.deps import get_ip_hash, get_user_agent_hash, require_admin, require_csrf_token, store_admin_session, remove_admin_session, store_mfa_token, verify_mfa_token, consume_mfa_token, rate_limit_dependency, _hash_admin_token
 from app.services.auth_service import admin_login, admin_verify_mfa
 from app.services.audit import log_event
 from app.security.webhook_alerts import alert_admin_login, alert_brute_force_detected
@@ -89,9 +89,10 @@ async def admin_login_endpoint(
         "mfa_setup_required": result.get("mfa_setup_required", False),
     })
 
-    # Store MFA token server-side for verification
+    # P0-3: Store MFA token in PostgreSQL (async, with db session)
     if result.get("session_token"):
-        store_mfa_token(req.email, result["session_token"], ttl_seconds=300)
+        await store_mfa_token(db, req.email, result["session_token"], ttl_seconds=300)
+        await db.commit()  # Persist MFA token immediately
 
     # Set session token + email in secure cookies (email needed for MFA verify step)
     if result.get("session_token"):
@@ -138,8 +139,8 @@ async def admin_mfa_verify(
             detail="mfa_session_expired",
         )
 
-    # Verify MFA token matches what was issued for this email (prevents token reuse)
-    if not verify_mfa_token(email, mfa_token):
+    # P0-3: Verify MFA token from PostgreSQL (async)
+    if not await verify_mfa_token(db, email, mfa_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="mfa_token_invalid_or_expired",
@@ -160,8 +161,8 @@ async def admin_mfa_verify(
             detail=str(e),
         )
 
-    # Consume MFA token (single-use)
-    consume_mfa_token(email)
+    # P0-3: Consume MFA token from PostgreSQL (async, single-use)
+    await consume_mfa_token(db, email)
 
     # P2-4: Store session in PostgreSQL with 1-hour expiry (was 24h)
     # Shorter sessions reduce the window for session hijacking
@@ -232,8 +233,8 @@ async def admin_mfa_setup(
             detail="mfa_session_required",
         )
 
-    # Verify MFA token is valid and matches email
-    if not verify_mfa_token(email, mfa_token):
+    # P0-3: Verify MFA token from PostgreSQL (async)
+    if not await verify_mfa_token(db, email, mfa_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="mfa_token_invalid_or_expired",
@@ -323,8 +324,8 @@ async def admin_mfa_enable(
             detail="mfa_session_required",
         )
 
-    # Verify MFA token is valid and matches email
-    if not verify_mfa_token(email, mfa_token):
+    # P0-3: Verify MFA token from PostgreSQL (async)
+    if not await verify_mfa_token(db, email, mfa_token):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="mfa_token_invalid_or_expired",

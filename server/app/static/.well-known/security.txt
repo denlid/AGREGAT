@@ -1,0 +1,30 @@
+# AGREGAT Security Policy
+# https://securitytxt.org/
+
+Contact: mailto:security@agregat.app
+Preferred-Languages: en, uk
+Canonical: https://agregat.app/.well-known/security.txt
+Policy: https://agregat.app/security-policy
+Encryption: https://agregat.app/pgp-key.asc
+Acknowledgments: https://agregat.app/hall-of-fame
+
+# Bug Bounty (Beta)
+# We offer small rewards for critical security vulnerabilities.
+# Please report responsibly and allow 72 hours for initial response.
+
+# Scope
+# - AGREGAT License Server (api.agregat.app)
+# - AGREGAT Desktop Client (Windows/macOS)
+# - Admin Panel
+
+# Out of Scope
+# - Social engineering
+# - Physical attacks
+# - Third-party services (Supabase, Neon, etc.)
+# - Denial of service (rate limiting is in place)
+
+# Reporting Guidelines
+# 1. DO NOT exploit the vulnerability beyond what's needed to demonstrate it
+# 2. DO NOT access or modify other users' data
+# 3. DO report with steps to reproduce and proof of concept
+# 4. ALLOW us 72 hours to respond before public disclosure

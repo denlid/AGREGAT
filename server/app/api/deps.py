@@ -237,12 +237,10 @@ async def require_csrf_token(request: Request) -> None:
         )
 
 
-# ─── In-memory MFA token store (short-lived, for login flow only) ──────
-# MFA tokens are short-lived (5 min) and only used during the login flow.
-# These are safe to keep in memory since they expire quickly and are
-# single-use. Admin SESSIONS are now stored in PostgreSQL.
-# Format: {email: {"token_hash": str, "expires_at": float}}
-_mfa_tokens: dict[str, dict] = {}
+# ─── P0-3 FIX: PostgreSQL-based MFA token store ────────────────────────
+# MFA tokens are now stored in PostgreSQL (not in-memory).
+# This enables multi-instance deployment (HA) and survives server restarts.
+# Tokens are short-lived (5 min), single-use, and stored as SHA-256 hashes.
 
 
 def _hash_admin_token(token: str) -> str:
@@ -296,30 +294,77 @@ async def remove_admin_session(db: AsyncSession, token: str) -> None:
         await db.flush()
 
 
-def store_mfa_token(email: str, token: str, ttl_seconds: int = 300) -> None:
-    """Store MFA token hash for email (called after password verification)."""
-    import time
-    _mfa_tokens[email.lower()] = {
-        "token_hash": _hash_admin_token(token),
-        "expires_at": time.time() + ttl_seconds,
-    }
+# P0-3: Async PostgreSQL-based MFA token functions
+# These replace the in-memory _mfa_tokens dict.
+# Called from admin auth endpoints with db session.
+
+async def store_mfa_token(db: AsyncSession, email: str, token: str, ttl_seconds: int = 300) -> None:
+    """
+    P0-3: Store MFA token hash in PostgreSQL (called after password verification).
+    Replaces in-memory store — works across multiple server instances.
+    """
+    from datetime import datetime, timezone, timedelta
+    from app.models.mfa_token import MfaToken
+    
+    # Clean up any existing tokens for this email first
+    from sqlalchemy import delete
+    await db.execute(
+        delete(MfaToken).where(MfaToken.email == email.lower())
+    )
+    
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    mfa_token = MfaToken(
+        email=email.lower(),
+        token_hash=_hash_admin_token(token),
+        expires_at=expires_at,
+    )
+    db.add(mfa_token)
+    await db.flush()
 
 
-def verify_mfa_token(email: str, token: str) -> bool:
-    """Verify MFA token matches what was issued for this email."""
-    import time
-    entry = _mfa_tokens.get(email.lower())
-    if not entry:
+async def verify_mfa_token(db: AsyncSession, email: str, token: str) -> bool:
+    """
+    P0-3: Verify MFA token from PostgreSQL.
+    Returns True if token is valid (exists, not expired, not consumed).
+    """
+    from sqlalchemy import select, and_
+    from app.models.mfa_token import MfaToken
+    
+    token_hash = _hash_admin_token(token)
+    stmt = select(MfaToken).where(
+        and_(
+            MfaToken.email == email.lower(),
+            MfaToken.token_hash == token_hash,
+            MfaToken.consumed == "0",
+        )
+    )
+    result = await db.execute(stmt)
+    mfa_token = result.scalar_one_or_none()
+    
+    if not mfa_token:
         return False
-    if time.time() > entry["expires_at"]:
-        _mfa_tokens.pop(email.lower(), None)
+    if mfa_token.is_expired:
+        # Clean up expired token
+        from sqlalchemy import delete
+        await db.execute(delete(MfaToken).where(MfaToken.id == mfa_token.id))
+        await db.flush()
         return False
-    return _hash_admin_token(token) == entry["token_hash"]
+    return True
 
 
-def consume_mfa_token(email: str) -> None:
-    """Remove MFA token after successful verification (single-use)."""
-    _mfa_tokens.pop(email.lower(), None)
+async def consume_mfa_token(db: AsyncSession, email: str) -> None:
+    """
+    P0-3: Mark MFA token as consumed (single-use).
+    Also cleans up all MFA tokens for this email.
+    """
+    from sqlalchemy import delete
+    from app.models.mfa_token import MfaToken
+    
+    # Delete all MFA tokens for this email (cleanup)
+    await db.execute(
+        delete(MfaToken).where(MfaToken.email == email.lower())
+    )
+    await db.flush()
 
 
 async def require_admin(

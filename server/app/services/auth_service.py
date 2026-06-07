@@ -38,6 +38,58 @@ from app.security.totp import verify_totp, verify_backup_code
 from app.services.audit import log_event
 
 
+# ─── P2-2: Account Lockout Policy ─────────────────────────────────────
+# Lock admin accounts after N consecutive failed login attempts.
+# Lockout duration: 15 minutes (configurable via env).
+
+MAX_FAILED_ATTEMPTS = 5          # Lock after 5 failed attempts
+LOCKOUT_DURATION_SECONDS = 900   # 15 minutes lockout
+
+# In-memory lockout store: {email: {"attempts": int, "locked_until": float}}
+# NOTE: For multi-instance deployment, migrate to PostgreSQL or Redis.
+_login_attempts: dict[str, dict] = {}
+
+
+def _check_account_lockout(email: str) -> None:
+    """
+    P2-2: Check if account is locked out due to too many failed attempts.
+    Raises ValueError("account_locked") if locked.
+    """
+    import time
+    entry = _login_attempts.get(email.lower())
+    if not entry:
+        return
+    if entry["attempts"] >= MAX_FAILED_ATTEMPTS:
+        if time.time() < entry["locked_until"]:
+            remaining = int(entry["locked_until"] - time.time())
+            raise ValueError(f"account_locked: try again in {remaining}s")
+        else:
+            # Lockout expired — reset attempts
+            _login_attempts.pop(email.lower(), None)
+
+
+def _record_failed_attempt(email: str) -> int:
+    """
+    P2-2: Record a failed login attempt. Returns current attempt count.
+    """
+    import time
+    email_lower = email.lower()
+    entry = _login_attempts.get(email_lower)
+    if not entry or time.time() > entry.get("locked_until", 0):
+        # Reset if lockout expired
+        entry = {"attempts": 0, "locked_until": 0}
+    entry["attempts"] += 1
+    if entry["attempts"] >= MAX_FAILED_ATTEMPTS:
+        entry["locked_until"] = time.time() + LOCKOUT_DURATION_SECONDS
+    _login_attempts[email_lower] = entry
+    return entry["attempts"]
+
+
+def _reset_failed_attempts(email: str) -> None:
+    """P2-2: Reset failed attempts after successful login."""
+    _login_attempts.pop(email.lower(), None)
+
+
 # ─── P2-3: Password Policy ────────────────────────────────────────────
 
 # Minimum password requirements for admin accounts
@@ -346,6 +398,9 @@ async def admin_login(
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
 
+    # P2-2: Check account lockout BEFORE password verification
+    _check_account_lockout(email)
+
     if not user or not user.password_hash:
         # H-04: Constant-time dummy comparison with VALID bcrypt hash
         # This is a real bcrypt hash of "dummy_password_for_timing" with cost 14
@@ -355,19 +410,43 @@ async def admin_login(
             bcrypt.checkpw(b"dummy_password_for_timing", _DUMMY_BCRYPT)
         except Exception:
             pass  # Even if bcrypt fails, we still raise — but timing is equalized
+        
+        # P2-2: Record failed attempt even for non-existent users (prevent enumeration)
+        _record_failed_attempt(email)
         raise ValueError("invalid_credentials")
 
     # Verify password using bcrypt (consistent with create_owner.py)
     if not _verify_password_bcrypt(password, user.password_hash):
+        # P2-2: Record failed attempt
+        attempts = _record_failed_attempt(email)
+        
         await log_event(
             db,
             action="admin.login_failed",
             target_type="user",
             target_id=str(user.id) if user else None,
             ip_hash=ip_hash,
-            payload={"email": email, "reason": "wrong_password"},
+            payload={
+                "email": email,
+                "reason": "wrong_password",
+                "failed_attempts": attempts,
+                "locked": attempts >= MAX_FAILED_ATTEMPTS,
+            },
         )
+        
+        # P2-2: Alert on account lockout
+        if attempts >= MAX_FAILED_ATTEMPTS:
+            from app.security.webhook_alerts import alert_brute_force_detected
+            alert_brute_force_detected(
+                email=email,
+                ip_hash=ip_hash or "unknown",
+                attempts=attempts,
+            )
+        
         raise ValueError("invalid_credentials")
+
+    # P2-2: Successful login — reset failed attempts
+    _reset_failed_attempts(email)
 
     # Check MFA
     if user.totp_enabled and user.totp_secret:

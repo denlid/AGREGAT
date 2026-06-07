@@ -78,6 +78,10 @@ async def list_licenses(
     query = select(License).order_by(License.created_at.desc())
 
     if search:
+        # P0-1 FIX: SQL Injection prevention — escape ILIKE special chars
+        # Escape backslash first, then %, then _
+        escaped_search = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        
         # H-03: If search looks like a key (AGR-...), hash it first
         from app.services.license_service import hash_activation_key
         search_term = search.strip().upper()
@@ -85,13 +89,13 @@ async def list_licenses(
             key_hash = hash_activation_key(search_term)
             query = query.join(User).where(
                 or_(
-                    User.email.ilike(f"%{search}%"),
+                    User.email.ilike(f"%{escaped_search}%", escape="\\"),
                     License.activation_key == key_hash,
                 )
             )
         else:
             query = query.join(User).where(
-                User.email.ilike(f"%{search}%")
+                User.email.ilike(f"%{escaped_search}%", escape="\\")
             )
     if tier:
         query = query.where(License.tier == tier)

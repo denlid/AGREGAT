@@ -10,7 +10,8 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Response
+import secrets as _secrets
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
@@ -116,36 +117,108 @@ if not settings.debug and ("*" in _allowed_origins_list or not _allowed_origins_
     )
     _allowed_origins_list = []  # Fail-safe: no origins in production if misconfigured
 
+# P0-2 FIX: allow_credentials ONLY when origins are explicitly configured
+# Fail-safe: empty origins = no credentials (prevents credential leakage)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins_list,
-    allow_credentials=True,
+    allow_credentials=bool(_allowed_origins_list),  # P0-2: Only if origins set
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Admin-Token"],
+    allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "X-CSRF-Token", "X-Agreqat-Signature", "X-Agreqat-Timestamp", "X-Agreqat-Nonce"],
     expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     max_age=600,  # Cache preflight for 10 minutes
 )
 if _allowed_origins_list:
     logger.info(f"CORS enabled for: {_allowed_origins_list}")
 
-# Security headers middleware (P0-5, P3-1: CSP + HSTS + full hardening)
+# ─── P2-6: Request Body Size Limit ────────────────────────────────────
+# Prevent denial-of-service via massive request bodies.
+# Default: 1MB for API, 10MB for file uploads (if any).
+MAX_BODY_SIZE_API = 1 * 1024 * 1024       # 1 MB
+MAX_BODY_SIZE_ADMIN = 5 * 1024 * 1024     # 5 MB (admin panel may have larger forms)
+
+
+@app.middleware("http")
+async def body_size_limit_middleware(request: Request, call_next):
+    """
+    P2-6: Reject requests with bodies exceeding size limits.
+    Prevents DoS via massive payloads (e.g., 1GB JSON body).
+    
+    Limits:
+    - API endpoints: 1 MB
+    - Admin endpoints: 5 MB
+    - Health/root: no limit (no body expected)
+    """
+    # Skip for GET/HEAD/OPTIONS (no body)
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return await call_next(request)
+    
+    # Skip for health/root (no body expected)
+    if request.url.path in ("/health", "/"):
+        return await call_next(request)
+    
+    # Determine limit based on path
+    if request.url.path.startswith("/api/admin"):
+        limit = MAX_BODY_SIZE_ADMIN
+    else:
+        limit = MAX_BODY_SIZE_API
+    
+    # Check Content-Length header first (fast reject)
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > limit:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"request_body_too_large: max {limit // 1024}KB",
+                )
+        except ValueError:
+            pass  # Invalid content-length — let body read handle it
+    
+    return await call_next(request)
+
+
+# ─── P1-7: CSP Nonce Generation ───────────────────────────────────────
+# Generate a unique nonce per request for inline script execution.
+# This replaces 'unsafe-inline' with 'nonce-XXX' in CSP.
+
+@app.middleware("http")
+async def csp_nonce_middleware(request: Request, call_next):
+    """
+    P1-7: Generate a per-request CSP nonce for inline scripts.
+    The nonce is attached to request.state and used in CSP header.
+    
+    Templates must add nonce to inline scripts:
+      <script nonce="{{ request.state.csp_nonce }}">...</script>
+    """
+    # Generate cryptographically secure nonce (16 bytes, base64)
+    request.state.csp_nonce = _secrets.token_urlsafe(16)
+    response = await call_next(request)
+    return response
+
+
+# Security headers middleware (P0-5, P1-7, P3-1: CSP nonce + HSTS + full hardening)
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
     """
     Add comprehensive security headers to all responses.
     
     P0-5: Content-Security-Policy to prevent XSS
+    P1-7: CSP nonce for inline scripts (replaces unsafe-inline)
     P3-1: HSTS with preload for transport security
     Additional: Permissions-Policy, COOP, COEP for isolation
     """
     response = await call_next(request)
     
-    # ─── Content Security Policy (P0-5) ─────────────────────────────
-    # Restrict resource loading to prevent XSS and data exfiltration
+    # ─── Content Security Policy (P0-5 + P1-7) ──────────────────────
+    # P1-7: Use per-request nonce instead of 'unsafe-inline'
+    csp_nonce = getattr(request.state, "csp_nonce", None)
+    nonce_directive = f"'nonce-{csp_nonce}'" if csp_nonce else "'unsafe-inline'"
+    
     csp_directives = [
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline'",  # TODO: Replace unsafe-inline with nonce
-        "style-src 'self' 'unsafe-inline'",
+        f"script-src 'self' {nonce_directive}",  # P1-7: nonce-based
+        f"style-src 'self' {nonce_directive}",    # P1-7: nonce-based
         "img-src 'self' data:",
         "font-src 'self'",
         "connect-src 'self'",
@@ -311,28 +384,32 @@ async def admin_dashboard_page(request: Request, response: Response):
 
 # ─── Health Check ──────────────────────────────────────────────────────
 
+# P0-4 FIX: Minimal health response — no version/time leakage
 @app.get("/health", tags=["system"])
 async def health_check():
     """
     Health check endpoint for load balancers and monitoring.
-    Returns server status and basic info.
+    P0-4: Returns minimal info — no version or server time (prevents info leakage).
     """
-    return {
-        "status": "healthy",
-        "version": "2.0.0",
-        "server_time": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-    }
+    return {"status": "ok"}
 
 
+# P0-5 FIX: Hide service info in production
 @app.get("/", tags=["system"])
 async def root():
-    """Root endpoint — server info."""
-    return {
-        "service": "AGREGAT License Server",
-        "version": "2.0.0",
-        "docs": "/docs" if settings.debug else "disabled",
-        "health": "/health",
-    }
+    """
+    Root endpoint.
+    P0-5: In production returns 404 (no info leakage). In debug — basic info.
+    """
+    if settings.debug:
+        return {
+            "service": "AGREGAT License Server",
+            "version": "2.0.0",
+            "docs": "/docs",
+            "health": "/health",
+        }
+    # Production: return 404 to avoid information disclosure
+    raise HTTPException(status_code=404, detail="not_found")
 
 # ─── Run ───────────────────────────────────────────────────────────────
 
