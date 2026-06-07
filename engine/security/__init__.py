@@ -63,6 +63,45 @@ from engine.security.anti_tamper import (
     run_advanced_integrity_check,
 )
 
+# C-01: Strategy sandboxing
+from engine.security.strategy_sandbox import (
+    StrategySandbox,
+    SandboxConfig,
+    SandboxResult,
+    SandboxViolation,
+    create_sandboxed_strategy,
+)
+
+# C-02: Secure secret storage (DPAPI/Keychain)
+from engine.security.secret_store import (
+    SecretStore,
+    get_secret_store,
+    store_secret,
+    retrieve_secret,
+    delete_secret,
+    list_secret_keys,
+)
+
+# C-03: Binary integrity verification
+from engine.security.integrity import (
+    IntegrityChecker,
+    IntegrityResult,
+    compute_file_hash,
+    verify_file_integrity,
+    generate_manifest,
+    verify_manifest,
+)
+
+# M-03: Secure update checker
+from engine.security.update_checker import (
+    UpdateChecker,
+    UpdateStatus,
+    UpdateManifest,
+    UpdateResult,
+    VersionInfo,
+    generate_update_manifest,
+)
+
 __all__ = [
     # Online licensing (server-authoritative, Ed25519 signed receipts)
     "LicenseClient",
@@ -104,4 +143,31 @@ __all__ = [
     "clear_clipboard",
     "get_clipboard_text",
     "run_advanced_integrity_check",
+    # C-01: Strategy Sandboxing
+    "StrategySandbox",
+    "SandboxConfig",
+    "SandboxResult",
+    "SandboxViolation",
+    "create_sandboxed_strategy",
+    # C-02: Secret Store (DPAPI/Keychain)
+    "SecretStore",
+    "get_secret_store",
+    "store_secret",
+    "retrieve_secret",
+    "delete_secret",
+    "list_secret_keys",
+    # C-03: Binary Integrity
+    "IntegrityChecker",
+    "IntegrityResult",
+    "compute_file_hash",
+    "verify_file_integrity",
+    "generate_manifest",
+    "verify_manifest",
+    # M-03: Update Checker
+    "UpdateChecker",
+    "UpdateStatus",
+    "UpdateManifest",
+    "UpdateResult",
+    "VersionInfo",
+    "generate_update_manifest",
 ]
