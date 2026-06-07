@@ -13,12 +13,24 @@ This prevents:
 - License spoofing (cannot forge a valid receipt without private key)
 - Replay attacks (receipt includes timestamp + device fingerprint)
 - MITM tampering (signature covers all receipt fields)
+
+ADAPTIVE RATE LIMITING (P0-7):
+    Failed signature verification attempts trigger exponential backoff
+    to prevent brute-force attacks against the signing key.
+    - 1-3 failures: no delay
+    - 4-6 failures: 1s delay
+    - 7-10 failures: 5s delay
+    - 11+ failures: 30s delay + alert logged
+    Rate limit window resets after 5 minutes of no failures.
 """
 
 import base64
 import hashlib
 import json
 import os
+import time
+import threading
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -27,6 +39,104 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+
+logger = logging.getLogger(__name__)
+
+
+# ─── P0-7: Adaptive Rate Limiting for Signature Verification ──────────
+
+class _SignatureRateLimiter:
+    """
+    P0-7: Adaptive rate limiter for failed signature verifications.
+    
+    Prevents brute-force attacks by imposing increasing delays after
+    consecutive failures. Thread-safe via internal lock.
+    
+    Rate schedule:
+        Failures 1-3:   No delay (allow legitimate retries)
+        Failures 4-6:   1 second delay
+        Failures 7-10:  5 second delay
+        Failures 11+:   30 second delay + security alert
+    """
+    
+    def __init__(self, window_seconds: int = 300):
+        self._lock = threading.Lock()
+        self._failure_count = 0
+        self._last_failure_time = 0.0
+        self._window_seconds = window_seconds
+    
+    def record_failure(self) -> float:
+        """
+        Record a failed verification and return the required delay.
+        
+        Returns:
+            Delay in seconds that the caller should wait.
+        """
+        now = time.monotonic()
+        
+        with self._lock:
+            # Reset window if enough time has passed
+            if now - self._last_failure_time > self._window_seconds:
+                self._failure_count = 0
+            
+            self._failure_count += 1
+            self._last_failure_time = now
+            count = self._failure_count
+        
+        # Determine delay based on failure count
+        delay = 0.0
+        if count <= 3:
+            delay = 0.0
+        elif count <= 6:
+            delay = 1.0
+        elif count <= 10:
+            delay = 5.0
+        else:
+            delay = 30.0
+            logger.warning(
+                "P0-7 SECURITY ALERT: %d consecutive signature verification failures. "
+                "Possible brute-force attack. Delay: %ds",
+                count, delay,
+            )
+        
+        if delay > 0:
+            logger.info(
+                "P0-7: Signature verification failure #%d, applying %ds delay",
+                count, delay,
+            )
+        
+        return delay
+    
+    def record_success(self) -> None:
+        """Record a successful verification, resetting the failure counter."""
+        with self._lock:
+            if self._failure_count > 0:
+                logger.debug(
+                    "P0-7: Signature verification success, resetting failure counter "
+                    "(was %d)", self._failure_count,
+                )
+            self._failure_count = 0
+    
+    @property
+    def failure_count(self) -> int:
+        """Current failure count (for monitoring)."""
+        with self._lock:
+            return self._failure_count
+    
+    def reset(self) -> None:
+        """Manually reset the rate limiter."""
+        with self._lock:
+            self._failure_count = 0
+            self._last_failure_time = 0.0
+
+
+# Global rate limiter instance
+_signature_rate_limiter = _SignatureRateLimiter()
+
+
+def get_signature_rate_limiter() -> _SignatureRateLimiter:
+    """Get the global signature rate limiter instance."""
+    return _signature_rate_limiter
 
 
 # ─── Key Management ───────────────────────────────────────────────────
@@ -232,7 +342,12 @@ def create_license_receipt(
 
 def verify_license_receipt(receipt: dict, public_key_b64: str) -> bool:
     """
-    Verify a license receipt signature.
+    Verify a license receipt signature with adaptive rate limiting.
+    
+    P0-7: Failed verifications trigger exponential backoff to prevent
+    brute-force attacks. The caller should be prepared for this function
+    to block for up to 30 seconds after repeated failures.
+    
     Used by desktop client to detect tampered receipts.
     
     Args:
@@ -266,14 +381,25 @@ def verify_license_receipt(receipt: dict, public_key_b64: str) -> bool:
         
         # Verify signature
         public_key.verify(signature, canonical.encode())
+        
+        # P0-7: Success — reset rate limiter
+        _signature_rate_limiter.record_success()
         return True
         
     except Exception:
+        # P0-7: Failure — apply adaptive delay
+        delay = _signature_rate_limiter.record_failure()
+        if delay > 0:
+            time.sleep(delay)
         return False
 
 
 def verify_receipt_on_server(receipt: dict) -> bool:
-    """Verify a license receipt using the server's public key."""
+    """
+    Verify a license receipt using the server's public key.
+    
+    P0-7: Includes adaptive rate limiting for failed verifications.
+    """
     public_key = load_public_key()
     
     signature_b64 = receipt.get("signature")
@@ -285,6 +411,13 @@ def verify_receipt_on_server(receipt: dict) -> bool:
         payload = {k: v for k, v in receipt.items() if k != "signature"}
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         public_key.verify(signature, canonical.encode())
+        
+        # P0-7: Success — reset rate limiter
+        _signature_rate_limiter.record_success()
         return True
     except Exception:
+        # P0-7: Failure — apply adaptive delay
+        delay = _signature_rate_limiter.record_failure()
+        if delay > 0:
+            time.sleep(delay)
         return False

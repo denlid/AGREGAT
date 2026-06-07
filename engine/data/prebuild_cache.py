@@ -4,28 +4,31 @@ A 10 M-bar 1m feed pays ~30–50 s for ``TimeframeAggregator.prebuild``
 on a cold cache. Re-opening the same CSV twice in a row should not
 pay that cost twice. This module lifts the prebuild artefacts (per-TF
 HTF arrays, completion points, forming arrays, the forming-TF set)
-to/from a per-dataset pickle file under
+to/from a per-dataset file under
 
-    ~/.agregatishe/cache/prebuild/{cache_key}.pkl
+    ~/.agregatishe/cache/prebuild/{cache_key}.npz
 
 The :func:`compute_cache_key` function builds a deterministic SHA-256
 of the *content* of the input DataFrame plus the prebuild version,
 the supported-TF list and the user's ``track_forming`` choice — any
-of those changing invalidates the cache, so a stale pickle can never
+of those changing invalidates the cache, so a stale file can never
 silently corrupt a backtest.
 
-Pickle protocol 5 is used because it stores raw NumPy buffers
-zero-copy (no per-array fan-out, no parquet schema overhead), and
-the pickle format is part of the Python standard library — no extra
-dependency for Phase 2.4.
+SECURITY (C-04 FIX):
+    Previously used pickle.load() which allows arbitrary code execution
+    during deserialization. Replaced with numpy.savez/npz format which:
+    - Uses allow_pickle=False by default (safe deserialization)
+    - Stores raw NumPy buffers zero-copy (same perf as pickle protocol 5)
+    - No extra dependencies beyond numpy
+    - Tampered files cause ValueError, not RCE
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
-import pickle
 import shutil
 import tempfile
 from pathlib import Path
@@ -39,7 +42,7 @@ logger = logging.getLogger("StrategyTester.engine.data.prebuild_cache")
 # Bumped whenever the prebuild output format changes — any in-flight
 # cache entries with a different version string are silently ignored
 # and rebuilt. Keep this monotonically increasing; never recycle.
-CACHE_VERSION = "phase2.4-v1"
+CACHE_VERSION = "phase2.4-v2-npz"  # v2: migrated from pickle to npz
 
 # Cache root override. Tests use this to point the module at a tmpdir
 # instead of the user's home directory; production code never sets it.
@@ -125,18 +128,22 @@ def compute_cache_key(
 
 def cache_path(cache_key: str) -> Path:
     """Return the on-disk path for a given cache key."""
-    return get_cache_dir() / f"{cache_key}.pkl"
+    return get_cache_dir() / f"{cache_key}.npz"
 
 
 # ---------------------------------------------------------------------------
-# State (de)serialisation
+# State (de)serialisation — SAFE npz format (no pickle)
 # ---------------------------------------------------------------------------
-
-
+#
+# SECURITY: All data is stored as numpy arrays in .npz format with
+# allow_pickle=False. Metadata (version, forming_tfs set) is stored
+# as a JSON string in a dedicated array. This eliminates the RCE
+# vector that pickle.load() introduced.
+#
 # These are exactly the per-TF dictionaries / sets that
 # ``TimeframeAggregator.prebuild`` populates. Keeping the schema
 # minimal (no proxies, no compressed parquet, no inverse mapping)
-# means cache reads are a single ``pickle.load`` + a few attribute
+# means cache reads are a single ``np.load`` + a few attribute
 # assignments — well under 100 ms even for the 10 M-bar dataset.
 StateDict = Dict[str, Any]
 
@@ -148,7 +155,7 @@ def state_to_dict(
     forming_arrays: Dict[str, Dict[str, np.ndarray]],
     forming_tfs: set,
 ) -> StateDict:
-    """Pack a TF aggregator's prebuild outputs into a pickle-able dict."""
+    """Pack a TF aggregator's prebuild outputs into a serializable dict."""
     return {
         "version": CACHE_VERSION,
         "htf_arrays": htf_arrays,
@@ -158,9 +165,85 @@ def state_to_dict(
     }
 
 
-def save_state(cache_key: str, state: StateDict) -> Path:
-    """Atomically write ``state`` to the cache directory.
+def _flatten_arrays(
+    state: StateDict,
+) -> tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+    """Flatten nested dict-of-arrays into flat dict for npz storage.
 
+    Returns:
+        (flat_arrays, metadata) where flat_arrays can be saved via
+        np.savez and metadata holds non-array data (version, sets).
+    """
+    flat: Dict[str, np.ndarray] = {}
+    metadata: Dict[str, Any] = {
+        "version": state.get("version", CACHE_VERSION),
+        "htf_keys": [],
+        "forming_keys": [],
+        "forming_tfs": sorted(state.get("forming_tfs", set())),
+    }
+
+    # Flatten htf_arrays: {tf: {col: array}}
+    htf_arrays = state.get("htf_arrays", {})
+    for tf, cols in htf_arrays.items():
+        for col, arr in cols.items():
+            key = f"htf_{tf}_{col}"
+            flat[key] = np.asarray(arr)
+            metadata["htf_keys"].append({"tf": tf, "col": col, "key": key})
+
+    # Flatten completion_points: {tf: array}
+    for tf, arr in state.get("completion_points", {}).items():
+        key = f"cp_{tf}"
+        flat[key] = np.asarray(arr)
+
+    # Flatten forming_arrays: {tf: {col: array}}
+    forming_arrays = state.get("forming_arrays", {})
+    for tf, cols in forming_arrays.items():
+        for col, arr in cols.items():
+            key = f"form_{tf}_{col}"
+            flat[key] = np.asarray(arr)
+            metadata["forming_keys"].append({"tf": tf, "col": col, "key": key})
+
+    return flat, metadata
+
+
+def _unflatten_arrays(
+    flat: Dict[str, np.ndarray],
+    metadata: Dict[str, Any],
+) -> StateDict:
+    """Reconstruct nested state dict from flat npz arrays + metadata."""
+    htf_arrays: Dict[str, Dict[str, np.ndarray]] = {}
+    for entry in metadata.get("htf_keys", []):
+        tf, col, key = entry["tf"], entry["col"], entry["key"]
+        if tf not in htf_arrays:
+            htf_arrays[tf] = {}
+        htf_arrays[tf][col] = flat[key]
+
+    completion_points: Dict[str, np.ndarray] = {}
+    for key in flat:
+        if key.startswith("cp_"):
+            tf = key[3:]
+            completion_points[tf] = flat[key]
+
+    forming_arrays: Dict[str, Dict[str, np.ndarray]] = {}
+    for entry in metadata.get("forming_keys", []):
+        tf, col, key = entry["tf"], entry["col"], entry["key"]
+        if tf not in forming_arrays:
+            forming_arrays[tf] = {}
+        forming_arrays[tf][col] = flat[key]
+
+    return {
+        "version": metadata.get("version", CACHE_VERSION),
+        "htf_arrays": htf_arrays,
+        "completion_points": completion_points,
+        "forming_arrays": forming_arrays,
+        "forming_tfs": set(metadata.get("forming_tfs", [])),
+    }
+
+
+def save_state(cache_key: str, state: StateDict) -> Path:
+    """Atomically write ``state`` to the cache directory using safe npz format.
+
+    SECURITY: Uses numpy.savez (NOT pickle) to prevent deserialization RCE.
     Writes to a temp file in the same dir then ``os.replace`` — a
     crash mid-write never leaves a half-written cache that the next
     run would mis-parse.
@@ -168,11 +251,18 @@ def save_state(cache_key: str, state: StateDict) -> Path:
     target = cache_path(cache_key)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
-        prefix=".prebuild-", suffix=".pkl.tmp", dir=str(target.parent)
+        prefix=".prebuild-", suffix=".npz.tmp", dir=str(target.parent)
     )
     try:
-        with os.fdopen(fd, "wb") as fh:
-            pickle.dump(state, fh, protocol=5)
+        os.close(fd)  # Close fd; numpy will open the file itself
+        flat_arrays, metadata = _flatten_arrays(state)
+        # Store metadata as JSON in a special array
+        meta_json = json.dumps(metadata, ensure_ascii=True)
+        np.savez(
+            tmp_path,
+            __metadata__=np.array([meta_json]),
+            **flat_arrays,
+        )
         os.replace(tmp_path, target)
     except Exception:
         # Best-effort cleanup on failure; never raise from the cache
@@ -189,6 +279,7 @@ def load_state(cache_key: str) -> Optional[StateDict]:
     """Return the cached state for ``cache_key`` or ``None`` on miss
     / version mismatch / corruption.
 
+    SECURITY: Uses np.load with allow_pickle=False to prevent RCE.
     All exceptions are swallowed and turned into a cache miss — a
     broken cache file should never crash a backtest, the worst case
     is a single recompute and a warning in the log.
@@ -197,8 +288,19 @@ def load_state(cache_key: str) -> Optional[StateDict]:
     if not target.exists():
         return None
     try:
-        with target.open("rb") as fh:
-            state = pickle.load(fh)
+        # CRITICAL: allow_pickle=False prevents arbitrary code execution
+        with np.load(str(target), allow_pickle=False) as data:
+            # Extract metadata
+            if "__metadata__" not in data:
+                logger.warning("Prebuild cache entry missing metadata; ignoring")
+                return None
+            meta_json = str(data["__metadata__"][0])
+            metadata = json.loads(meta_json)
+
+            # Build flat dict from remaining arrays
+            flat = {k: data[k] for k in data.files if k != "__metadata__"}
+
+            state = _unflatten_arrays(flat, metadata)
     except Exception as exc:
         logger.warning("Prebuild cache read failed (%s); ignoring entry", exc)
         return None

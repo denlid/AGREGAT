@@ -54,6 +54,37 @@ if exist server\.env (
     echo Ensure it is NOT included in the build!
 )
 
+REM P0-11: Check for signing key files that should NOT be bundled
+if exist signing_key.pem (
+    echo [BLOCKED] signing_key.pem found in project root!
+    echo Private signing keys must NEVER be in the build directory.
+    echo Move to a secure location outside the project.
+    pause
+    exit /b 1
+)
+if exist ed25519_private_key.pem (
+    echo [BLOCKED] ed25519_private_key.pem found!
+    echo Private keys must NEVER be in the build directory.
+    pause
+    exit /b 1
+)
+
+REM P0-11: Check that AGREGAT_DB_ENCRYPTION_KEY is set for server builds
+echo [CHECK] Verifying encryption key configuration...
+if not defined AGREGAT_DB_ENCRYPTION_KEY (
+    echo [WARNING] AGREGAT_DB_ENCRYPTION_KEY not set
+    echo Database fields will not be encrypted in server builds.
+    echo Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+)
+
+REM P0-11: Check for dev/test files that leak info
+if exist security_hashes.env (
+    echo [WARNING] security_hashes.env found — ensure NOT bundled
+)
+if exist build_secrets.env (
+    echo [WARNING] build_secrets.env found — ensure NOT bundled
+)
+
 REM Check Python
 python --version >nul 2>&1
 if errorlevel 1 (
@@ -105,7 +136,7 @@ echo.
 echo [2.5/6] Computing security file hashes for integrity checks...
 
 set "SECURITY_HASHES="
-for %%F in (engine\security\license_manager.py engine\security\license_client.py engine\security\anti_debug.py engine\security\anti_tamper.py) do (
+for %%F in (engine\security\license_manager.py engine\security\license_client.py engine\security\anti_debug.py engine\security\anti_tamper.py engine\security\secure_memory.py engine\security\secret_store.py engine\security\integrity.py engine\security\strategy_sandbox.py engine\security\update_checker.py) do (
     if exist %%F (
         for /f "delims=" %%H in ('certutil -hashfile %%F SHA256 ^| findstr /v "CertUtil" ^| findstr /v "SHA256"') do (
             set "FHASH=%%H"
@@ -277,6 +308,8 @@ echo RELEASE CHECKLIST:
 echo ============================================================
 echo   [x] .dev_mode file removed (enforced by build script)
 echo   [x] Ed25519 public key embedded (verified by build script)
+echo   [x] Security file hashes computed (HIGH-07 integrity)
+echo   [x] Private keys excluded from build (P0-11)
 echo   [ ] Set DEBUG=false on server
 echo   [ ] Change JWT_SECRET to random 64-char hex
 echo   [ ] Change FINGERPRINT_SALT to random string
@@ -286,6 +319,10 @@ echo   [ ] Change default owner password
 echo   [ ] Set up PostgreSQL backups
 echo   [ ] Sign EXE with code signing certificate (post-beta)
 echo   [ ] Publish SHA-256 hash for download verification
+echo   [ ] Set AGREGAT_DB_ENCRYPTION_KEY for server
+echo   [ ] Set AGREGAT_CACHE_SECRET for license encryption
+echo   [ ] Verify .gitignore excludes all sensitive files
+echo   [ ] Run security module smoke tests
 echo ============================================================
 echo.
 pause

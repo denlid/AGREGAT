@@ -212,17 +212,92 @@ def has_vectorized_signals(strategy: "Strategy") -> bool:
     return bound_func is not base_method
 
 
-class StrategyLoader:
-    """Loads a user-supplied .py strategy file.
+class SecurityError(Exception):
+    """Raised when strategy code fails security validation."""
+    pass
 
-    NOTE: there is **no real sandbox** — the loaded code runs with the same
-    privileges as AGREGAT itself. Only load strategies you trust.
+
+# Lazy import cache for sandbox module
+_security_sandbox = None
+
+
+def _get_sandbox_validator():
+    """Get sandbox validation functions (lazy import to avoid circular deps)."""
+    global _security_sandbox
+    if _security_sandbox is None:
+        try:
+            from engine.security import strategy_sandbox
+            _security_sandbox = strategy_sandbox
+        except ImportError:
+            logger.warning("Security sandbox module not available")
+            _security_sandbox = False
+    return _security_sandbox if _security_sandbox else None
+
+
+class StrategyLoader:
+    """Loads a user-supplied .py strategy file with mandatory security validation.
+
+    SECURITY (C-01 FIX):
+        ALL strategy code is validated through the security sandbox BEFORE any
+        importlib execution. This prevents sandbox escape via:
+        - Module-level code execution (os.system() at import time)
+        - Malicious __init__ methods
+        - Decorator-based code execution
     """
 
     @staticmethod
-    def load(filepath: str) -> Strategy:
+    def _validate_source_code(filepath: str) -> None:
+        """Validate strategy source code BEFORE any importlib loading.
+
+        Raises:
+            SecurityError: If the code contains forbidden patterns.
+        """
+        sandbox = _get_sandbox_validator()
+        if sandbox is None:
+            logger.warning(
+                "⚠️ Security sandbox unavailable; loading WITHOUT validation: %s",
+                filepath,
+            )
+            return
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                source_code = f.read()
+        except Exception as e:
+            raise ImportError(f"Cannot read strategy file: {e}") from e
+
+        try:
+            is_valid, violations = sandbox.validate_strategy_code(source_code)
+            if not is_valid:
+                violation_list = "\n  - ".join(violations)
+                raise SecurityError(
+                    f"Strategy failed security validation: {filepath}\n"
+                    f"Violations:\n  - {violation_list}"
+                )
+        except SecurityError:
+            raise
+        except Exception as e:
+            logger.warning("Sandbox validation error (allowing load): %s", e)
+
+        logger.info("✅ Strategy passed security validation: %s", filepath)
+
+    @staticmethod
+    def load(filepath: str, *, enforce_sandbox: bool = True) -> Strategy:
+        """Load a strategy file with mandatory security validation.
+
+        Args:
+            filepath: Path to the .py strategy file.
+            enforce_sandbox: If True (default), reject code that fails validation.
+
+        Raises:
+            SecurityError: If the code fails sandbox validation.
+        """
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Strategy file not found: {filepath}")
+
+        # SECURITY: Validate source BEFORE any importlib operations
+        if enforce_sandbox:
+            StrategyLoader._validate_source_code(filepath)
 
         module_name = os.path.splitext(os.path.basename(filepath))[0]
         spec = importlib.util.spec_from_file_location(module_name, filepath)

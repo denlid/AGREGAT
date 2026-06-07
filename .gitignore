@@ -27,9 +27,36 @@ server/.env.*
 *.pem
 *.p12
 *.pfx
+*.crt
+*.cer
 license_cache.enc
 .agregat_license.key
 .agregat/
+
+# ─── Cryptographic keys & secrets ─────────────────────────────────────
+signing_key.pem
+signing_key_encrypted.pem
+signing_public_key.pem
+ed25519_private_key.*
+ed25519_public_key.*
+integrity_manifest.json
+integrity_manifest.sig
+*.secret
+secrets.json
+credentials.json
+service_account.json
+
+# ─── Database & encryption ────────────────────────────────────────────
+*.db-wal
+*.db-shm
+*.sqlite3
+*.db
+db_encryption.key
+fernet.key
+
+# ─── Build-time security artifacts ────────────────────────────────────
+security_hashes.env
+build_secrets.env
 
 # ─── Build artifacts ──────────────────────────────────────────────────
 build/

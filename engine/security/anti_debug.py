@@ -215,12 +215,77 @@ def timing_check(iterations: int = 500000, max_seconds: float = 2.0) -> bool:
     return elapsed > max_seconds
 
 
-# ─── 3. VM / Sandbox Detection ──────────────────────────────────────
+# ─── 3. VM / Sandbox Detection (Enhanced P0-10) ─────────────────────
+
+# VM OUI prefixes for MAC address detection
+_VM_OUI_PREFIXES = {
+    "080027": "VirtualBox",
+    "005056": "VMware",
+    "001c42": "Parallels",
+    "00163e": "Xen/KVM",
+    "0003ff": "Microsoft Hyper-V",
+    "00155d": "Microsoft Hyper-V (alt)",
+    "000c29": "VMware (alt)",
+    "000569": "VMware (alt2)",
+    "00104f": "VMware (alt3)",
+    "00144f": "Sun VirtualBox",
+    "525400": "QEMU/KVM",
+    "0a0027": "VirtualBox (alt)",
+}
+
+# VM-specific device drivers
+_VM_DRIVERS_WINDOWS = [
+    r"C:\Windows\System32\drivers\VBoxMouse.sys",
+    r"C:\Windows\System32\drivers\VBoxGuest.sys",
+    r"C:\Windows\System32\drivers\VBoxSF.sys",
+    r"C:\Windows\System32\drivers\VBoxVideo.sys",
+    r"C:\Windows\System32\drivers\vmhgfs.sys",
+    r"C:\Windows\System32\drivers\vmmouse.sys",
+    r"C:\Windows\System32\drivers\vmci.sys",
+    r"C:\Windows\System32\drivers\vmmemctl.sys",
+    r"C:\Windows\System32\drivers\vmxnet.sys",
+    r"C:\Windows\System32\drivers\vmx_svga.sys",
+    r"C:\Windows\System32\drivers\prl_fs.sys",  # Parallels
+    r"C:\Windows\System32\drivers\prl_tg.sys",
+]
+
+# VM-specific registry keys
+_VM_REGISTRY_KEYS = [
+    r"SYSTEM\ControlSet001\Services\VBoxGuest",
+    r"SYSTEM\ControlSet001\Services\VBoxMouse",
+    r"SYSTEM\ControlSet001\Services\VBoxSF",
+    r"SYSTEM\ControlSet001\Services\VMTools",
+    r"SYSTEM\ControlSet001\Services\vmhgfs",
+    r"SYSTEM\ControlSet001\Services\vmmouse",
+    r"SOFTWARE\Oracle\VirtualBox Guest Additions",
+    r"SOFTWARE\VMware, Inc.\VMware Tools",
+    r"SYSTEM\ControlSet001\Services\prl_tools",
+]
+
+# VM-specific processes
+_VM_PROCESSES = [
+    "vboxservice.exe", "vboxtray.exe",
+    "vmtoolsd.exe", "vmwaretray.exe", "vmwareuser.exe",
+    "prl_tools_service.exe", "prl_cc.exe",
+    "xenservice.exe",
+    "qemu-ga.exe",
+]
+
 
 def detect_vm() -> Optional[str]:
     """
     Detect if running inside a VM or sandbox.
     Returns VM type string if detected, None otherwise.
+    
+    P0-10 Enhanced detection methods:
+    - CPU count check (sandboxes often have 1 CPU)
+    - Username sandbox indicators
+    - VM-specific device drivers (Windows)
+    - MAC address OUI prefix matching (12 prefixes)
+    - Registry key detection (Windows)
+    - CPUID hypervisor bit check
+    - DMI/SMBIOS data check (Windows registry)
+    - Running VM service process detection
     """
     # Check CPU count (sandboxes often have 1 CPU)
     try:
@@ -246,14 +311,7 @@ def detect_vm() -> Optional[str]:
 
     # Check for VM-specific files (Windows)
     if sys.platform == "win32":
-        vm_files = [
-            r"C:\Windows\System32\drivers\VBoxMouse.sys",
-            r"C:\Windows\System32\drivers\VBoxGuest.sys",
-            r"C:\Windows\System32\drivers\vmhgfs.sys",
-            r"C:\Windows\System32\drivers\vmmouse.sys",
-            r"C:\Windows\System32\drivers\vmci.sys",
-        ]
-        for f in vm_files:
+        for f in _VM_DRIVERS_WINDOWS:
             if os.path.exists(f):
                 return f"vm_driver:{os.path.basename(f)}"
 
@@ -262,20 +320,249 @@ def detect_vm() -> Optional[str]:
         import uuid
         mac = uuid.getnode()
         mac_hex = f"{mac:012x}"
-        vm_oui = [
-            "080027",  # VirtualBox
-            "005056",  # VMware
-            "001c42",  # Parallels
-            "00163e",  # Xen/KVM
-            "0003ff",  # Microsoft Hyper-V
-        ]
-        for oui in vm_oui:
+        for oui, vm_name in _VM_OUI_PREFIXES.items():
             if mac_hex.startswith(oui):
-                return f"vm_mac:{oui}"
+                return f"vm_mac:{vm_name}"
+    except Exception:
+        pass
+
+    # P0-10: Check VM-specific registry keys (Windows)
+    if sys.platform == "win32":
+        try:
+            import winreg
+            for reg_key in _VM_REGISTRY_KEYS:
+                try:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_key) as key:
+                        return f"vm_registry:{reg_key.split(chr(92))[-1]}"
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+    # P0-10: CPUID hypervisor bit check
+    try:
+        vm_type = _check_cpuid_hypervisor()
+        if vm_type:
+            return f"vm_cpuid:{vm_type}"
+    except Exception:
+        pass
+
+    # P0-10: DMI/SMBIOS data check (Windows registry)
+    if sys.platform == "win32":
+        try:
+            vm_type = _check_dmi_data()
+            if vm_type:
+                return f"vm_dmi:{vm_type}"
+        except Exception:
+            pass
+
+    # P0-10: Check for running VM service processes
+    try:
+        detected_vm_procs = _check_vm_processes()
+        if detected_vm_procs:
+            return f"vm_process:{detected_vm_procs[0]}"
     except Exception:
         pass
 
     return None
+
+
+def _check_cpuid_hypervisor() -> Optional[str]:
+    """
+    P0-10: Check CPUID for hypervisor presence.
+    
+    CPUID leaf 0x40000000 returns the hypervisor vendor string.
+    If the hypervisor bit (bit 31) is set in ECX of leaf 0x1,
+    a hypervisor is present.
+    
+    Returns hypervisor vendor string if detected, None otherwise.
+    """
+    if sys.platform != "win32":
+        # On Linux, check /proc/cpuinfo for hypervisor flag
+        try:
+            with open("/proc/cpuinfo", "r") as f:
+                content = f.read()
+                if "hypervisor" in content:
+                    # Try to identify the hypervisor
+                    if "KVM" in content:
+                        return "KVM"
+                    if "VMware" in content:
+                        return "VMware"
+                    if "VirtualBox" in content:
+                        return "VirtualBox"
+                    return "unknown_hypervisor"
+        except Exception:
+            pass
+        return None
+
+    try:
+        import ctypes
+        import struct
+
+        # Allocate executable memory for CPUID instruction
+        # CPUID: 0F A2 (opcode), RET: C3
+        # We'll use ctypes to call a small shellcode that executes CPUID
+        # This is safe — CPUID is a non-privileged instruction
+
+        # CPUID leaf 0x40000000 — hypervisor vendor string
+        # Returns: EAX=max leaf, EBX/ECX/EDX=vendor string (12 chars)
+        shellcode = bytes([
+            0x53,                   # push rbx
+            0xb8, 0x00, 0x00, 0x00, 0x40,  # mov eax, 0x40000000
+            0x0f, 0xa2,             # cpuid
+            0x89, 0x19,             # mov [rcx], ebx
+            0x89, 0x51, 0x04,       # mov [rcx+4], edx
+            0x89, 0x49, 0x08,       # mov [rcx+8], ecx
+            0x5b,                   # pop rbx
+            0xc3,                   # ret
+        ])
+
+        # Allocate memory
+        MEM_COMMIT = 0x1000
+        MEM_RESERVE = 0x2000
+        PAGE_EXECUTE_READWRITE = 0x40
+
+        buf = ctypes.create_string_buffer(12)
+        code_ptr = ctypes.windll.kernel32.VirtualAlloc(
+            None, len(shellcode),
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
+        )
+        if not code_ptr:
+            return None
+
+        try:
+            ctypes.memmove(code_ptr, shellcode, len(shellcode))
+            # Call the shellcode
+            func_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+            func = func_type(code_ptr)
+            func(ctypes.addressof(buf))
+
+            vendor = buf.raw.rstrip(b'\x00').decode('ascii', errors='ignore')
+            if vendor and any(c.isalpha() for c in vendor):
+                return vendor
+        finally:
+            ctypes.windll.kernel32.VirtualFree(code_ptr, 0, 0x8000)  # MEM_RELEASE
+
+    except Exception:
+        pass
+
+    return None
+
+
+def _check_dmi_data() -> Optional[str]:
+    """
+    P0-10: Check DMI/SMBIOS data for VM indicators.
+    
+    On Windows, reads from registry:
+    - SystemManufacturer
+    - SystemProductName
+    - BIOSVendor
+    
+    Known VM manufacturers:
+    - VMware, Inc.
+    - innotek GmbH (VirtualBox)
+    - Microsoft Corporation (Hyper-V)
+    - QEMU
+    - Xen
+    - Parallels
+    """
+    if sys.platform != "win32":
+        return None
+
+    try:
+        import winreg
+
+        dmi_key = r"SYSTEM\CurrentControlSet\Control\SystemInformation"
+        bios_key = r"HARDWARE\DESCRIPTION\System\BIOS"
+
+        vm_indicators = {
+            "vmware": "VMware",
+            "innotek": "VirtualBox",
+            "virtualbox": "VirtualBox",
+            "microsoft": "Hyper-V",
+            "hyper-v": "Hyper-V",
+            "qemu": "QEMU",
+            "xen": "Xen",
+            "parallels": "Parallels",
+            "kvm": "KVM",
+            "bochs": "Bochs",
+        }
+
+        # Check BIOS info
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, bios_key) as key:
+                for value_name in ["SystemManufacturer", "SystemProductName", "BIOSVendor", "BIOSVersion"]:
+                    try:
+                        value, _ = winreg.QueryValueEx(key, value_name)
+                        value_lower = str(value).lower()
+                        for indicator, vm_name in vm_indicators.items():
+                            if indicator in value_lower:
+                                return vm_name
+                    except FileNotFoundError:
+                        pass
+        except OSError:
+            pass
+
+        # Check SystemInformation
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, dmi_key) as key:
+                for value_name in ["SystemManufacturer", "SystemProductName"]:
+                    try:
+                        value, _ = winreg.QueryValueEx(key, value_name)
+                        value_lower = str(value).lower()
+                        for indicator, vm_name in vm_indicators.items():
+                            if indicator in value_lower:
+                                return vm_name
+                    except FileNotFoundError:
+                        pass
+        except OSError:
+            pass
+
+    except Exception:
+        pass
+
+    return None
+
+
+def _check_vm_processes() -> list[str]:
+    """
+    P0-10: Check for running VM service processes.
+    Returns list of detected VM process names.
+    """
+    detected = []
+    try:
+        import psutil
+        running_names = set()
+        for proc in psutil.process_iter(['name']):
+            try:
+                name = proc.info['name']
+                if name:
+                    running_names.add(name.lower())
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        for vm_proc in _VM_PROCESSES:
+            if vm_proc.lower() in running_names:
+                detected.append(vm_proc)
+    except ImportError:
+        if sys.platform == "win32":
+            try:
+                import subprocess
+                output = subprocess.check_output(
+                    ["tasklist", "/FO", "CSV", "/NH"],
+                    stderr=subprocess.DEVNULL,
+                    creationflags=0x08000000,
+                ).decode(errors='ignore').lower()
+                for vm_proc in _VM_PROCESSES:
+                    if vm_proc.lower() in output:
+                        detected.append(vm_proc)
+            except Exception:
+                pass
+
+    return detected
 
 
 # ─── 4. Self-Integrity Check ─────────────────────────────────────────
@@ -625,3 +912,133 @@ def detect_memory_anomaly(threshold_mb: float = 2000) -> bool:
     """
     info = get_process_memory_info()
     return info.get("rss_mb", 0) > threshold_mb
+
+
+# ─── 10. P0-10: VM Disinformation Mode ───────────────────────────────
+
+_DISINFORMATION_ACTIVE = False
+
+
+class DisinformationMode:
+    """
+    P0-10: Disinformation mode for VM/sandbox environments.
+    
+    When the app detects it's running in a VM (likely being analyzed by
+    a reverser), instead of crashing or showing an error, it can activate
+    "disinformation mode" — presenting fake but plausible results that
+    waste the analyst's time and mislead them about the app's behavior.
+    
+    This is more effective than blocking VMs because:
+    1. The analyst doesn't know they're being deceived
+    2. They waste time analyzing fake behavior
+    3. They may draw incorrect conclusions about the app's security
+    
+    Usage:
+        if detect_vm():
+            DisinformationMode.activate()
+        # Later, when returning sensitive results:
+        result = DisinformationMode.maybe_fake(real_result)
+    """
+    
+    _active = False
+    _fake_backtest_results: Optional[dict] = None
+    _fake_license_info: Optional[dict] = None
+    
+    @classmethod
+    def activate(cls):
+        """Activate disinformation mode."""
+        global _DISINFORMATION_ACTIVE
+        cls._active = True
+        _DISINFORMATION_ACTIVE = True
+        cls._generate_fake_data()
+    
+    @classmethod
+    def deactivate(cls):
+        """Deactivate disinformation mode."""
+        global _DISINFORMATION_ACTIVE
+        cls._active = False
+        _DISINFORMATION_ACTIVE = False
+    
+    @classmethod
+    def is_active(cls) -> bool:
+        """Check if disinformation mode is active."""
+        return cls._active
+    
+    @classmethod
+    def _generate_fake_data(cls):
+        """Generate plausible but fake data for disinformation."""
+        import random
+        
+        # Fake backtest results — plausible but wrong
+        cls._fake_backtest_results = {
+            "total_trades": random.randint(50, 200),
+            "win_rate": round(random.uniform(0.45, 0.55), 2),
+            "profit_factor": round(random.uniform(0.8, 1.2), 2),
+            "max_drawdown": round(random.uniform(15, 35), 1),
+            "net_profit": round(random.uniform(-500, 500), 2),
+            "sharpe_ratio": round(random.uniform(0.3, 0.8), 2),
+        }
+        
+        # Fake license info — shows as "trial" to mislead
+        cls._fake_license_info = {
+            "tier": "trial",
+            "expires": "2026-12-31T23:59:59Z",
+            "features": ["basic_backtest"],
+            "status": "active",
+        }
+    
+    @classmethod
+    def maybe_fake_backtest(cls, real_result: dict) -> dict:
+        """
+        Return fake backtest results if disinformation mode is active.
+        The fake results are plausible but completely wrong.
+        """
+        if cls._active and cls._fake_backtest_results:
+            return cls._fake_backtest_results.copy()
+        return real_result
+    
+    @classmethod
+    def maybe_fake_license(cls, real_license: dict) -> dict:
+        """
+        Return fake license info if disinformation mode is active.
+        Shows as "trial" to mislead the analyst about licensing.
+        """
+        if cls._active and cls._fake_license_info:
+            return cls._fake_license_info.copy()
+        return real_license
+    
+    @classmethod
+    def maybe_fake_error(cls, real_error: Optional[str] = None) -> Optional[str]:
+        """
+        Return a fake error message if disinformation mode is active.
+        This hides the real reason for failures.
+        """
+        if cls._active:
+            fake_errors = [
+                "Network connection timeout",
+                "Data feed temporarily unavailable",
+                "Insufficient historical data for this timeframe",
+                "Calculation engine busy, please retry",
+                "Market data subscription expired",
+            ]
+            import random
+            return random.choice(fake_errors)
+        return real_error
+
+
+def get_vm_detection_summary() -> dict:
+    """
+    Get a comprehensive VM detection summary.
+    Useful for logging and debugging.
+    """
+    vm_type = detect_vm()
+    suspicious = detect_suspicious_processes()
+    
+    return {
+        "vm_detected": vm_type is not None,
+        "vm_type": vm_type,
+        "suspicious_processes": suspicious,
+        "disinformation_active": DisinformationMode.is_active(),
+        "debugger_attached": is_debugger_attached(),
+        "timing_anomaly": timing_check(),
+    }
