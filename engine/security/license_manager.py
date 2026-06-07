@@ -153,10 +153,29 @@ def save_license_key(license_key: str) -> bool:
         return False
 
 # ─────────────────────────────────────────────────────────────────────
-# 6. ВЕРИФІКАЦІЯ ЛІЦЕНЗІЇ
+# 6. DEV MODE CHECK (env-based, NOT file-based)
+# ─────────────────────────────────────────────────────────────────────
+def _is_dev_mode() -> bool:
+    """
+    Check if running in development mode.
+    Requires BOTH environment variables — a single .dev_mode file is NOT enough.
+    This prevents accidental shipping of dev bypass to production.
+    
+    To enable dev mode, set:
+      AGREGAT_DEV_MODE=1
+      APP_ENV=development
+    """
+    dev_flag = os.environ.get("AGREGAT_DEV_MODE", "").lower() in ("1", "true", "yes")
+    env_flag = os.environ.get("APP_ENV", "").lower() == "development"
+    return dev_flag and env_flag
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 7. ВЕРИФІКАЦІЯ ЛІЦЕНЗІЇ
 # ─────────────────────────────────────────────────────────────────────
 def verify_license() -> tuple[bool, str]:
-    if os.path.exists(".dev_mode"):
+    # Dev mode requires BOTH env vars — not a file check
+    if _is_dev_mode():
         return True, _d("e3ppYHJwe3o=") # DEV_MODE
 
     if not _check_environment():

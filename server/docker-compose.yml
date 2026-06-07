@@ -1,0 +1,76 @@
+# ============================================================
+# AGREGAT Server — Docker Compose
+# ============================================================
+# Local development environment with PostgreSQL + Redis
+# For production: use Supabase instead of local PostgreSQL
+# ============================================================
+
+version: "3.9"
+
+services:
+  # ─── API Server ───
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://agregat:agregat_dev@db:5432/agregat
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app:ro  # Mount app code for dev (read-only)
+    restart: unless-stopped
+    networks:
+      - agregat_net
+
+  # ─── PostgreSQL Database ───
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agregat
+      POSTGRES_PASSWORD: agregat_dev
+      POSTGRES_DB: agregat
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agregat -d agregat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - agregat_net
+
+  # ─── Redis (Sessions + Rate Limiting) ───
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - agregat_net
+
+volumes:
+  pgdata:
+    driver: local
+
+networks:
+  agregat_net:
+    driver: bridge

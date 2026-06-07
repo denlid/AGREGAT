@@ -1,0 +1,132 @@
+# ============================================================
+# AGREGAT Server — Production Docker Compose
+# ============================================================
+# MH-06: Production-hardened configuration
+# - NO exposed DB/Redis ports (Docker internal network only)
+# - Strong random passwords (change before deployment)
+# - Redis password authentication
+# - No dev volume mounts
+# ============================================================
+
+version: "3.9"
+
+services:
+  # ─── API Server ───
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"  # Only expose API (behind reverse proxy)
+    env_file:
+      - .env
+    environment:
+      # M-05: sslmode=require — encrypted connection to PostgreSQL
+      - DATABASE_URL=postgresql+asyncpg://agregat:${POSTGRES_PASSWORD:-CHANGE_ME_PROD}@db:5432/agregat?sslmode=require
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-CHANGE_ME_REDIS}@redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - agregat_net
+    # No volume mounts in production — code baked into image
+
+  # ─── PostgreSQL Database ───
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agregat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_PROD}
+      POSTGRES_DB: agregat
+      # M-05: Force SSL connections (defense-in-depth even in Docker network)
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    command: >
+      postgres
+      -c ssl=on
+      -c ssl_cert_file=/var/lib/postgresql/data/server.crt
+      -c ssl_key_file=/var/lib/postgresql/data/server.key
+      -c password_encryption=scram-sha-256
+      -c log_connections=on
+      -c log_disconnections=on
+      -c log_line_prefix='%m [%p] %q%u@%d '
+      -c shared_buffers=128MB
+      -c max_connections=50
+    # MH-06: NO ports exposed — only accessible via Docker internal network
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      # M-05: SSL certificates (generate with: bash migrations/00_ssl_setup.sh)
+      - ./pg_ssl/server.crt:/var/lib/postgresql/data/server.crt:ro
+      - ./pg_ssl/server.key:/var/lib/postgresql/data/server.key:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agregat -d agregat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - agregat_net
+
+  # ─── M-07: Automated PostgreSQL Backup ───
+  backup:
+    image: prodrigestivill/postgres-backup-local:16
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: agregat
+      POSTGRES_USER: agregat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_PROD}
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: 7
+      BACKUP_KEEP_WEEKS: 4
+      BACKUP_KEEP_MONTHS: 3
+      BACKUP_DIR: /backups
+      COMPRESSION: gzip
+      HEALTHCHECK_PORT: 8080
+    volumes:
+      - pgbackups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - agregat_net
+
+  # ─── Redis (Sessions + Rate Limiting) ───
+  redis:
+    image: redis:7-alpine
+    # MH-06: NO ports exposed — only accessible via Docker internal network
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-CHANGE_ME_REDIS}
+      --maxmemory 64mb
+      --maxmemory-policy allkeys-lru
+      --rename-command FLUSHDB ""
+      --rename-command FLUSHALL ""
+      --rename-command DEBUG ""
+      --rename-command CONFIG "CONFIG_b8f2a91"
+    environment:
+      # P1-8: Use env var instead of -a flag (prevents password leak in /proc)
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-CHANGE_ME_REDIS}
+    healthcheck:
+      # P1-8: REDISCLI_AUTH env var — password NOT visible in process list
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - agregat_net
+
+volumes:
+  pgdata:
+    driver: local
+  # M-07: Backup volume
+  pgbackups:
+    driver: local
+
+networks:
+  agregat_net:
+    driver: bridge

@@ -1,0 +1,52 @@
+# ============================================================
+# AGREGAT Server — Python Dependencies
+# ============================================================
+
+# ─── Web Framework ───
+# H-11: Upgraded to latest secure versions (2026-06-07)
+fastapi>=0.115.12
+# H-11: Starlette >=0.46.0 includes all known CVE fixes
+starlette>=0.46.0
+uvicorn[standard]>=0.34.2
+python-multipart>=0.0.20
+
+# ─── Database ───
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+psycopg2-binary==2.9.10
+
+# ─── Auth & Security ───
+pyjwt==2.10.1
+bcrypt==4.2.1
+pyotp==2.9.0
+cryptography==44.0.0
+# NOTE: python-jose removed (H-06) — CVE-2022-29155, unused (pyjwt handles JWT)
+
+# ─── Validation ───
+pydantic[email]==2.10.3
+pydantic-settings==2.7.0
+email-validator==2.2.0
+
+# ─── HTTP Client (for Supabase) ───
+httpx==0.28.1
+
+# ─── Templates (Admin Panel) ───
+jinja2==3.1.4
+
+# ─── Rate Limiting ───
+slowapi==0.1.9
+redis==5.2.1
+
+# ─── Utilities ───
+python-dotenv==1.0.1
+click==8.1.8
+rich==13.9.4
+
+# ─── Logging ───
+structlog==24.4.0
+
+# ─── Testing ───
+pytest==8.3.4
+pytest-asyncio==0.24.0
+httpx==0.28.1

@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+
+{% block title %}AGREGAT Admin — Login{% endblock %}
+
+{% block body %}
+<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;">
+    <div class="card" style="max-width:420px;width:100%;">
+        <div style="text-align:center;margin-bottom:2rem;">
+            <div style="font-size:1.5rem;font-weight:700;color:var(--accent);margin-bottom:0.5rem;">AGREGAT</div>
+            <div class="text-sm text-muted">Admin Panel</div>
+        </div>
+
+        <div id="step-password">
+            <div class="form-group">
+                <label class="form-label">Email</label>
+                <input type="email" id="email" class="form-input" placeholder="admin@agregat.io" autocomplete="email">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Password</label>
+                <input type="password" id="password" class="form-input" placeholder="••••••••" autocomplete="current-password">
+            </div>
+            <div id="login-error" class="alert alert-error" style="display:none;"></div>
+            <button class="btn btn-primary" style="width:100%;" onclick="doLogin()">Sign In</button>
+        </div>
+
+        <div id="step-mfa" style="display:none;">
+            <div class="form-group">
+                <label class="form-label">TOTP Code (6 digits)</label>
+                <input type="text" id="totp-code" class="form-input mono" placeholder="000000" maxlength="6" autocomplete="one-time-code">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Or Backup Code</label>
+                <input type="text" id="backup-code" class="form-input mono" placeholder="abcd1234" maxlength="8">
+            </div>
+            <div id="mfa-error" class="alert alert-error" style="display:none;"></div>
+            <button class="btn btn-primary" style="width:100%;" onclick="doMFAVerify()">Verify</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let mfaSessionToken = '';
+let mfaEmail = '';
+
+async function doLogin() {
+    const email = document.getElementById('email').value.trim();
+    const password = document.getElementById('password').value;
+    const errEl = document.getElementById('login-error');
+    errEl.style.display = 'none';
+
+    if (!email || !password) {
+        errEl.textContent = 'Email and password are required.';
+        errEl.style.display = 'block';
+        return;
+    }
+
+    try {
+        const resp = await fetch('/admin/auth/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({email, password}),
+            credentials: 'include',
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            errEl.textContent = data.detail || 'Login failed.';
+            errEl.style.display = 'block';
+            return;
+        }
+
+        if (data.status === 'mfa_required') {
+            mfaSessionToken = data.session_token || '';
+            mfaEmail = email;
+            document.getElementById('step-password').style.display = 'none';
+            document.getElementById('step-mfa').style.display = 'block';
+            document.getElementById('totp-code').focus();
+        }
+    } catch (e) {
+        errEl.textContent = 'Network error. Is the server running?';
+        errEl.style.display = 'block';
+    }
+}
+
+async function doMFAVerify() {
+    const totpCode = document.getElementById('totp-code').value.trim();
+    const backupCode = document.getElementById('backup-code').value.trim();
+    const errEl = document.getElementById('mfa-error');
+    errEl.style.display = 'none';
+
+    if (!totpCode && !backupCode) {
+        errEl.textContent = 'Enter TOTP code or backup code.';
+        errEl.style.display = 'block';
+        return;
+    }
+
+    try {
+        const resp = await fetch('/admin/auth/mfa/verify', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                session_token: mfaSessionToken,
+                totp_code: totpCode || null,
+                backup_code: backupCode || null,
+            }),
+            credentials: 'include',
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            errEl.textContent = data.detail || 'Verification failed.';
+            errEl.style.display = 'block';
+            return;
+        }
+
+        // Set email cookie for MFA flow
+        document.cookie = `admin_email=${mfaEmail}; path=/; secure; samesite=strict`;
+
+        window.location.href = '/admin/dashboard';
+    } catch (e) {
+        errEl.textContent = 'Network error.';
+        errEl.style.display = 'block';
+    }
+}
+
+// Allow Enter key to submit
+document.getElementById('password').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+document.getElementById('totp-code').addEventListener('keydown', e => { if (e.key === 'Enter') doMFAVerify(); });
+document.getElementById('backup-code').addEventListener('keydown', e => { if (e.key === 'Enter') doMFAVerify(); });
+</script>
+{% endblock %}

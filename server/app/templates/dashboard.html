@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+
+{% block title %}AGREGAT Admin — Dashboard{% endblock %}
+
+{% block body %}
+<nav class="navbar">
+    <a href="/admin/dashboard" class="navbar-brand">AGREGAT</a>
+    <div class="navbar-nav">
+        <a href="/admin/dashboard">Dashboard</a>
+        <a href="/admin/licenses">Licenses</a>
+        <a href="/admin/users">Users</a>
+        <a href="/admin/devices">Devices</a>
+        <a href="/admin/sessions">Sessions</a>
+        <a href="/admin/strategies">Strategies</a>
+        <a href="/admin/audit">Audit</a>
+        <a href="#" onclick="doLogout()" style="color:var(--danger);">Logout</a>
+    </div>
+</nav>
+
+<div class="container">
+    <h1 style="font-size:1.5rem;margin-bottom:1.5rem;">Dashboard</h1>
+
+    <div class="stats-grid" id="stats-grid">
+        <div class="stat-card"><div class="stat-value" id="total-users">—</div><div class="stat-label">Total Users</div></div>
+        <div class="stat-card"><div class="stat-value" id="active-users">—</div><div class="stat-label">Active Users</div></div>
+        <div class="stat-card"><div class="stat-value" id="active-licenses">—</div><div class="stat-label">Active Licenses</div></div>
+        <div class="stat-card"><div class="stat-value" id="expired-licenses">—</div><div class="stat-label">Expired</div></div>
+        <div class="stat-card"><div class="stat-value" id="revoked-licenses">—</div><div class="stat-label">Revoked</div></div>
+        <div class="stat-card"><div class="stat-value" id="active-sessions">—</div><div class="stat-label">Active Sessions</div></div>
+        <div class="stat-card"><div class="stat-value" id="total-devices">—</div><div class="stat-label">Devices</div></div>
+        <div class="stat-card"><div class="stat-value" id="total-strategies">—</div><div class="stat-label">Strategies</div></div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Recent Activity</div>
+        <table>
+            <thead><tr><th>Time</th><th>Action</th><th>Role</th><th>Target</th></tr></thead>
+            <tbody id="audit-table"></tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <div class="flex justify-between items-center mb-4">
+            <div class="card-title" style="margin:0;">Create License</div>
+        </div>
+        <div class="flex gap-4" style="flex-wrap:wrap;">
+            <div class="form-group" style="flex:1;min-width:180px;">
+                <label class="form-label">Email</label>
+                <input type="email" id="new-email" class="form-input" placeholder="user@example.com">
+            </div>
+            <div class="form-group" style="width:120px;">
+                <label class="form-label">Tier</label>
+                <select id="new-tier" class="form-input">
+                    <option value="beta">Beta</option>
+                    <option value="pro">Pro</option>
+                    <option value="enterprise">Enterprise</option>
+                </select>
+            </div>
+            <div class="form-group" style="width:100px;">
+                <label class="form-label">Days</label>
+                <input type="number" id="new-days" class="form-input" value="30" min="1">
+            </div>
+            <div class="form-group" style="width:100px;">
+                <label class="form-label">Devices</label>
+                <input type="number" id="new-devices" class="form-input" value="1" min="1">
+            </div>
+            <div class="form-group" style="flex:1;min-width:180px;">
+                <label class="form-label">Notes</label>
+                <input type="text" id="new-notes" class="form-input" placeholder="Optional">
+            </div>
+        </div>
+        <div id="create-error" class="alert alert-error" style="display:none;"></div>
+        <div id="create-success" class="alert alert-success" style="display:none;"></div>
+        <button class="btn btn-primary" onclick="createLicense()">Create License</button>
+    </div>
+</div>
+
+<script>
+// C-05: CSRF token — read from cookie and include in all state-changing requests
+function getCsrfToken() {
+    const match = document.cookie.match(/(?:^|;\s*)admin_csrf_token=([a-f0-9]+)/);
+    return match ? match[1] : '';
+}
+
+async function loadStats() {
+    try {
+        const resp = await fetch('/admin/stats', {credentials: 'include'});
+        if (!resp.ok) { window.location.href = '/admin/login'; return; }
+        const data = await resp.json();
+
+        document.getElementById('total-users').textContent = data.total_users;
+        document.getElementById('active-users').textContent = data.active_users;
+        document.getElementById('active-licenses').textContent = data.active_licenses;
+        document.getElementById('expired-licenses').textContent = data.expired_licenses;
+        document.getElementById('revoked-licenses').textContent = data.revoked_licenses;
+        document.getElementById('active-sessions').textContent = data.active_sessions;
+        document.getElementById('total-devices').textContent = data.total_devices;
+        document.getElementById('total-strategies').textContent = data.total_strategies;
+
+        // H-05: XSS-safe DOM rendering — NO innerHTML with server data
+        const tbody = document.getElementById('audit-table');
+        tbody.replaceChildren();  // H-05: Safe DOM clearing (no innerHTML)
+        for (const ev of (data.recent_audit_events || [])) {
+            const tr = document.createElement('tr');
+            
+            // Time cell — textContent prevents XSS
+            const tdTime = document.createElement('td');
+            tdTime.className = 'text-sm text-muted';
+            tdTime.textContent = new Date(ev.ts).toLocaleString();
+            tr.appendChild(tdTime);
+            
+            // Action cell — textContent prevents XSS
+            const tdAction = document.createElement('td');
+            tdAction.className = 'text-sm mono';
+            tdAction.textContent = ev.action;
+            tr.appendChild(tdAction);
+            
+            // Role cell — safe class construction with allowlist
+            const tdRole = document.createElement('td');
+            const spanRole = document.createElement('span');
+            spanRole.className = 'badge badge-' + (ev.actor_role === 'owner' ? 'owner' : 'admin');
+            spanRole.textContent = ev.actor_role || '—';
+            tdRole.appendChild(spanRole);
+            tr.appendChild(tdRole);
+            
+            // Target cell — textContent prevents XSS
+            const tdTarget = document.createElement('td');
+            tdTarget.className = 'text-sm';
+            tdTarget.textContent = ev.target_type || '—';
+            tr.appendChild(tdTarget);
+            
+            tbody.appendChild(tr);
+        }
+    } catch (e) { console.error('Failed to load stats:', e); }
+}
+
+async function createLicense() {
+    const email = document.getElementById('new-email').value.trim();
+    const tier = document.getElementById('new-tier').value;
+    const days = parseInt(document.getElementById('new-days').value) || 30;
+    const maxDevices = parseInt(document.getElementById('new-devices').value) || 1;
+    const notes = document.getElementById('new-notes').value.trim();
+    const errEl = document.getElementById('create-error');
+    const okEl = document.getElementById('create-success');
+    errEl.style.display = 'none';
+    okEl.style.display = 'none';
+
+    if (!email) { errEl.textContent = 'Email is required.'; errEl.style.display = 'block'; return; }
+
+    const csrfToken = getCsrfToken();
+
+    try {
+        const resp = await fetch('/admin/licenses', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken,  // C-05: CSRF protection
+            },
+            body: JSON.stringify({email, tier, days, max_devices: maxDevices, notes: notes || null}),
+            credentials: 'include',
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) { errEl.textContent = data.detail || 'Failed to create license.'; errEl.style.display = 'block'; return; }
+
+        okEl.textContent = `License created: ${data.activation_key}`;
+        okEl.style.display = 'block';
+        document.getElementById('new-email').value = '';
+        document.getElementById('new-notes').value = '';
+        loadStats();
+    } catch (e) { errEl.textContent = 'Network error.'; errEl.style.display = 'block'; }
+}
+
+async function doLogout() {
+    const csrfToken = getCsrfToken();
+    await fetch('/admin/auth/logout', {
+        method: 'POST',
+        headers: {'X-CSRF-Token': csrfToken},  // C-05: CSRF protection
+        credentials: 'include',
+    });
+    window.location.href = '/admin/login';
+}
+
+loadStats();
+setInterval(loadStats, 30000);
+</script>
+{% endblock %}

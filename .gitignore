@@ -16,3 +16,40 @@ fclaude.bat
 CLAUDE.md
 .claude/
 .hypothesis/
+
+# ─── Security-sensitive files (MUST NEVER be committed) ───────────────
+.dev_mode
+.env
+.env.*
+server/.env
+server/.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+license_cache.enc
+.agregat_license.key
+.agregat/
+
+# ─── Build artifacts ──────────────────────────────────────────────────
+build/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dll
+*.exe.bak
+*.bak
+
+# ─── IDE ──────────────────────────────────────────────────────────────
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini

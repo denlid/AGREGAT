@@ -139,8 +139,20 @@ def render_html_tearsheet(
     asset = _e(meta.get("asset", "—"))
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # H-06: Content Security Policy — block inline scripts, external resources, eval
+    # Only allow styles, images (data:), and the one inline script we control.
+    csp_meta = (
+        '<meta http-equiv="Content-Security-Policy" '
+        'content="default-src \'none\'; '
+        'style-src \'unsafe-inline\'; '
+        'img-src data:; '
+        'script-src \'unsafe-inline\'; '
+        'font-src data:;">'
+    )
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
+{csp_meta}
 <title>AGREGAT Tear-Sheet — {asset}</title>
 {css}
 </head>
