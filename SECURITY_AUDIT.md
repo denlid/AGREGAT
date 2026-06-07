@@ -1,1038 +1,809 @@
-# AGREGAT — Comprehensive Security Audit Report
+# AGREGAT — Грааль Безпеки: Комплексний Аудит Безпеки v2
 
-**Date:** 2026-06-07  
-**Last Updated:** 2026-06-07 (Fix Phase 2 Complete)  
-**Auditor:** Senior Security Engineer  
-**Scope:** Full-stack security review (server + client + infrastructure)  
-**Classification:** Beta Production Readiness  
-**Methodology:** OWASP Top 10, STRIDE, manual code review
-
----
-
-## Executive Summary
-
-AGREGAT is a trading platform with a licensing system built on FastAPI + PostgreSQL (server) and Python/PySide6 (desktop client). The project demonstrates **strong security foundations** with many advanced controls already implemented: Ed25519 signed receipts, HMAC request signing, MFA/TOTP, CSP nonces, CSRF protection, RLS, audit hash chains, and Docker hardening.
-
-**UPDATE (2026-06-07): All 5 Critical, all 10 High, and most Medium/Low issues have been FIXED.** The remaining items are operational (CT monitoring, dependency lock files, log rotation) rather than code vulnerabilities.
-
-**Risk Rating:** 🟡 **MEDIUM** — Production-ready pending operational hardening (CT monitoring, log rotation, dependency locking)  
-**Effort Remaining:** 1-2 hours for remaining informational items  
-**Cost:** $0 for all recommended fixes (no paid tools required)
+**Дата:** 2026-06-07  
+**Аудитор:** Senior Security Engineer / Offensive Security Analyst  
+**Методологія:** OWASP Top 10 2024, STRIDE, OWASP ASVS 4.0, PTES, ручний code review  
+**Область:** Full-stack (server + engine + client + infrastructure)  
+**Класифікація:** Production + Beta Readiness  
 
 ---
 
-## Table of Contents
+## 🎯 Executive Summary
 
-1. [Critical Issues](#critical-issues)
-2. [High Issues](#high-issues)
-3. [Medium Issues](#medium-issues)
-4. [Low / Informational Issues](#low--informational-issues)
-5. [Positive Security Controls](#positive-security-controls)
-6. [Recommended Security Roadmap](#recommended-security-roadmap)
-7. [Cost-Free Security Improvements](#cost-free-security-improvements)
-8. [Testing Recommendations](#testing-recommendations)
+AGREGAT — це торгова платформа з системою ліцензування на базі FastAPI + PostgreSQL (сервер) та Python/PySide6 (десктоп). Проєкт має **сильну базу безпеки** з багатьма просунутими контролями: Ed25519 підписи, HMAC request signing, MFA/TOTP, CSP nonces, CSRF protection, RLS, audit hash chain, Docker hardening.
+
+**Після глибокого аналізу виявлено 12 нових вразливостей** (не покритих попереднім аудитом), з яких **2 CRITICAL**, **4 HIGH**, **4 MEDIUM**, **2 LOW**. Попередній аудит позначив багато проблем як "FIXED", але **реальна перевірка коду показує, що деякі виправлення неповні або залишають вектори атаки**.
+
+### Матриця ризиків
+
+| Категорія | Critical | High | Medium | Low | Info |
+|---|---|---|---|---|---|
+| **Нові виявлені** | 2 | 4 | 4 | 2 | 3 |
+| **З попереднього аудиту (потребують доопрацювання)** | 1 | 2 | 3 | 2 | 0 |
+| **Виправлені та підтверджені** | 4 | 8 | 7 | 4 | 1 |
+
+**Загальний ризик:** 🟠 **HIGH** → 🟢 **LOW** (після виправлення всіх NEW критичних/високих)  
+**Вартість виправлення:** **$0** (все робиться кодом, без платних інструментів)  
+**Час виправлення:** 1-2 дні для critical+high  
 
 ---
 
-## Critical Issues
+## 🔴 CRITICAL — Нові виявлені вразливості
 
-### CRIT-01: Ed25519 Public Key Placeholder in Client
+### NEW-CRIT-01: Account Lockout Bypass — In-Memory Store Lost on Restart
 
-**Severity:** 🔴 CRITICAL  
-**Status:** ⚠️ Operational — Key must be generated before production build  
-**CVSS:** 9.8 (Critical)  
-**File:** `engine/security/license_client.py:252`
+**CVSS:** 9.8 | **Severity:** 🔴 CRITICAL  
+**Файл:** `server/app/services/auth_service.py:50`  
+**Статус:** ❌ NOT FIXED
 
-**Problem:**
+**Проблема:**
 ```python
-# Line 252 — PLACEHOLDER, not a real key
-SERVER_PUBLIC_KEY_B64 = "PLACEHOLDER_REPLACE_WITH_ACTUAL_KEY"
+# Line 50 — in-memory lockout store
+_login_attempts: dict[str, dict] = {}
 ```
 
-The Ed25519 public key used to verify server-signed license receipts is a placeholder string. In production, **all signature verification will fail**, causing either:
-- Complete license system failure (fail-closed — users can't activate)
-- OR if error handling is bypassed, licenses are accepted without verification (fail-open)
+Account lockout зберігається **in-memory**. Це означає:
+1. **Server restart скидає всі lockout'и** — атакувальник просто чекає restart (або спричиняє його)
+2. **Multi-worker розгортання** — кожен worker має свій окремий словник, lockout на worker 1 не блокує worker 2
+3. **5 спроб × N workers** — фактичний ліміт = 5 × кількість workers
+4. **Brute-force можливий** — restart або scaling дозволяє нові 5 спроб
 
-**Impact:** Complete bypass of license verification OR total service denial.
+**Реальна атака:** Атакувальник пробує 5 паролів → чекає restart/deploy → пробує ще 5 → повторює. При 2 workers — 10 спроб без lockout.
 
-**Fix:**
+**Виправлення:**
 ```python
-# 1. Generate keypair on server:
-#    python server/scripts/generate_signing_key.py
-#
-# 2. Copy the printed base64 public key to client:
-SERVER_PUBLIC_KEY_B64 = "MCowBQYDK2VwAyEA..."  # actual base64 from generate_signing_key.py
-```
+# Варіант 1: PostgreSQL-based lockout (рекомендовано для production)
+async def _check_account_lockout_db(db: AsyncSession, email: str) -> None:
+    from app.models.audit import LoginAttempt
+    stmt = select(LoginAttempt).where(
+        LoginAttempt.email == email.lower(),
+        LoginAttempt.attempted_at > datetime.now(timezone.utc) - timedelta(seconds=LOCKOUT_DURATION_SECONDS)
+    )
+    result = await db.execute(stmt)
+    attempts = result.scalars().all()
+    if len(attempts) >= MAX_FAILED_ATTEMPTS:
+        latest = max(a.attempted_at for a in attempts)
+        remaining = int((latest + timedelta(seconds=LOCKOUT_DURATION_SECONDS) - datetime.now(timezone.utc)).total_seconds())
+        if remaining > 0:
+            raise ValueError(f"account_locked: try again in {remaining}s")
 
-**Verification:** Run `generate_signing_key.py` and confirm the public key is embedded in the client binary before compilation.
+# Варіант 2: Redis-based (якщо доступний)
+async def _check_account_lockout_redis(email: str) -> None:
+    key = f"lockout:{email.lower()}"
+    count = await redis.incr(key)
+    if count == 1:
+        await redis.expire(key, LOCKOUT_DURATION_SECONDS)
+    if count >= MAX_FAILED_ATTEMPTS:
+        ttl = await redis.ttl(key)
+        raise ValueError(f"account_locked: try again in {ttl}s")
+```
 
 ---
 
-### CRIT-02: Hardcoded Owner Email in Config
+### NEW-CRIT-02: TOTP Verification Not Constant-Time — Timing Side-Channel
 
-**Severity:** 🔴 CRITICAL  
-**Status:** ✅ FIXED (2026-06-07)  
-**CVSS:** 7.5 (High)  
-**File:** `server/app/config.py:51`
+**CVSS:** 8.1 | **Severity:** 🔴 CRITICAL  
+**Файл:** `server/app/security/totp.py:65-67`  
+**Статус:** ❌ NOT FIXED
 
-**Problem:**
+**Проблема:**
 ```python
-# Line 51 — hardcoded email
-owner_email: str = "alephxau@gmail.com"
+# Line 65-67 — string comparison, NOT constant-time
+for offset in range(-window, window + 1):
+    if _hotp(secret, counter + offset) == code:  # ← Python string ==, timing-vulnerable
+        return True
 ```
 
-The owner email is hardcoded in source code instead of being loaded from environment variables. This:
-- Exposes the owner's personal email in the public repository
-- Prevents changing the owner without code changes
-- Could be used for targeted phishing/social engineering
+Python оператор `==` для рядків **не є constant-time**. Він порівнює посимвольно зліва направо і зупиняється при першій невідповідності. Це дозволяє **timing attack**:
 
-**Fix:**
+1. Атакувальник надсилає код `000000` → вимірює час відповіді
+2. Пробує `100000` → якщо час довший, перша цифра = 1
+3. Пробує `120000` → якщо час довший, друга цифра = 2
+4. За ~6 спроб (по одній на цифру) визначає правильний TOTP код
+
+**Реальна складність атаки:** Потрібна низька затримка мережі + велика кількість запитів. Rate limiting (15/5min) робить це складнішим, але не неможливим — атакувальник може: (a) чекати між спробами, (b) використати кілька IP, (c) використати JIT-компіляцію для精确ного timing.
+
+**Виправлення:**
 ```python
-# config.py
-owner_email: str = Field(
-    default="",
-    description="Owner email for superuser access. Must be set via OWNER_EMAIL env var in production.",
-)
+def verify_totp(secret: str, code: str, period: int = 30, window: int = 1) -> bool:
+    """Verify TOTP code with constant-time comparison."""
+    code = code.strip()
+    if len(code) != 6 or not code.isdigit():
+        return False
+
+    t = int(time.time())
+    counter = t // period
+
+    for offset in range(-window, window + 1):
+        expected = _hotp(secret, counter + offset)
+        # CONSTANT-TIME comparison — prevents timing side-channel
+        if hmac.compare_digest(expected, code):
+            return True
+    return False
+```
+
+---
+
+## 🟠 HIGH — Нові виявлені вразливості
+
+### NEW-HIGH-01: Legacy SHA-256 Password Verification Still Active
+
+**CVSS:** 8.8 | **Severity:** 🟠 HIGH  
+**Файл:** `server/app/services/auth_service.py:367-374`  
+**Статус:** ❌ NOT FIXED
+
+**Проблема:**
+```python
+# Lines 367-374 — legacy SHA-256 path STILL ACTIVE
+def _verify_password_bcrypt(password: str, stored_hash: str) -> bool:
+    if stored_hash.startswith("$2b$") or stored_hash.startswith("$2a$"):
+        return bcrypt.checkpw(password.encode(), stored_hash.encode())
+    else:
+        # Legacy SHA-256 hash — for migration purposes only
+        legacy_hash = hashlib.sha256(
+            (password + settings.owner_password_salt).encode()
+        ).hexdigest()
+        return hmac.compare_digest(legacy_hash, stored_hash)
+```
+
+**Це критична проблема:** Якщо атакувальник отримує доступ до БД і бачить хеш, що НЕ починається з `$2b$` / `$2a$`, він знає що це **plain SHA-256**. SHA-256 без сольвання — тривіально ламається через rainbow tables. `owner_password_salt` — це глобальна сіль (не per-user), тому один зламаний хеш дає всі інші.
+
+**Виправлення:**
+```python
+def _verify_password_bcrypt(password: str, stored_hash: str) -> bool:
+    """Verify password. ONLY bcrypt is allowed."""
+    if stored_hash.startswith("$2b$") or stored_hash.startswith("$2a$"):
+        return bcrypt.checkpw(password.encode(), stored_hash.encode())
+    # REJECT legacy hashes — force password reset
+    raise ValueError("legacy_password_hash: password reset required")
+```
+
+Додати міграцію: при логіні з legacy хешем — змусити змінити пароль та перехешувати на bcrypt.
+
+---
+
+### NEW-HIGH-02: Admin Dashboard Has No Server-Side Auth Check
+
+**CVSS:** 7.5 | **Severity:** 🟠 HIGH  
+**Файл:** `server/app/main.py:444-464`  
+**Статус:** ❌ NOT FIXED
+
+**Проблема:**
+```python
+@app.get("/admin/dashboard", tags=["admin-panel"])
+async def admin_dashboard_page(request: Request, response: Response):
+    """Serve admin dashboard (auth checked client-side via cookie)."""  # ← CLIENT-SIDE ONLY!
+    csrf_token = generate_csrf_token()
+    response = templates.TemplateResponse("dashboard.html", {...})
+    ...
+```
+
+Dashboard HTML повертається **без перевірки авторизації на сервері**. Коментар прямо каже "auth checked client-side via cookie". Це означає:
+1. Будь-хто може отримати повний HTML dashboard за URL `/admin/dashboard`
+2. HTML містить CSRF токен (потенційна інформація)
+3. Хоча API запити вимагають `require_admin`, сам **dashboard template розкриває структуру адмін-панелі**
+4. Dashboard template може містити чутливі дані у JS коді (ендпоінти, назви полів)
+
+**Виправлення:**
+```python
+@app.get("/admin/dashboard", tags=["admin-panel"])
+async def admin_dashboard_page(
+    request: Request, 
+    response: Response,
+    admin=Depends(require_admin),  # ← SERVER-SIDE AUTH CHECK
+):
+    csrf_token = generate_csrf_token()
+    response = templates.TemplateResponse("dashboard.html", {...})
+    ...
+```
+
+---
+
+### NEW-HIGH-03: Redis Rate Limiter Race Condition — Non-Atomic Consume
+
+**CVSS:** 7.1 | **Severity:** 🟠 HIGH  
+**Файл:** `server/app/security/rate_limit.py:200-214`  
+**Статус:** ❌ NOT FIXED
+
+**Проблема:**
+```python
+# Lines 200-214 — NOT truly atomic
+pipe = self._redis.pipeline(transaction=True)
+pipe.zremrangebyscore(key, "-inf", cutoff)
+pipe.zcard(key)
+pipe.zadd(key, {str(now): now})  # ← Adds entry BEFORE checking if allowed
+pipe.expire(key, int(window_seconds) + 60)
+results = await pipe.execute()
+
+count = results[1]  # zcard BEFORE new entry
+...
+if not allowed:
+    # Remove the entry we just added (request was rejected)
+    await self._redis.zrem(key, str(now))  # ← NON-ATOMIC rollback!
+```
+
+Проблеми:
+1. **`str(now)` не унікальний** — два одночасні запити з однаковим timestamp перезапишуть один одного
+2. **`zrem` rollback не атомарний** — між `zadd` та `zrem` інший запит може прочитати зайвий запис
+3. **`transaction=True` не гарантує ізоляцію** — Redis MULTI не ізолює читання; інший клієнт може змінити дані між MULTI та EXEC (race condition)
+
+**Виправлення:**
+```python
+async def consume(self, subject, endpoint, max_requests, window_seconds):
+    await self._ensure_connected()
+    if self._use_fallback or self._redis is None:
+        return self._fallback.consume(subject, endpoint, max_requests, window_seconds)
+
+    key = self._key(subject, endpoint)
+    now = time.time()
+    cutoff = now - window_seconds
+    member = f"{now}:{secrets.token_hex(4)}"  # Unique member per request
+
+    # Use Lua script for true atomicity
+    lua_script = """
+    local key = KEYS[1]
+    local cutoff = tonumber(ARGV[1])
+    local max_req = tonumber(ARGV[2])
+    local now = tonumber(ARGV[3])
+    local member = ARGV[4]
+    local ttl = tonumber(ARGV[5])
+
+    redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+    local count = redis.call('ZCARD', key)
+    
+    if count < max_req then
+        redis.call('ZADD', key, now, member)
+        redis.call('EXPIRE', key, ttl)
+        return count + 1  -- new count after adding
+    else
+        return -1  -- rejected
+    end
+    """
+    
+    result = await self._redis.eval(
+        lua_script, 1, key, cutoff, max_requests, now, member, int(window_seconds) + 60
+    )
+    
+    if result == -1:
+        return RateLimitResult(allowed=False, remaining=0, reset_at=now + window_seconds, limit=max_requests)
+    else:
+        return RateLimitResult(allowed=True, remaining=max(0, max_requests - result), reset_at=now + window_seconds, limit=max_requests)
+```
+
+---
+
+### NEW-HIGH-04: Login Error Response Leverages User Enumeration
+
+**CVSS:** 5.3 | **Severity:** 🟠 HIGH  
+**Файл:** `server/app/api/admin/auth.py:81-84` + `server/app/services/auth_service.py:416`  
+**Статус:** ❌ NOT FIXED
+
+**Проблема:**
+```python
+# auth.py line 81-84
+except ValueError as e:
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=str(e),  # ← "invalid_credentials" — same for all errors? NO!
+    )
+```
+
+Хоча `admin_login()` повертає `ValueError("invalid_credentials")`, traceback та timing можуть розкривати чи існує користувач:
+
+1. **Timing difference:** Коли користувач існує — виконується bcrypt.checkpw (~100ms). Коли не існує — виконується `_DUMMY_BCRYPT` (~100ms). Але в `_check_account_lockout` і `_record_failed_attempt` час залежить від кількості попередніх спроб. Для існуючого користувача lockout перевіряється першим, для неіснуючого — dummy bcrypt + _record_failed_attempt.
+
+2. **Audit log difference:** `admin.login_failed` записує `email` для існуючих користувачів але не для неіснуючих (бо `user` = None).
+
+3. **Rate limit difference:** Існуючі акаунти блокуються після 5 спроб (lockout). Неіснуючі — тільки rate limit (10/5min). Атакувальник може визначити чи акаунт існує за різницею в rate limiting поведінці.
+
+**Виправлення:** Уніфікувати timing та повідомлення про помилки:
+```python
+# Завжди виконувати однакову роботу незалежно від того, чи існує користувач
+async def admin_login(db, email, password, ip_hash=None):
+    # ALWAYS check lockout first (same for existing and non-existing)
+    _check_account_lockout(email)
+    
+    # ALWAYS run bcrypt (real or dummy) with identical timing
+    user = await _find_user(db, email)
+    password_ok = _verify_password_bcrypt(password, user.password_hash if user else _DUMMY_BCRYPT)
+    
+    # ALWAYS record attempt (same path for both)
+    if not user or not password_ok:
+        _record_failed_attempt(email)
+        # ALWAYS log with same fields (never reveal user existence)
+        await log_event(db, action="admin.login_failed", ip_hash=ip_hash, 
+                       payload={"reason": "invalid_credentials"})  # No email!
+        raise ValueError("invalid_credentials")  # Same message always
+```
+
+---
+
+## 🟡 MEDIUM — Нові виявлені вразливості
+
+### NEW-MED-01: Config Default Database URL Contains Hardcoded Credentials
+
+**CVSS:** 6.5 | **Файл:** `server/app/config.py:22`  
+**Статус:** ❌ NOT FIXED
+
+```python
+database_url: str = "postgresql+asyncpg://agregat:agregat_dev@localhost:5432/agregat"
+```
+
+Default DB URL містить **username:password** (`agregat:agregat_dev`). Хоча це для локальної розробки, якщо хтось забуде встановити `DATABASE_URL` в .env на проді — сервер підключиться до локальної БД з цими креденшалами, або ще гірше — якщо БД доступна ззоврі.
+
+**Виправлення:**
+```python
+database_url: str = ""  # MUST be set via .env — no default with credentials
 
 @model_validator(mode="after")
-def _validate_owner_email(self):
-    if self.app_env == "production" and not self.owner_email:
-        print("FATAL: OWNER_EMAIL must be set in production")
-        sys.exit(1)
+def _validate_db_url(self):
+    if not self.database_url:
+        if not self.debug:
+            print("FATAL: DATABASE_URL must be set in production", file=sys.stderr)
+            sys.exit(1)
+        self.database_url = "postgresql+asyncpg://agregat:agregat_dev@localhost:5432/agregat_dev"
     return self
 ```
 
-Then set `OWNER_EMAIL=your@email.com` in `.env` (already gitignored).
-
 ---
 
-### CRIT-03: SSL Mode "require" with CERT_NONE — MITM Vulnerability
+### NEW-MED-02: Debug Log Exposes Database Connection Details
 
-**Severity:** 🔴 CRITICAL  
-**Status:** ✅ FIXED (2026-06-07)  
-**CVSS:** 8.1 (High)  
-**File:** `server/app/database.py:49-51`
+**CVSS:** 4.3 | **Файл:** `server/app/main.py:52`  
+**Статус:** ❌ NOT FIXED
 
-**Problem:**
 ```python
-# Lines 49-51
-ssl_context = ssl.create_default_context()
-ssl_context.check_hostname = False
-ssl_context.verify_mode = ssl.CERT_NONE  # ← Accepts ANY certificate!
-connect_args["ssl"] = ssl_context
+logger.info(f"Database: {settings.database_url.split('@')[-1] if '@' in settings.database_url else 'configured'}")
 ```
 
-The database connection uses `sslmode=require` but with `CERT_NONE`, which means:
-- TLS is used, but the server certificate is NOT validated
-- An attacker with network access can perform MITM with a self-signed certificate
-- All database credentials and data can be intercepted
+Це логує частину Database URL після `@` — типово `agregat:5432/agregat`. Хоча пароль не логується, **ім'я користувача та хост** розкриваються. В логах може бути更多信息 при помилках підключення.
 
-**Impact:** Full database compromise via MITM attack.
-
-**Fix:**
+**Виправлення:**
 ```python
-# database.py — production
-ssl_context = ssl.create_default_context(cafile="/path/to/ca.crt")
-ssl_context.check_hostname = True
-ssl_context.verify_mode = ssl.CERT_REQUIRED  # ← Verify server cert
-
-# Or use sslmode=verify-full in DATABASE_URL:
-# DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/db?sslmode=verify-full&sslrootcert=/path/to/ca.crt
-```
-
-For self-signed certs (beta), mount the CA cert via Docker volume and reference it. For production with managed PostgreSQL (Neon, AWS RDS), use the provider's CA certificate.
-
----
-
-### CRIT-04: Embedded Storage Secret in Binary
-
-**Severity:** 🔴 CRITICAL  
-**Status:** ✅ FIXED (2026-06-07)  
-**CVSS:** 7.5 (High)  
-**File:** `engine/security/encrypted_storage.py:52-55`
-
-**Problem:**
-```python
-# Lines 52-55 — hardcoded fallback secret
-_APP_SECRET_ENV = os.environ.get("AGREGAT_STORAGE_SECRET", "")
-_APP_SECRET = _APP_SECRET_ENV.encode() if _APP_SECRET_ENV else (
-    b"\x41\x47\x52\x45\x47\x41\x54\x5f\x53\x45\x43\x52\x45\x54\x5f\x4b\x45\x59"
-    # = b"AGREGAT_SECRET_KEY" — trivially extractable from binary
-)
-```
-
-The encrypted local storage (Fernet) falls back to a hardcoded secret when `AGREGAT_STORAGE_SECRET` is not set. This secret is:
-- Embedded as hex-escaped bytes (trivially reversible)
-- The same for ALL installations
-- Extractable from compiled binaries with `strings` or a hex editor
-
-**Impact:** Any attacker can decrypt local cached data (licenses, tokens, settings) from any user's machine.
-
-**Fix:**
-```python
-# encrypted_storage.py — FAIL-CLOSED in production
-_APP_SECRET_ENV = os.environ.get("AGREGAT_STORAGE_SECRET", "")
-
-if not _APP_SECRET_ENV:
-    _app_env = os.environ.get("APP_ENV", "production").lower()
-    if _app_env == "production":
-        raise RuntimeError(
-            "AGREGAT_STORAGE_SECRET environment variable is required in production. "
-            "Generate with: python -c 'import secrets; print(secrets.token_hex(32))'"
-        )
-    # Development fallback only
-    _APP_SECRET = b"DEV_ONLY_NOT_FOR_PRODUCTION_" + b"\x00" * 4
-else:
-    _APP_SECRET = _APP_SECRET_ENV.encode()
+logger.info("Database: configured")  # No details in logs
 ```
 
 ---
 
-### CRIT-05: Hardcoded Dev Fallback Salt in Client
+### NEW-MED-03: MFA Setup Endpoint Lacks CSRF Protection
 
-**Severity:** 🔴 CRITICAL  
-**Status:** ✅ FIXED (2026-06-07)  
-**CVSS:** 7.5 (High)  
-**File:** `engine/security/license_client.py:77`
-
-**Problem:**
-```python
-# Line 77 — hardcoded salt
-_fingerprint_salt = os.environ.get("AGREGAT_FINGERPRINT_SALT", "dev_fallback_salt_do_not_use_in_production")
-```
-
-The device fingerprint salt falls back to a known string. This allows:
-- Predicting the fingerprint hash for any device
-- Pre-computing rainbow tables for fingerprint reversal
-- Spoofing device fingerprints
-
-**Fix:**
-```python
-# license_client.py
-_fingerprint_salt_env = os.environ.get("AGREGAT_FINGERPRINT_SALT", "")
-if not _fingerprint_salt_env:
-    _app_env = os.environ.get("APP_ENV", "production").lower()
-    if _app_env == "production":
-        raise RuntimeError("AGREGAT_FINGERPRINT_SALT is required in production")
-    _fingerprint_salt = "DEV_SALT_NOT_FOR_PROD"
-else:
-    _fingerprint_salt = _fingerprint_salt_env
-```
-
----
-
-## High Issues
-
-### HIGH-01: Default Passwords in Production Docker Compose
-
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07)  
-**CVSS:** 9.1 (Critical)  
-**File:** `server/docker-compose.prod.yml`
-
-**Problem:**
-```yaml
-# PostgreSQL
-POSTGRES_PASSWORD: "CHANGE_ME_PROD"  # ← Default password in source code
-
-# Redis
-command: redis-server --requirepass "CHANGE_ME_REDIS"  # ← Default password
-```
-
-Default passwords are committed to the repository. If deployed without changing:
-- Anyone with access to the repo knows the database password
-- Automated scanners will find these and attempt access
-- Docker image layers may retain the password even if changed later
-
-**Fix:**
-```yaml
-# docker-compose.prod.yml — use env vars, never hardcoded values
-services:
-  db:
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?ERROR: POSTGRES_PASSWORD must be set}
-  
-  redis:
-    command: redis-server --requirepass ${REDIS_PASSWORD:?ERROR: REDIS_PASSWORD must be set}
-```
-
-Create `.env` (already gitignored) with:
-```
-POSTGRES_PASSWORD=$(openssl rand -base64 32)
-REDIS_PASSWORD=$(openssl rand -base64 32)
-```
-
----
-
-### HIGH-02: MFA Session Token in Global JavaScript Variable
-
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07)  
-**CVSS:** 6.1 (Medium-High)  
-**File:** `server/app/templates/login.html:46`
-
-**Problem:**
-```html
-<script nonce="{{ ... }}">
-    // Line 46 — MFA token exposed to JavaScript
-    const mfaSessionToken = "{{ mfa_token }}";
-</script>
-```
-
-The MFA session token is stored in a global JavaScript variable. While CSP nonce prevents injection, this still:
-- Exposes the token to any XSS that bypasses CSP (browser bugs, misconfigurations)
-- Makes the token accessible to browser extensions
-- Appears in browser DevTools → Sources tab
-
-**Impact:** Token theft via XSS or malicious browser extension → MFA bypass.
-
-**Fix:**
-```html
-<!-- Store in HttpOnly cookie instead of JS variable -->
-<!-- In the server endpoint that renders login.html: -->
-<!-- response.set_cookie("mfa_session", mfa_token, httponly=True, secure=True, samesite="strict", max_age=300) -->
-
-<!-- Then read from cookie in JS: -->
-<script nonce="{{ ... }}">
-    function getMfaSessionToken() {
-        const match = document.cookie.match(/(?:^|;\s*)mfa_session=([^;]+)/);
-        return match ? match[1] : '';
-    }
-</script>
-```
-
-Or better: use a short-lived HttpOnly cookie server-side and don't expose the token to JavaScript at all.
-
----
-
-### HIGH-03: Legacy XOR Cipher Still Supported in License Manager
-
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07) — Legacy XOR completely removed, Fernet-only  
-**CVSS:** 7.5 (High)  
-**File:** `engine/security/license_manager.py:259-317`
-
-**Problem:**
-```python
-# Line 259 — legacy XOR still accepted until August 2026
-_LEGACY_XOR_DEADLINE = datetime(2026, 8, 1, tzinfo=timezone.utc)
-
-# Lines 261-268 — XOR cipher (trivially breakable)
-def _xor_crypt(data: bytes, key: bytes) -> bytes:
-    return bytes(a ^ key[i % len(key)] for i, a in enumerate(data))
-```
-
-Legacy XOR-encrypted licenses are still accepted until August 1, 2026. XOR with a repeating key is:
-- Breakable via known-plaintext attack (seconds)
-- Breakable via frequency analysis if plaintext is JSON
-- No authentication (tampering undetectable)
-
-**Impact:** Any attacker with a legacy XOR license file can forge new licenses.
-
-**Fix:**
-```python
-# Remove legacy XOR support entirely for new deployments
-# If backward compatibility is needed, force re-issue all licenses with Fernet
-
-# Immediate fix: shorten the deadline
-_LEGACY_XOR_DEADLINE = datetime(2026, 6, 15, tzinfo=timezone.utc)  # 2 weeks from now
-
-# Or disable entirely:
-def _decrypt_license_blob(encoded: str, key: bytes) -> dict:
-    encrypted_blob = base64.b64decode(encoded)
-    is_fernet = len(encrypted_blob) > 57 and encrypted_blob[0:1] == b'\x80'
-    if not is_fernet:
-        raise ValueError("legacy_license_format_rejected: contact support for updated license")
-    decrypted_raw = _fernet_decrypt(encrypted_blob, key)
-    return json.loads(decrypted_raw.decode())
-```
-
----
-
-### HIGH-04: IAT Hook Detection Is a Stub (No Actual Protection)
-
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07) — Full IAT walking implemented or function removed  
-**CVSS:** 5.3 (Medium)  
-**File:** `engine/security/anti_tamper.py:298-314`
-
-**Problem:**
-```python
-# Lines 298-314 — admitted stub implementation
-# P2-13: IAT hook detection is INCOMPLETE — this is a stub implementation.
-# Current implementation only parses the PE header but doesn't check IAT entries.
-# This provides NO protection against IAT hooking attacks.
-```
-
-The `detect_iat_hooks()` function parses PE headers but never actually checks IAT entries. This means:
-- API hooking via IAT (Detours, MinHook, Frida) is NOT detected
-- The function always returns an empty list
-- Security theater — appears to protect but doesn't
-
-**Fix:**
-Either implement full IAT walking or remove the function to avoid false confidence:
+**CVSS:** 5.3 | **Файл:** `server/app/api/admin/auth.py:204-294`  
+**Статус:** ❌ NOT FIXED
 
 ```python
-def detect_iat_hooks() -> list[str]:
-    """
-    P2-13: Full IAT hook detection implementation.
-    Walks the Import Directory Table and validates each IAT entry.
-    """
-    hooks = []
-    if sys.platform != "win32":
-        return hooks
-    
-    try:
-        import ctypes
-        import ctypes.wintypes
-        
-        # Get module base
-        h_module = ctypes.windll.kernel32.GetModuleHandleW(None)
-        base = ctypes.cast(h_module, ctypes.c_void_p).value
-        
-        # Parse PE → find Import Directory (IMAGE_DIRECTORY_ENTRY_IMPORT = 1)
-        # ... [full PE parsing to find IMAGE_IMPORT_DESCRIPTOR] ...
-        
-        # For each imported DLL:
-        #   1. Get the DLL's module base and size
-        #   2. For each IAT entry, check if the function pointer
-        #      points within the DLL's address range
-        #   3. If not → IAT hook detected
-        
-        # Reference implementation:
-        # https://github.com/realgam3/Import-Address-Table-IAT-Hook-Detection
-        
-    except Exception:
-        pass
-    
-    return hooks
-```
-
----
-
-### HIGH-05: Network Time Check Uses Untrusted Third-Party API
-
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07) — Multiple HTTPS sources with TLS verification  
-**CVSS:** 5.9 (Medium)  
-**File:** `engine/security/license_manager.py:154-177`
-
-**Problem:**
-```python
-# Line 165 — untrusted time source
-req = urllib.request.Request(
-    _d("V0tLTwUQEEhQTVNbS1ZSWl5PVhFQTVgQXk9WEEtWUlpFUFFaEHpLXBBqa3w="),
-    # Decodes to: http://worldtimeapi.org/api/timezone/Etc/UTC
-    headers={'User-Agent': 'Mozilla/5.0'}
-)
-```
-
-The license expiration check relies on `worldtimeapi.org` for network time. This is problematic because:
-- It's an unauthenticated HTTP API (no TLS verification shown)
-- The service could be compromised or return manipulated time
-- DNS spoofing could redirect to an attacker-controlled server
-- No fallback to NTP or multiple time sources
-
-**Impact:** Attacker can manipulate time to extend expired licenses.
-
-**Fix:**
-```python
-def _get_network_time() -> datetime:
-    """
-    Get time from multiple trusted sources with TLS verification.
-    Falls back to system time if all sources fail.
-    """
-    import ssl
-    import urllib.request
-    
-    # Use HTTPS with certificate verification
-    trusted_sources = [
-        "https://worldtimeapi.org/api/timezone/Etc/UTC",
-        "https://timeapi.io/api/time/current/zone?timeZone=UTC",
-    ]
-    
-    ssl_context = ssl.create_default_context()  # Verifies certs by default
-    
-    for url in trusted_sources:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'AGREGAT/1.0'})
-            with urllib.request.urlopen(req, timeout=5, context=ssl_context) as resp:
-                data = json.loads(resp.read().decode())
-                return datetime.fromtimestamp(data['unixtime'], timezone.utc)
-        except Exception:
-            continue
-    
-    # All sources failed — use system time (log warning)
-    import logging
-    logging.getLogger(__name__).warning("All network time sources failed, using system time")
-    return datetime.now(timezone.utc)
-```
-
----
-
-### HIGH-06: No Rate Limiting on License Activation Endpoint
-
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07) — 5 requests per 5 min per IP  
-**CVSS:** 7.5 (High)  
-**File:** `server/app/api/v1/auth.py`
-
-**Problem:**
-The `/api/v1/activate` endpoint has no IP-based rate limiting. An attacker can:
-- Brute-force activation keys (24-char alphanumeric = feasible with enough attempts)
-- Enumerate valid email addresses
-- Cause database load with repeated activation attempts
-
-**Fix:**
-```python
-# v1/auth.py — add rate limiting to activation endpoint
-from server.app.security.rate_limit import get_rate_limiter
-
-_activation_rate_limit = get_rate_limiter(max_requests=5, window_seconds=300)  # 5 per 5 min per IP
-
-@router.post("/activate")
-async def activate(
+@router.post("/mfa/setup", response_model=MFASetupResponse)
+async def admin_mfa_setup(
     request: Request,
-    payload: ActivationRequest,
     db: AsyncSession = Depends(get_db),
+    _rate_limit=Depends(_admin_mfa_rate_limit),
+    # ← NO _csrf=Depends(require_csrf_token) !!!
 ):
-    # Rate limit by IP
-    client_ip = request.client.host
-    if not await _activation_rate_limit.is_allowed(f"activate:{client_ip}"):
-        raise HTTPException(status_code=429, detail="Too many activation attempts. Try again later.")
+```
+
+Ендпоінти `/mfa/setup` та `/mfa/enable` **не мають CSRF захисту** (на відміну від `/logout`). Зловмисний сайт може:
+1. Ініціювати MFA setup від імені залогіненого адміна (якщо в нього є MFA token cookie)
+2. Отримати TOTP secret та backup codes через атаку на довіру
+
+**Виправлення:** Додати `require_csrf_token` до всіх POST ендпоінтів MFA.
+
+---
+
+### NEW-MED-04: Checkpoint Verification Is a No-Op
+
+**CVSS:** 3.5 | **Файл:** `engine/security/anti_debug.py:586-598`  
+**Статус:** ❌ NOT FIXED
+
+```python
+def verify_checkpoints() -> tuple[bool, str]:
+    """Verify all checkpoints are still valid."""
+    for name, expected_hash in _CHECKPOINTS.items():
+        pass  # Checkpoints are validated by IntegrityGuard  ← NO-OP!
+    return True, "ok"
+```
+
+Функція `verify_checkpoints()` **ніколи нічого не перевіряє** — вона завжди повертає `True`. Це security theater. Якщо IntegrityGuard не покриває всі checkpoints, вони ніколи не перевіряються.
+
+**Виправлення:**
+```python
+def verify_checkpoints() -> tuple[bool, str]:
+    """Verify all recorded checkpoints are still valid."""
+    for name, expected_hash in _CHECKPOINTS.items():
+        # Re-verify by checking the frame that set the checkpoint
+        # Since we can't re-enter the original frame, use IntegrityGuard
+        # which verifies function bytecode hashes
+        pass  # Validated by IntegrityGuard.check() instead
     
-    # ... existing activation logic
+    # Delegate to IntegrityGuard
+    guard = get_integrity_guard()
+    return guard.check()
 ```
 
 ---
 
-### HIGH-07: Self-Integrity Check Too Weak
+## 🔵 LOW — Нові виявлені вразливості
 
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07) — SHA-256 hash comparison with build-time embedded hashes  
-**CVSS:** 5.3 (Medium)  
-**File:** `engine/security/anti_debug.py:294-323`, `engine/security/license_manager.py`
+### NEW-LOW-01: Test Dependencies in Production Requirements
 
-**Problem:**
+**CVSS:** 2.0 | **Файл:** `server/requirements.txt:50-51`  
+**Статус:** ❌ NOT FIXED
+
 ```python
-# Lines 314-319 — trivially bypassable integrity check
+pytest==8.3.4
+pytest-asyncio==0.24.0
+```
+
+Тестові залежності в production requirements розширюють attack surface. Pytest може бути використаний для виконання довільного коду якщо атакувальник має можливість завантажити файли.
+
+**Виправлення:** Перенести в `requirements-dev.txt` або окремий файл.
+
+---
+
+### NEW-LOW-02: String Obfuscation in anti_debug.py Still Uses Single-Byte XOR
+
+**CVSS:** 2.5 | **Файл:** `engine/security/anti_debug.py:27-31`  
+**Статус:** ❌ NOT FIXED (частково)
+
+```python
+def _d(s: str) -> str:
+    """Decode obfuscated strings at runtime."""
+    try:
+        return bytes(a ^ 0x3F for a in base64.b64decode(s)).decode('utf-8')
+```
+
+Попередній аудит (HIGH-08) позначив це як "FIXED — HMAC-SHA256 per-string keystream", але **anti_debug.py все ще використовує тривіальний XOR(0x3F)**. Лише `license_manager.py` був оновлений.
+
+**Виправлення:** Застосувати тотожний метод обфускації що й у license_manager.py, або покладатися на Nuitka `--obfuscate-string-literals`.
+
+---
+
+## ⚠️ З ПОПЕРЕДНЬОГО АУДИТУ — Потребують доопрацювання
+
+### CRIT-01 (REVISITED): Ed25519 Public Key Still Placeholder
+
+**Статус:** ⚠️ Операційний — ключ не згенеровано  
+**Файл:** `engine/security/license_client.py:266`
+
+```python
+_PRODUCTION_PUBLIC_KEY_B64 = (
+    "PLACEHOLDER_REPLACE_WITH_ACTUAL_KEY"  # P0-6
+)
+```
+
+Код тепер **правильно блокує production** якщо placeholder на місці (рядок 278-283). Це добре. Але потрібно **згенерувати ключ до build**.
+
+**Дія:** Запустити `python server/scripts/generate_signing_key.py` та вставити результат.
+
+---
+
+### HIGH-07 (REVISITED): Self-Integrity Still Falls Back to "def " Check
+
+**Статус:** ⚠️ Частково виправлено  
+**Файл:** `engine/security/anti_debug.py:340-343`
+
+```python
+# Structural validation (always performed) ← STILL WEAK
 if len(content) < 100:
     return False
 if b"def " not in content:
     return False
 ```
 
-The self-integrity check only verifies that files:
-1. Are at least 100 bytes
-2. Contain the string "def "
+SHA-256 хеш порівняння працює коли `AGREGAT_SECURITY_HASHES` встановлено. Але **fallback** все ще перевіряє лише `len > 100` + `"def "` presence. Build script повинен **ОБОВ'ЯЗКОВО** встановлювати хеші.
 
-An attacker can:
-- Patch individual functions while keeping "def " intact
-- Replace the entire file with a stub that contains "def " and returns True
-- Hook `verify_self_integrity()` to always return True
-
-**Fix:**
+**Виправлення:** Видалити слабкий fallback, або зробити його `return False` в production:
 ```python
-def verify_self_integrity() -> bool:
-    """
-    Verify integrity of critical security files using SHA-256 hashes.
-    Expected hashes should be embedded at build time.
-    """
-    # Expected hashes — set by build script (Nuitka/PyInstaller hook)
-    EXPECTED_HASHES = {
-        "license_manager.py": os.environ.get("HASH_license_manager", ""),
-        "license_client.py": os.environ.get("HASH_license_client", ""),
-        "anti_debug.py": os.environ.get("HASH_anti_debug", ""),
-    }
-    
-    security_dir = Path(__file__).parent
-    
-    for fname, expected_hash in EXPECTED_HASHES.items():
-        if not expected_hash:
-            continue  # Hash not set (dev mode)
-        
-        fpath = security_dir / fname
-        if not fpath.exists():
-            return False
-        
-        actual_hash = compute_file_hash(str(fpath))
-        if actual_hash != expected_hash:
-            return False
-    
-    return True
+if _APP_ENV_MODE == "production" and not _EXPECTED_FILE_HASHES:
+    # No hashes configured in production — FAIL
+    import logging
+    logging.getLogger(__name__).error(
+        "HIGH-07: AGREGAT_SECURITY_HASHES not set in production. "
+        "Integrity check has no valid reference hashes."
+    )
+    return False
 ```
 
 ---
 
-### HIGH-08: String Obfuscation Trivially Reversible
+### MED-01 (REVISITED): TLS Certificate Pinning Not Actually Enforced
 
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07) — HMAC-SHA256 per-string keystream + Nuitka --obfuscate-string-literals  
-**CVSS:** 4.3 (Medium)  
-**File:** `engine/security/license_manager.py:31-50`, `engine/security/anti_debug.py:26-31`
-
-**Problem:**
-```python
-# license_manager.py — XOR with per-module key (still reversible)
-_STRING_OBFUSCATION_KEY = hashlib.sha256(
-    b"\x41\x47\x52\x45\x47\x41\x54" + struct.pack(">Q", os.getpid() & 0xFFFFFFFF)
-).digest()[:16]
-
-def _d(s: str) -> str:
-    raw = base64.b64decode(s)
-    key = _STRING_OBFUSCATION_KEY
-    return bytes(a ^ key[i % len(key)] for i, a in enumerate(raw)).decode('utf-8')
-```
+**Статус:** ⚠️ Частково виправлено  
+**Файл:** `engine/security/license_client.py:502-526`
 
 ```python
-# anti_debug.py — even simpler XOR(0x3F)
-def _d(s: str) -> str:
-    return bytes(a ^ 0x3F for a in base64.b64decode(s)).decode('utf-8')
+def _get_ssl_context_for_pinning():
+    ...
+    if _EXPECTED_CERT_SHA256:
+        # Custom verification: check cert fingerprint
+        original_verify = ctx.verify_mode
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        # We'll verify the fingerprint in the HTTP client callback
+        pass  # ← ACTUAL VERIFICATION NOT IMPLEMENTED!
+    return ctx
 ```
 
-Both obfuscation schemes are trivially reversible:
-- `anti_debug.py`: Single-byte XOR — breakable in 1 line
-- `license_manager.py`: Repeating-key XOR — breakable with known plaintext
+Функція `_get_ssl_context_for_pinning()` **не реалізує фактичну перевірку fingerprint**. Вона створює SSL context але `pass` замість реальної перевірки. `_verify_cert_fingerprint()` існує але **ніде не викликається** в HTTP запитах.
 
-The obfuscated strings include URLs, environment variable names, and error messages that help reverse engineers understand the protection logic.
-
-**Fix:**
-For compiled binaries, use Nuitka's built-in string obfuscation:
-```bash
-nuitka --standalone --obfuscate-string-literals app.py
-```
-
-For source-level protection, accept that Python source cannot be effectively obfuscated and focus on server-side controls instead.
-
----
-
-### HIGH-09: No Account Lockout Notification
-
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07) — Email + audit log on lockout  
-**CVSS:** 5.3 (Medium)  
-**File:** `server/app/services/auth_service.py`
-
-**Problem:**
-Account lockout is implemented (after N failed attempts), but there is no notification mechanism. This means:
-- Users don't know their account is being brute-forced
-- Admins don't know about ongoing attacks
-- No forensic data for incident response
-
-**Fix:**
+**Виправлення:** Використати `httpx` event hooks для перевірки сертифіката:
 ```python
-# auth_service.py — add notification on lockout
-async def _record_failed_login(db: AsyncSession, email: str, ip: str):
-    # ... existing logic ...
-    
-    if failed_count >= MAX_FAILED_ATTEMPTS:
-        # Lock the account
-        user.is_locked = True
-        user.locked_at = datetime.now(timezone.utc)
-        
-        # SECURITY: Send notification email
-        await send_security_alert_email(
-            to=user.email,
-            subject="AGREGAT: Account Locked — Suspicious Activity",
-            body=f"Your account has been locked after {MAX_FAILED_ATTEMPTS} failed login attempts "
-                 f"from IP {ip}. If this wasn't you, contact support immediately."
-        )
-        
-        # SECURITY: Log to audit trail
-        await create_audit_event(
-            db=db,
-            action="account_locked",
-            actor_email=email,
-            target_type="user",
-            details={"ip": ip, "failed_attempts": failed_count}
-        )
+# For httpx client:
+import httpx
+
+def _cert_verification_hook(request):
+    # Get the SSL object from the connection
+    # Verify cert fingerprint against _EXPECTED_CERT_SHA256
+    pass  # Needs implementation with httpx transport hooks
+
+# For urllib:
+# Override HTTPSConnection.connect() to verify after handshake
 ```
 
 ---
 
-### HIGH-10: Docker Health Check Doesn't Verify TLS
+## ✅ Підтверджені виправлення (попередній аудит)
 
-**Severity:** 🟠 HIGH  
-**Status:** ✅ FIXED (2026-06-07) — HEALTHCHECK uses `curl -fk https://localhost:8000/health`  
-**CVSS:** 5.3 (Medium)  
-**File:** `server/Dockerfile`
+Наступні виправлення з попереднього аудиту **підтверджені** після перевірки коду:
 
-**Problem:**
-```dockerfile
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-```
-
-The health check uses HTTP (not HTTPS), which means:
-- A container serving HTTP instead of HTTPS would still pass health checks
-- TLS misconfiguration wouldn't be detected
-- The health endpoint itself is not authenticated
-
-**Fix:**
-```dockerfile
-# If using TLS in container:
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fk https://localhost:8000/health || exit 1
-
-# Or verify TLS is working:
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request,ssl; urllib.request.urlopen('https://localhost:8000/health', context=ssl.create_default_context())" || exit 1
-```
-
----
-
-## Medium Issues
-
-### MED-01: No TLS Certificate Pinning Configured by Default
-
-**File:** `engine/security/license_client.py`  
-**Status:** ✅ FIXED (2026-06-07) — Pinning enabled by default with bundled cert fingerprint  
-**Problem:** TLS certificate pinning was disabled by default.  
-**Fix Applied:** `_BUNDLED_CERT_SHA256` constant with production validation; env var override available.
-
-### MED-02: No HSTS Preload
-
-**File:** `server/app/main.py`  
-**Problem:** HSTS is set conditionally but not submitted to browser preload list.  
-**Impact:** First visit vulnerable to SSL stripping.  
-**Fix:** Submit domain to https://hstspreload.org/ after enabling HSTS with `includeSubDomains; preload`.
-
-### MED-03: No Content-Security-Policy-Report-Only
-
-**File:** `server/app/main.py`  
-**Status:** ✅ FIXED (2026-06-07) — CSP Report-Only header added (conditional on CSP_REPORT_URI config)  
-**Fix Applied:** `Content-Security-Policy-Report-Only` with `report-uri` and `report-to` directives.
-
-### MED-04: No Referrer-Policy Header
-
-**File:** `server/app/main.py`  
-**Status:** ✅ FIXED (2026-06-07)  
-**Fix Applied:** `Referrer-Policy: strict-origin-when-cross-origin` added to all responses.
-
-### MED-05: No Permissions-Policy Header
-
-**File:** `server/app/main.py`  
-**Status:** ✅ FIXED (2026-06-07)  
-**Fix Applied:** `Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()`
-
-### MED-06: No Cross-Origin-Opener-Policy / Cross-Origin-Embedder-Policy
-
-**File:** `server/app/main.py`  
-**Status:** ✅ FIXED (2026-06-07)  
-**Fix Applied:** `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, `Cross-Origin-Resource-Policy: same-origin`
-
-### MED-07: Secure Memory Uses XOR (Not Cryptographic)
-
-**File:** `engine/security/secure_memory.py`  
-**Status:** ✅ FIXED (2026-06-07)  
-**Fix Applied:** `CryptProtectMemory`/`CryptUnprotectMemory` (Windows DPAPI) for in-place memory encryption. Falls back to AES-256-CTR with SHA-256 keystream when OS APIs unavailable. Unix: `mlock()`/`munlock()` for swap prevention.
-
-### MED-08: No Certificate Transparency Monitoring
-
-**File:** Infrastructure  
-**Problem:** No monitoring for rogue certificates issued for the domain.  
-**Impact:** Compromised CA could issue valid certs for MITM without detection.  
-**Fix:** Use free CT monitoring: https://crt.sh/ or https://developers.facebook.com/tools/ct/
-
-### MED-09: No Security Headers on Error Pages
-
-**File:** `server/app/main.py`  
-**Status:** ✅ FIXED (2026-06-07)  
-**Fix Applied:** Custom `http_exception_handler` and `global_exception_handler` with `_apply_security_headers_to_response()` helper. All error responses now include CSP, X-Content-Type-Options, X-Frame-Options, Cache-Control, Referrer-Policy, Permissions-Policy, COOP/COEP, and X-Request-ID.
-
-### MED-10: No Database Connection Pool Size Limit
-
-**File:** `server/app/database.py`  
-**Problem:** No explicit `pool_size` or `max_overflow` configured.  
-**Impact:** DoS via connection exhaustion.  
-**Fix:** Set `pool_size=20, max_overflow=10` in `create_async_engine()`.
-
----
-
-## Low / Informational Issues
-
-### LOW-01: security.txt References Non-Existent Resources
-
-**File:** `server/app/static/.well-known/security.txt`  
-**Status:** ✅ FIXED (2026-06-07)  
-**Fix Applied:** References to non-existent resources commented out with TODO notes. Added `Expires` header.
-
-### LOW-02: No X-Content-Type-Options on Static Files
-
-**File:** `server/app/main.py`  
-**Problem:** `X-Content-Type-Options: nosniff` not explicitly set for static file responses.  
-**Fix:** Add to static file middleware.
-
-### LOW-03: No Cache-Control Headers on API Responses
-
-**File:** `server/app/main.py`  
-**Status:** ✅ FIXED (2026-06-07)  
-**Fix Applied:** `Cache-Control: no-store, no-cache, must-revalidate, private` + `Pragma: no-cache` on all responses.
-
-### LOW-04: No X-Frame-Options Header
-
-**File:** `server/app/main.py`  
-**Status:** ✅ FIXED (2026-06-07)  
-**Fix Applied:** `X-Frame-Options: DENY` added to all responses.
-
-### LOW-05: No Source Map Removal in Production
-
-**File:** Build process  
-**Problem:** JavaScript source maps may expose source code in production.  
-**Fix:** Ensure source maps are not included in production builds.
-
-### LOW-06: No Dependency Lock File
-
-**File:** `server/requirements.txt`  
-**Problem:** Only direct dependencies pinned; transitive dependencies not locked.  
-**Fix:** Generate `requirements.lock` with `pip freeze` and use for reproducible builds.
-
-### LOW-07: No Log Rotation Configuration
-
-**File:** Server logging  
-**Problem:** No log rotation — logs can grow indefinitely and fill disk.  
-**Fix:** Configure `RotatingFileHandler` or use Docker log driver with max-size.
-
-### LOW-08: No Request ID / Correlation ID
-
-**File:** `server/app/main.py`  
-**Status:** ✅ FIXED (2026-06-07)  
-**Fix Applied:** `request_id_middleware` generates UUID4 per request (or preserves client-provided X-Request-ID for distributed tracing). Added to error response headers and audit log entries.
-
----
-
-## Positive Security Controls
-
-The following security controls are **well-implemented** and should be maintained:
-
-### ✅ Authentication & Authorization
-- **bcrypt** for password hashing (with proper cost factor)
-- **JWT** with separate access + refresh tokens
-- **MFA/TOTP** with Fernet-encrypted secrets in PostgreSQL
-- **Account lockout** after failed attempts
-- **Role-based access** (owner vs admin)
-- **Constant-time comparison** (`hmac.compare_digest`) everywhere
-
-### ✅ Cryptography
-- **Ed25519** for license receipt signing (modern, fast, secure)
-- **Fernet (AES-128-CBC + HMAC-SHA256)** for encrypted storage
-- **HMAC-SHA256** with pepper for activation keys and fingerprints
-- **HMAC request signing** for E2E integrity
-- **Key generation script** with proper instructions
-
-### ✅ Database Security
-- **RLS (Row Level Security)** on all tables — deny all by default
-- **Audit log with hash chain** — tamper-evident logging
-- **SCRAM-SHA-256** password encryption in PostgreSQL
-- **SSL enforcement** for production connections
-- **No exposed DB/Redis ports** in production Docker
-
-### ✅ Web Security
-- **CSP nonce** for inline scripts (prevents XSS)
-- **CSRF double submit cookie** pattern
-- **TrustedHostMiddleware** with production validation
-- **HSTS** (conditional on HTTPS)
-- **Body size limit** (1MB) — prevents DoS
-- **XSS-safe DOM rendering** (textContent, not innerHTML)
-
-### ✅ Infrastructure
-- **Multi-stage Docker build** with non-root user
-- **PYTHONSAFEPATH, PYTHONDONTWRITEBYTECODE** — Python hardening
-- **Redis command renaming** (FLUSHDB, FLUSHALL, DEBUG, CONFIG disabled)
-- **Automated backups** with retention
-- **Release gate script** — automated security checks before deploy
-- **pip-audit** integration — dependency vulnerability scanning
-- **Proper .gitignore** — secrets, keys, env files excluded
-
-### ✅ Client Security
-- **Anti-debug** (multiple methods: sys.gettrace, module detection, timing, WinAPI)
-- **Anti-tamper** (DLL injection detection, code section integrity, IAT stub)
-- **Anti-screenshot** (SetWindowDisplayAffinity)
-- **Secure memory** (XOR obfuscation + multi-pass wipe)
-- **Encrypted local storage** (Fernet + DPAPI on Windows)
-- **Device fingerprinting** (CPU + disk + MAC + BIOS)
-- **Time manipulation detection** (network time + monotonic clock)
-- **Dev mode requires TWO env vars** — prevents accidental shipping
-
----
-
-## Recommended Security Roadmap
-
-### Phase 1: Critical Fixes (1-2 days, $0) — ✅ COMPLETE
-1. ✅ Generate and embed Ed25519 public key (CRIT-01) — Operational: key must be generated before build
-2. ✅ Move owner_email to env var (CRIT-02) — FIXED: empty default, production validation
-3. ✅ Fix SSL cert verification (CRIT-03) — FIXED: verify-full default, 'require' mode blocked
-4. ✅ Remove embedded storage secret (CRIT-04) — FIXED: AGREGAT_STORAGE_SECRET required in production
-5. ✅ Remove embedded fingerprint salt (CRIT-05) — FIXED: AGREGAT_CACHE_SECRET required in production
-6. ✅ Replace default passwords with env vars (HIGH-01) — FIXED: ${VAR:?ERROR} pattern
-
-### Phase 2: High Priority (2-3 days, $0) — ✅ COMPLETE
-7. ✅ Move MFA token to HttpOnly cookie (HIGH-02) — FIXED: removed JS variable, HttpOnly cookie
-8. ✅ Remove legacy XOR cipher support (HIGH-03) — FIXED: completely removed, Fernet-only
-9. ✅ Add rate limiting to activation endpoint (HIGH-06) — FIXED: 5 per 5 min per IP
-10. ✅ Strengthen self-integrity check (HIGH-07) — FIXED: SHA-256 hashes, build-time embedding
-11. ✅ Add account lockout notifications (HIGH-09) — FIXED: email + audit log on lockout
-12. ✅ Fix network time source (HIGH-05) — FIXED: multiple HTTPS sources with TLS verification
-13. ✅ Fix IAT hook detection stub (HIGH-04) — FIXED: full IAT walking implemented
-14. ✅ Fix string obfuscation (HIGH-08) — FIXED: HMAC-SHA256 per-string keystream
-15. ✅ Fix Docker health check TLS (HIGH-10) — FIXED: curl -fk https://
-
-### Phase 3: Medium Priority (1 week, $0) — ✅ COMPLETE
-16. ✅ Add missing security headers (MED-03 through MED-06) — FIXED: all headers added
-17. ✅ Enable TLS certificate pinning by default (MED-01) — FIXED: bundled cert fingerprint
-18. ✅ Add Cache-Control headers to API responses (LOW-03) — FIXED: no-store on all responses
-19. ✅ Configure database connection pool limits (MED-10) — FIXED: pool_size=20, max_overflow=10
-20. ✅ Add request ID middleware (LOW-08) — FIXED: UUID4 per request
-21. ✅ Security headers on error pages (MED-09) — FIXED: custom exception handlers
-22. ✅ Secure memory improvement (MED-07) — FIXED: CryptProtectMemory / AES-256-CTR
-23. ✅ Add X-Frame-Options header (LOW-04) — FIXED: DENY
-
-### Phase 4: Ongoing (continuous, $0-10/month) — Partially Complete
-24. ⏳ Set up CT monitoring (free) — Operational: use crt.sh
-25. ⏳ Configure log rotation — Operational: Docker log driver or RotatingFileHandler
-26. ⏳ Run pip-audit in CI/CD — Operational: add to pipeline
-27. ✅ Run release_gate.py before every deploy — Already in place
-28. ⏳ Consider bug bounty — Operational decision
-29. ✅ Fix security.txt references (LOW-01) — FIXED: commented out non-existent resources
-30. ✅ Anti-reverse engineering hardening — FIXED: Nuitka --obfuscate-string-literals + --obfuscate-filenames
-
----
-
-## Cost-Free Security Improvements
-
-All of these require **zero budget**:
-
-| Improvement | Effort | Impact |
+| ID | Опис | Статус |
 |---|---|---|
-| Generate Ed25519 keypair | 5 min | Critical |
-| Move secrets to env vars | 30 min | Critical |
-| Fix SSL verification | 15 min | Critical |
-| Add rate limiting to activation | 30 min | High |
-| Add security headers | 15 min | Medium |
-| Enable TLS pinning | 1 hour | Medium |
-| Add Cache-Control headers | 10 min | Low |
-| Configure pool limits | 5 min | Low |
-| Add request ID middleware | 30 min | Low |
-| Set up CT monitoring | 15 min | Low |
-| Run pip-audit weekly | 5 min/week | Ongoing |
-| Run release_gate.py | 1 min/deploy | Ongoing |
+| CRIT-02 | Owner email з .env | ✅ Підтверджено |
+| CRIT-03 | SSL CERT_REQUIRED | ✅ Підтверджено (database.py) |
+| CRIT-04 | AGREGAT_STORAGE_SECRET required | ✅ Підтверджено (encrypted_storage.py) |
+| CRIT-05 | AGREGAT_CACHE_SECRET required | ✅ Підтверджено (license_client.py) |
+| HIGH-01 | ${VAR:?ERROR} в docker-compose | ✅ Підтверджено |
+| HIGH-02 | MFA token в HttpOnly cookie | ✅ Підтверджено (login.html) |
+| HIGH-06 | Rate limiting на activation | ✅ Підтверджено (3/5min) |
+| HIGH-09 | Account lockout notification | ✅ Підтверджено (webhook_alerts) |
+| HIGH-10 | HTTPS health check | ✅ Підтверджено (Dockerfile) |
+| MED-04 | Referrer-Policy header | ✅ Підтверджено |
+| MED-05 | Permissions-Policy header | ✅ Підтверджено |
+| MED-06 | COOP/COEP headers | ✅ Підтверджено |
+| MED-07 | Secure memory DPAPI | ✅ Підтверджено (encrypted_storage.py) |
+| MED-09 | Security headers on errors | ✅ Підтверджено (main.py) |
+| MED-10 | DB pool limits | ✅ Підтверджено (pool_size=20) |
+| LOW-03 | Cache-Control headers | ✅ Підтверджено |
+| LOW-04 | X-Frame-Options | ✅ Підтверджено |
+| LOW-08 | Request ID middleware | ✅ Підтверджено |
 
 ---
 
-## Testing Recommendations
+## ✅ Позитивні контролі безпеки
 
-### Free Testing ($0)
-1. **OWASP ZAP** — Automated DAST scan: `docker run -t ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t https://your-domain`
-2. **pip-audit** — Dependency scanning: `pip-audit -r server/requirements.txt`
-3. **Bandit** — Python SAST: `bandit -r server/app/ engine/security/`
-4. **Safety** — Alternative dependency checker: `safety check -r server/requirements.txt`
-5. **Nuclei** — Template-based scanning: `nuclei -u https://your-domain`
-6. **Testssl.sh** — TLS configuration: `./testssl.sh https://your-domain`
+Проєкт має **відомі сильні сторони**, які потрібно підтримувати:
 
-### Low-Cost Testing ($5-20)
-1. **HackerOne Community Edition** — Free bug bounty platform
-2. **DigitalOcean droplet** ($5/month) — Isolated testing environment
-3. **Burp Suite Community** — Free manual testing proxy
-4. **SSL Labs** — Free TLS grading: https://www.ssllabs.com/ssltest/
+### 🔐 Автентифікація та Авторизація
+- ✅ **bcrypt** для паролів (з proper cost factor)
+- ✅ **JWT** з окремими access + refresh токенами
+- ✅ **MFA/TOTP** з Fernet-encrypted secrets в PostgreSQL
+- ✅ **Account lockout** (потребує міграції в БД — NEW-CRIT-01)
+- ✅ **Role-based access** (owner > admin)
+- ✅ **Constant-time comparison** (`hmac.compare_digest`) для CSRF, fingerprint
+- ✅ **Admin session bound to IP+UA hash** (anomaly detection)
 
-### Recommended Test Cases
+### 🔑 Криптографія
+- ✅ **Ed25519** для підписів ліцензій (сучасний, швидкий, безпечний)
+- ✅ **Fernet (AES-128-CBC + HMAC-SHA256)** для encrypted storage
+- ✅ **HMAC-SHA256** з pepper для activation keys та fingerprints
+- ✅ **HMAC request signing** для E2E integrity
+- ✅ **Private key encryption** at rest (AGREGAT_SIGNING_KEY_PASSWORD)
+
+### 🗄️ База даних
+- ✅ **RLS** на всіх таблицях — deny all за замовчуванням
+- ✅ **Audit log з hash chain** — tamper-evident logging
+- ✅ **SCRAM-SHA-256** password encryption в PostgreSQL
+- ✅ **SSL enforcement** для production з'єднань
+- ✅ **No exposed DB/Redis ports** в production Docker
+
+### 🌐 Web Security
+- ✅ **CSP nonce** для inline scripts (prevents XSS)
+- ✅ **CSRF double-submit cookie** pattern
+- ✅ **TrustedHostMiddleware** з production validation
+- ✅ **HSTS** з includeSubDomains; preload
+- ✅ **Body size limit** (1MB API, 5MB admin)
+- ✅ **XSS-safe DOM rendering** (textContent, не innerHTML)
+- ✅ **Comprehensive security headers** (CSP, COOP, COEP, Permissions-Policy, Referrer-Policy, X-Frame-Options, X-Content-Type-Options, Cache-Control)
+- ✅ **Error pages with security headers** (custom exception handlers)
+- ✅ **CORS** з explicit origins (no wildcards in production)
+
+### 🐳 Інфраструктура
+- ✅ **Multi-stage Docker build** з non-root user
+- ✅ **PYTHONSAFEPATH, PYTHONDONTWRITEBYTECODE** — Python hardening
+- ✅ **Redis command renaming** (FLUSHDB, FLUSHALL, DEBUG disabled)
+- ✅ **Automated backups** з retention
+- ✅ **Release gate script** — automated security checks before deploy
+- ✅ **Proper .gitignore** — secrets, keys, env files excluded
+
+### 💻 Client Security
+- ✅ **Anti-debug** (sys.gettrace, module detection, timing, WinAPI)
+- ✅ **Anti-tamper** (IntegrityGuard з bytecode hashing)
+- ✅ **Anti-screenshot** (SetWindowDisplayAffinity)
+- ✅ **Secure memory** (DPAPI на Windows)
+- ✅ **Encrypted local storage** (Fernet + DPAPI)
+- ✅ **Device fingerprinting** (CPU + disk + MAC + BIOS + motherboard)
+- ✅ **Time manipulation detection** (network time + monotonic clock)
+- ✅ **Dev mode requires TWO env vars** — prevents accidental shipping
+- ✅ **HTTPS enforcement** — plaintext HTTP rejected in production
+- ✅ **Server-side receipt verification** — fail-closed on invalid signature
+
+---
+
+## 🗺️ Roadmap Виправлення (Грааль Безпеки)
+
+### Phase 1: Critical (4-6 годин, $0) — 🔴 НЕГАЙНО
+
+| # | ID | Виправлення | Складність |
+|---|---|---|---|
+| 1 | NEW-CRIT-01 | Міграція account lockout у PostgreSQL | Середня |
+| 2 | NEW-CRIT-02 | Constant-time TOTP verification | Тривіальна |
+| 3 | NEW-HIGH-01 | Видалити legacy SHA-256 password path | Тривіальна |
+| 4 | NEW-HIGH-02 | Додати `require_admin` до dashboard route | Тривіальна |
+
+### Phase 2: High (4-6 годин, $0) — 🟠 Цього тижня
+
+| # | ID | Виправлення | Складність |
+|---|---|---|---|
+| 5 | NEW-HIGH-03 | Lua script для atomic Redis rate limiting | Середня |
+| 6 | NEW-HIGH-04 | Уніфікувати login error timing/messages | Середня |
+| 7 | NEW-MED-01 | Видалити hardcoded DB credentials з config | Тривіальна |
+| 8 | NEW-MED-02 | Прибрати DB details з логів | Тривіальна |
+| 9 | NEW-MED-03 | Додати CSRF protection до MFA setup/enable | Тривіальна |
+
+### Phase 3: Medium (2-3 години, $0) — 🟡 Наступний sprint
+
+| # | ID | Виправлення | Складність |
+|---|---|---|---|
+| 10 | NEW-MED-04 | Реалізувати verify_checkpoints або видалити | Тривіальна |
+| 11 | NEW-LOW-01 | Перенести pytest у dev requirements | Тривіальна |
+| 12 | NEW-LOW-02 | Оновити string obfuscation в anti_debug.py | Тривіальна |
+| 13 | HIGH-07 rev | Видалити weak integrity fallback | Тривіальна |
+| 14 | MED-01 rev | Реалізувати actual TLS cert pinning verification | Середня |
+
+### Phase 4: Operational (безперервно, $0-10/місяць)
+
+| # | Дія | Вартість |
+|---|---|---|
+| 15 | Запустити generate_signing_key.py та embed public key | $0 |
+| 16 | Налаштувати CT monitoring (crt.sh) | $0 |
+| 17 | Налаштувати log rotation (Docker log driver) | $0 |
+| 18 | Додати pip-audit у CI/CD | $0 |
+| 19 | Запускати release_gate.py перед кожним deploy | $0 |
+| 20 | OWASP ZAP scan перед релізом | $0 |
+| 21 | Bandit SAST scan | $0 |
+
+---
+
+## 🧪 Рекомендації з тестування безпеки
+
+### Безкоштовні інструменти ($0)
+
 ```bash
-# 1. Test rate limiting
-for i in {1..20}; do
-    curl -X POST https://api.agregat.app/api/v1/activate \
-         -H "Content-Type: application/json" \
-         -d '{"email":"test@test.com","activation_key":"invalid"}' \
-         -w "%{http_code}\n" -s -o /dev/null
+# 1. SAST — Статичний аналіз
+pip install bandit
+bandit -r server/app/ engine/security/ -ll
+
+# 2. Dependency scanning
+pip install pip-audit
+pip-audit -r server/requirements.txt
+
+# 3. DAST — Dynamic testing (потрібен running server)
+docker run -t ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+  -t https://your-domain -r zap_report.html
+
+# 4. TLS testing
+git clone https://github.com/drwetter/testssl.sh.git
+./testssl.sh/testssl.sh https://your-domain
+
+# 5. Nuclei — Template-based scanning
+docker run projectdiscovery/nuclei:latest -u https://your-domain
+
+# 6. SSL Labs — Free online grading
+# https://www.ssllabs.com/ssltest/
+```
+
+### Тест-кейси для ручного тестування
+
+```bash
+# 1. Test rate limiting на activation
+for i in $(seq 1 10); do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -X POST http://localhost:8000/api/v1/auth/activate \
+    -H "Content-Type: application/json" \
+    -d '{"email":"test@test.com","activation_key":"invalid","device_fingerprint":"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"}'
 done
+# Очікуємо: перші 3 → 400/403, наступні → 429
 
-# 2. Test CSP
-curl -I https://admin.agregat.app/admin/login | grep Content-Security-Policy
+# 2. Test account lockout
+for i in $(seq 1 7); do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -X POST http://localhost:8000/api/admin/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"email":"owner@agregat.io","password":"wrong'$i'"}'
+done
+# Очікуємо: перші 5 → 401, 6-7 → 401 з "account_locked"
 
-# 3. Test HSTS
-curl -I https://api.agregat.app/health | grep Strict-Transport
+# 3. Test security headers
+curl -I https://your-domain/health | grep -E "(Strict-Transport|Content-Security|X-Frame|X-Content-Type|Referrer-Policy|Permissions-Policy|Cross-Origin)"
 
-# 4. Test CSRF
-curl -X POST https://admin.agregat.app/admin/licenses \
-     -H "Content-Type: application/json" \
-     -d '{"email":"attacker@evil.com","tier":"pro","days":365}' \
-     -b "admin_session=stolen_token" \
-     # Should fail without X-CSRF-Token header
+# 4. Test CSRF protection
+curl -X POST http://localhost:8000/api/admin/auth/logout \
+  -H "Content-Type: application/json" \
+  -b "admin_session=stolen_token"
+# Очікуємо: 403 (CSRF token missing)
 
-# 5. Test SQL injection
-curl -X POST https://api.agregat.app/api/v1/activate \
-     -H "Content-Type: application/json" \
-     -d '{"email":"test@test.com'\'' OR 1=1--","activation_key":"test"}'
-
-# 6. Test XSS (if any user input is reflected)
-curl -X POST https://api.agregat.app/api/v1/activate \
-     -H "Content-Type: application/json" \
-     -d '{"email":"<script>alert(1)</script>","activation_key":"test"}'
+# 5. Test timing attack on TOTP (verify fix)
+# Before fix: varying response times for partial matches
+# After fix: constant response times for all TOTP codes
+for code in 000000 100000 120000 123456; do
+  time curl -s -o /dev/null \
+    -X POST http://localhost:8000/api/admin/auth/mfa/verify \
+    -H "Content-Type: application/json" \
+    -d "{\"totp_code\":\"$code\"}" \
+    -b "admin_mfa_token=test"
+done
 ```
 
 ---
 
-## Appendix: Files Analyzed
+## 📊 Фінальний Scorecard
 
-### Server (32 files)
-- `server/app/config.py` — Configuration & validation
-- `server/app/database.py` — Database connection & SSL
-- `server/app/main.py` — FastAPI app, middleware, security headers
+| Категорія | Score | Max | Примітка |
+|---|---|---|---|
+| **Authentication** | 8/10 | 10 | Мінус за in-memory lockout та legacy SHA-256 |
+| **Authorization** | 8/10 | 10 | Мінус за dashboard без server-side auth |
+| **Cryptography** | 9/10 | 10 | Мінус за TOTP timing |
+| **Input Validation** | 9/10 | 10 | Хороша Pydantic валідація |
+| **Output Encoding** | 9/10 | 10 | XSS-safe templates, CSP |
+| **Infrastructure** | 9/10 | 10 | Мінус за test deps в production |
+| **Client Protection** | 8/10 | 10 | Мінус за cert pinning не реалізований, weak checkpoints |
+| **Audit/Logging** | 9/10 | 10 | Мінус за DB URL leakage в логах |
+| **Session Management** | 9/10 | 10 | Мінус за Redis race condition |
+| **Overall** | **8.6/10** | 10 | Після всіх виправлень → **9.5/10** |
+
+---
+
+## 📎 Додаток: Файли проаналізовані (повний список)
+
+### Сервер (25+ файлів)
+- `server/app/config.py` — Конфігурація та валідація
+- `server/app/database.py` — DB з'єднання та SSL
+- `server/app/main.py` — FastAPI, middleware, security headers
 - `server/app/api/deps.py` — Auth dependencies, CSRF, rate limiting
-- `server/app/api/admin/auth.py` — Admin login, MFA, logout
-- `server/app/api/admin/users.py` — User management
-- `server/app/api/admin/devices.py` — Device management
-- `server/app/api/admin/sessions.py` — Session management
-- `server/app/api/admin/licenses.py` — License management
+- `server/app/api/admin/auth.py` — Admin login, MFA
 - `server/app/api/v1/auth.py` — Activation, refresh, logout
-- `server/app/api/v1/heartbeat.py` — Heartbeat with integrity attestation
-- `server/app/api/v1/strategies.py` — Strategy registration
 - `server/app/services/auth_service.py` — Auth business logic
-- `server/app/services/license_service.py` — License business logic
+- `server/app/services/license_service.py` — License logic
 - `server/app/security/jwt.py` — JWT generation/verification
 - `server/app/security/signing.py` — Ed25519 signing
-- `server/app/security/fingerprint.py` — Fingerprint hashing
+- `server/app/security/fingerprint.py` — Fingerprint validation
+- `server/app/security/totp.py` — TOTP implementation
+- `server/app/security/rate_limit.py` — Rate limiting
 - `server/app/security/nonce_middleware.py` — CSP nonce
-- `server/app/security/rate_limit.py` — Rate limiter
-- `server/app/security/totp.py` — TOTP
-- `server/app/security/webhook_alerts.py` — Security alerts
+- `server/app/security/webhook_alerts.py` — Alert system
 - `server/app/schemas/auth.py` — Pydantic schemas
-- `server/app/models/__init__.py` — Model registry
-- `server/app/models/user.py` — User model
-- `server/app/models/session.py` — Session model
-- `server/app/models/admin_session.py` — Admin session model
-- `server/app/models/mfa_token.py` — MFA token model
+- `server/app/templates/login.html` — Login template
+- `server/app/templates/dashboard.html` — Dashboard template
 - `server/app/templates/base.html` — Base template
-- `server/app/templates/login.html` — Login page
-- `server/app/templates/dashboard.html` — Dashboard
-- `server/Dockerfile` — Docker build
-- `server/docker-compose.prod.yml` — Production orchestration
+- `server/migrations/init.sql` — DB schema + RLS
+- `server/Dockerfile` — Container build
+- `server/docker-compose.prod.yml` — Production compose
+- `server/requirements.txt` — Dependencies
+- `server/.gitignore` — Ignored files
+- `server/app/static/.well-known/security.txt` — Security policy
 
-### Client (8 files)
-- `engine/security/license_client.py` — Online license verification
-- `engine/security/license_manager.py` — Offline license checks
+### Engine (6 файлів)
+- `engine/security/license_client.py` — Desktop licensing
+- `engine/security/encrypted_storage.py` — Local encrypted storage
 - `engine/security/anti_debug.py` — Anti-debugging
 - `engine/security/anti_tamper.py` — Anti-tampering
 - `engine/security/secure_memory.py` — Secure memory
-- `engine/security/encrypted_storage.py` — Encrypted storage
-- `engine/security/request_signing.py` — HMAC request signing
-- `gui/dialogs/activation_dialog.py` — Activation UI
+- `engine/security/license_manager.py` — License management
 
-### Infrastructure (6 files)
-- `server/requirements.txt` — Dependencies
-- `server/migrations/init.sql` — Database schema, RLS, audit triggers
-- `server/migrations/00_ssl_setup.sh` — SSL cert generation
-- `server/scripts/security_audit.sh` — Dependency audit
-- `server/scripts/release_gate.py` — Release security gate
-- `server/scripts/generate_signing_key.py` — Key generation
-
-### Configuration (3 files)
-- `.gitignore` — Root gitignore
-- `server/.gitignore` — Server gitignore
-- `server/app/static/.well-known/security.txt` — Security policy
-
-**Total: 49 files analyzed**
+### Root
+- `.gitignore` — Root ignored files
+- `app.py` — Desktop entry point
+- `build_final_windows.cmd` — Windows build
+- `build_final_macos.sh` — macOS build
 
 ---
 
-*Report generated: 2026-06-07*  
-*Next review recommended: After Phase 1 fixes are deployed*
+*Аудит виконано з позиції offensive security — як хакер думав, як інженер виправляв.*  
+*Мета: не просто "пройти аудит", а досягти Грааль безпеки — де кожен вектор атаки має мінімум 2 рівні захисту (defense-in-depth).*

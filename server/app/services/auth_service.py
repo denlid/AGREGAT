@@ -1,5 +1,4 @@
-"""
-AGREGAT Server — Auth Service
+""" AGREGAT Server — Auth Service
 
 Authentication business logic: refresh tokens, heartbeat, logout,
 session validation, and admin authentication.
@@ -42,11 +41,13 @@ from app.services.audit import log_event
 # Lock admin accounts after N consecutive failed login attempts.
 # Lockout duration: 15 minutes (configurable via env).
 
-MAX_FAILED_ATTEMPTS = 5          # Lock after 5 failed attempts
-LOCKOUT_DURATION_SECONDS = 900   # 15 minutes lockout
+MAX_FAILED_ATTEMPTS = 5  # Lock after 5 failed attempts
+LOCKOUT_DURATION_SECONDS = 900  # 15 minutes lockout
 
 # In-memory lockout store: {email: {"attempts": int, "locked_until": float}}
-# NOTE: For multi-instance deployment, migrate to PostgreSQL or Redis.
+# NEW-CRIT-01: NOTE — in-memory store is lost on restart and not shared
+# across workers. For multi-instance deployment, migrate to PostgreSQL or Redis.
+# See SECURITY_AUDIT.md NEW-CRIT-01 for migration plan.
 _login_attempts: dict[str, dict] = {}
 
 
@@ -113,7 +114,7 @@ def validate_password_strength(password: str) -> tuple[bool, str]:
     """
     P2-3: Validate password meets security requirements.
     Returns (is_valid, error_message).
-    
+
     Requirements:
     - Minimum 12 characters
     - At least one uppercase letter
@@ -124,33 +125,33 @@ def validate_password_strength(password: str) -> tuple[bool, str]:
     """
     if len(password) < PASSWORD_MIN_LENGTH:
         return False, f"Password must be at least {PASSWORD_MIN_LENGTH} characters"
-    
+
     if PASSWORD_REQUIRE_UPPER and not re.search(r"[A-Z]", password):
         return False, "Password must contain at least one uppercase letter"
-    
+
     if PASSWORD_REQUIRE_LOWER and not re.search(r"[a-z]", password):
         return False, "Password must contain at least one lowercase letter"
-    
+
     if PASSWORD_REQUIRE_DIGIT and not re.search(r"\d", password):
         return False, "Password must contain at least one digit"
-    
+
     if PASSWORD_REQUIRE_SPECIAL and not re.search(PASSWORD_SPECIAL_CHARS, password):
         return False, "Password must contain at least one special character"
-    
+
     # Check against common passwords (case-insensitive)
     if password.lower() in _COMMON_PASSWORDS:
         return False, "Password is too common and easily guessable"
-    
+
     # Check for sequential characters (abc, 123, etc.)
     sequential = False
     for i in range(len(password) - 2):
         if (ord(password[i+1]) == ord(password[i]) + 1 and
-            ord(password[i+2]) == ord(password[i]) + 2):
+                ord(password[i+2]) == ord(password[i]) + 2):
             sequential = True
             break
     if sequential:
         return False, "Password contains sequential characters"
-    
+
     return True, "ok"
 
 
@@ -159,10 +160,7 @@ async def refresh_session(
     refresh_token: str,
     ip_hash: Optional[str] = None,
 ) -> dict:
-    """
-    Refresh access token using refresh token.
-    Returns new access token or raises on invalid/expired session.
-    """
+    """Refresh access token using refresh token."""
     token_hash = hash_refresh_token(refresh_token)
 
     stmt = select(Session).where(
@@ -210,10 +208,7 @@ async def heartbeat(
     integrity_hash: Optional[str] = None,
     current_strategy_hash: Optional[str] = None,
 ) -> dict:
-    """
-    Process client heartbeat.
-    Returns status + any server commands (revoke, update, etc.)
-    """
+    """Process client heartbeat."""
     stmt = select(Session).where(
         and_(
             Session.id == session_id,
@@ -278,7 +273,6 @@ async def heartbeat(
     if integrity_hash:
         previous_hash = session.client_metadata.get("last_integrity_hash")
         if previous_hash and previous_hash != integrity_hash:
-            # Integrity hash changed — possible tampering
             session.revoked_at = datetime.now(timezone.utc)
             session.revoke_reason = "integrity_check_failed"
             await log_event(
@@ -358,20 +352,25 @@ def _decrypt_fernet(encrypted_data: str, encryption_key: str) -> Optional[str]:
 
 def _verify_password_bcrypt(password: str, stored_hash: str) -> bool:
     """
-    Verify password using bcrypt.
-    Handles both bcrypt hashes ($2b$...) and legacy SHA-256 hashes.
+    Verify password using bcrypt ONLY.
+
+    NEW-HIGH-01 FIX: Legacy SHA-256 password path removed.
+    SHA-256 with a global salt is cryptographically weak — vulnerable to
+    rainbow tables and lacks per-user salts. If a legacy hash is encountered,
+    raises ValueError to force password reset.
     """
     if stored_hash.startswith("$2b$") or stored_hash.startswith("$2a$"):
         # bcrypt hash — use proper verification
         return bcrypt.checkpw(password.encode(), stored_hash.encode())
-    else:
-        # Legacy SHA-256 hash — for migration purposes only
-        # This should be removed after all accounts are migrated
-        from app.config import settings
-        legacy_hash = hashlib.sha256(
-            (password + settings.owner_password_salt).encode()
-        ).hexdigest()
-        return hmac.compare_digest(legacy_hash, stored_hash)
+
+    # REJECT legacy hashes — force password reset
+    # Legacy SHA-256 with global salt is insecure (no per-user salt)
+    import logging
+    logging.getLogger(__name__).error(
+        "NEW-HIGH-01: Legacy SHA-256 password hash rejected for user. "
+        "Password reset required. Legacy hashes are rainbow-table vulnerable."
+    )
+    raise ValueError("legacy_password_hash: password reset required")
 
 
 async def admin_login(
@@ -383,8 +382,10 @@ async def admin_login(
     """
     Admin login: verify password using bcrypt, check MFA requirement.
     Returns session_token for MFA verification or direct auth.
-    
+
     Security: Uses bcrypt.checkpw() — consistent with create_owner.py.
+    NEW-HIGH-01: Legacy SHA-256 hashes now raise ValueError, triggering
+    'invalid_credentials' response with audit log for forced password reset.
     """
     from app.config import settings
 
@@ -403,28 +404,44 @@ async def admin_login(
 
     if not user or not user.password_hash:
         # H-04: Constant-time dummy comparison with VALID bcrypt hash
-        # This is a real bcrypt hash of "dummy_password_for_timing" with cost 14
-        # Generated: bcrypt.hashpw(b"dummy_password_for_timing", bcrypt.gensalt(rounds=14))
         _DUMMY_BCRYPT = b"$2b$14$Kj5K8mNp0qR3sT6uV9wXyO1aB2cD3eF4gH5iJ6kL7mN8oP9qR0sTu"
         try:
             bcrypt.checkpw(b"dummy_password_for_timing", _DUMMY_BCRYPT)
         except Exception:
-            pass  # Even if bcrypt fails, we still raise — but timing is equalized
-        
-        # P2-2: Record failed attempt even for non-existent users (prevent enumeration)
+            pass
+
+        # P2-2: Record failed attempt even for non-existent users
         _record_failed_attempt(email)
         raise ValueError("invalid_credentials")
 
     # Verify password using bcrypt (consistent with create_owner.py)
-    if not _verify_password_bcrypt(password, user.password_hash):
+    try:
+        password_ok = _verify_password_bcrypt(password, user.password_hash)
+    except ValueError as e:
+        # NEW-HIGH-01: Legacy SHA-256 hash — force password reset
+        if "legacy_password_hash" in str(e):
+            await log_event(
+                db,
+                action="admin.legacy_hash_detected",
+                target_type="user",
+                target_id=str(user.id),
+                ip_hash=ip_hash,
+                payload={"email": email, "reason": "legacy_sha256_hash_requires_reset"},
+            )
+            # Don't reveal legacy hash to attacker — treat as invalid_credentials
+            # but admin will be contacted to reset their password
+            raise ValueError("invalid_credentials")
+        raise
+
+    if not password_ok:
         # P2-2: Record failed attempt
         attempts = _record_failed_attempt(email)
-        
+
         await log_event(
             db,
             action="admin.login_failed",
             target_type="user",
-            target_id=str(user.id) if user else None,
+            target_id=str(user.id),
             ip_hash=ip_hash,
             payload={
                 "email": email,
@@ -433,7 +450,7 @@ async def admin_login(
                 "locked": attempts >= MAX_FAILED_ATTEMPTS,
             },
         )
-        
+
         # P2-2: Alert on account lockout
         if attempts >= MAX_FAILED_ATTEMPTS:
             from app.security.webhook_alerts import alert_brute_force_detected
@@ -442,7 +459,7 @@ async def admin_login(
                 ip_hash=ip_hash or "unknown",
                 attempts=attempts,
             )
-        
+
         raise ValueError("invalid_credentials")
 
     # P2-2: Successful login — reset failed attempts
@@ -450,7 +467,6 @@ async def admin_login(
 
     # Check MFA
     if user.totp_enabled and user.totp_secret:
-        # Generate temporary session token for MFA verification
         mfa_token = generate_refresh_token()
         return {
             "status": "mfa_required",
@@ -479,9 +495,8 @@ async def admin_verify_mfa(
 ) -> dict:
     """
     Verify MFA code and return admin session token.
-    
+
     Security: Decrypts TOTP secret and backup codes from Fernet before verification.
-    Backup codes are stored as encrypted values — each one is decrypted and compared.
     """
     from app.config import settings
 
@@ -501,7 +516,6 @@ async def admin_verify_mfa(
     # Decrypt TOTP secret before verification
     decrypted_totp_secret = None
     if user.totp_secret:
-        # Check if it's Fernet-encrypted (starts with gAAAAA)
         if user.totp_secret.startswith("gAAAAA"):
             decrypted_totp_secret = _decrypt_fernet(user.totp_secret, settings.encryption_key)
         else:
@@ -521,48 +535,39 @@ async def admin_verify_mfa(
             )
             raise ValueError("invalid_totp")
     elif backup_code and user.backup_codes:
-        # H-03: Backup codes stored as PostgreSQL ARRAY(Text) of Fernet-encrypted values.
-        # SQLAlchemy automatically converts ARRAY → Python list.
-        # Each element is a Fernet-encrypted code that must be decrypted for comparison.
         is_valid = False
         remaining_codes = []
-        
+
         # Handle both ARRAY (Python list) and legacy JSON string formats
         if isinstance(user.backup_codes, str):
-            # Legacy: JSON string — parse it
             try:
                 encrypted_codes = json.loads(user.backup_codes)
             except json.JSONDecodeError:
                 encrypted_codes = []
         elif isinstance(user.backup_codes, list):
-            # H-03: PostgreSQL ARRAY — already a Python list
             encrypted_codes = user.backup_codes
         else:
             encrypted_codes = []
-        
+
         for enc_code in encrypted_codes:
             if not isinstance(enc_code, str):
                 continue
             if enc_code.startswith("gAAAAA"):
-                # Fernet-encrypted code — decrypt and compare
+                # Fernet-encrypted code — decrypt and compare (constant-time)
                 decrypted = _decrypt_fernet(enc_code, settings.encryption_key)
-                if decrypted and decrypted.upper() == backup_code.upper():
+                if decrypted and hmac.compare_digest(decrypted.upper(), backup_code.upper()):
                     is_valid = True
-                    # Don't add used code to remaining (consume it)
                 else:
                     remaining_codes.append(enc_code)
             else:
-                # P3-6: Legacy plaintext backup code — INSECURE.
-                # Backup codes should always be encrypted at rest with Fernet.
-                # Plaintext codes in the DB can be stolen if the database is compromised.
+                # P3-6: Legacy plaintext backup code — INSECURE
                 import logging as _log_backup
                 _log_backup.getLogger(__name__).warning(
                     "P3-6: Plaintext backup code found for user %s. "
-                    "Backup codes should be Fernet-encrypted. "
                     "Regenerate MFA for this user to encrypt backup codes.",
                     email,
                 )
-                if enc_code.upper() == backup_code.upper():
+                if hmac.compare_digest(enc_code.upper(), backup_code.upper()):
                     is_valid = True
                 else:
                     remaining_codes.append(enc_code)
@@ -577,9 +582,8 @@ async def admin_verify_mfa(
                 payload={"email": email, "method": "backup_code"},
             )
             raise ValueError("invalid_backup_code")
-        
+
         # H-03: Store as Python list (SQLAlchemy maps to PostgreSQL ARRAY)
-        # NOT json.dumps — that would store a string in an ARRAY column
         user.backup_codes = remaining_codes if remaining_codes else None
     else:
         raise ValueError("mfa_required")

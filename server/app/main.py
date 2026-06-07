@@ -15,9 +15,10 @@ import secrets as _secrets
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import select, and_
 
 from app.config import settings
 from app.database import init_db, close_db, get_db, async_session_factory
@@ -41,6 +42,7 @@ templates = Jinja2Templates(directory=str(templates_path))
 
 # ─── Lifespan ──────────────────────────────────────────────────────────
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -49,7 +51,10 @@ async def lifespan(app: FastAPI):
     """
     logger.info("AGREGAT Server starting up...")
     logger.info(f"Debug mode: {settings.debug}")
-    logger.info(f"Database: {settings.database_url.split('@')[-1] if '@' in settings.database_url else 'configured'}")
+    # NEW-MED-02 FIX: Do NOT log database URL — even the host portion.
+    # Previously: settings.database_url.split('@')[-1] leaked DB host/region.
+    # Now: only log that DB is configured, without any connection details.
+    logger.info("Database: configured")
 
     # MH-01: Only auto-create tables in debug mode.
     # Production MUST use Alembic migrations (alembic upgrade head).
@@ -73,6 +78,7 @@ async def lifespan(app: FastAPI):
     await close_db()
     logger.info("Database connection closed")
 
+
 # ─── FastAPI App ───────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -86,11 +92,13 @@ app = FastAPI(
 
 # ─── Middleware ────────────────────────────────────────────────────────
 
+
 def _parse_comma_list(value: str) -> list[str]:
     """Parse comma-separated string into list, stripping whitespace."""
     if not value or not value.strip():
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
 
 # C-03: Trusted Host — prevent host header injection / DNS rebinding
 # Production: MUST set ALLOWED_HOSTS to actual domains (no wildcards)
@@ -125,7 +133,11 @@ app.add_middleware(
     allow_origins=_allowed_origins_list,
     allow_credentials=bool(_allowed_origins_list),  # P0-2: Only if origins set
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "X-CSRF-Token", "X-Agreqat-Signature", "X-Agreqat-Timestamp", "X-Agreqat-Nonce"],
+    allow_headers=[
+        "Authorization", "Content-Type", "X-Admin-Token",
+        "X-CSRF-Token", "X-Agreqat-Signature",
+        "X-Agreqat-Timestamp", "X-Agreqat-Nonce",
+    ],
     expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
     max_age=600,  # Cache preflight for 10 minutes
 )
@@ -135,8 +147,8 @@ if _allowed_origins_list:
 # ─── P2-6: Request Body Size Limit ────────────────────────────────────
 # Prevent denial-of-service via massive request bodies.
 # Default: 1MB for API, 10MB for file uploads (if any).
-MAX_BODY_SIZE_API = 1 * 1024 * 1024       # 1 MB
-MAX_BODY_SIZE_ADMIN = 5 * 1024 * 1024     # 5 MB (admin panel may have larger forms)
+MAX_BODY_SIZE_API = 1 * 1024 * 1024  # 1 MB
+MAX_BODY_SIZE_ADMIN = 5 * 1024 * 1024  # 5 MB (admin panel may have larger forms)
 
 
 @app.middleware("http")
@@ -144,7 +156,7 @@ async def body_size_limit_middleware(request: Request, call_next):
     """
     P2-6: Reject requests with bodies exceeding size limits.
     Prevents DoS via massive payloads (e.g., 1GB JSON body).
-    
+
     Limits:
     - API endpoints: 1 MB
     - Admin endpoints: 5 MB
@@ -153,17 +165,17 @@ async def body_size_limit_middleware(request: Request, call_next):
     # Skip for GET/HEAD/OPTIONS (no body)
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return await call_next(request)
-    
+
     # Skip for health/root (no body expected)
     if request.url.path in ("/health", "/"):
         return await call_next(request)
-    
+
     # Determine limit based on path
     if request.url.path.startswith("/api/admin"):
         limit = MAX_BODY_SIZE_ADMIN
     else:
         limit = MAX_BODY_SIZE_API
-    
+
     # Check Content-Length header first (fast reject)
     content_length = request.headers.get("content-length")
     if content_length:
@@ -175,7 +187,7 @@ async def body_size_limit_middleware(request: Request, call_next):
                 )
         except ValueError:
             pass  # Invalid content-length — let body read handle it
-    
+
     return await call_next(request)
 
 
@@ -205,9 +217,9 @@ async def csp_nonce_middleware(request: Request, call_next):
     """
     P1-7: Generate a per-request CSP nonce for inline scripts.
     The nonce is attached to request.state and used in CSP header.
-    
+
     Templates must add nonce to inline scripts:
-      <script nonce="{{ request.state.csp_nonce }}">...</script>
+    <script nonce="{{ request.state.csp_nonce }}">...</script>
     """
     # Generate cryptographically secure nonce (16 bytes, base64)
     request.state.csp_nonce = _secrets.token_urlsafe(16)
@@ -220,23 +232,23 @@ async def csp_nonce_middleware(request: Request, call_next):
 async def security_headers_middleware(request: Request, call_next):
     """
     Add comprehensive security headers to all responses.
-    
+
     P0-5: Content-Security-Policy to prevent XSS
     P1-7: CSP nonce for inline scripts (replaces unsafe-inline)
     P3-1: HSTS with preload for transport security
     Additional: Permissions-Policy, COOP, COEP for isolation
     """
     response = await call_next(request)
-    
+
     # ─── Content Security Policy (P0-5 + P1-7) ──────────────────────
     # P1-7: Use per-request nonce instead of 'unsafe-inline'
     csp_nonce = getattr(request.state, "csp_nonce", None)
     nonce_directive = f"'nonce-{csp_nonce}'" if csp_nonce else "'unsafe-inline'"
-    
+
     csp_directives = [
         "default-src 'self'",
         f"script-src 'self' {nonce_directive}",  # P1-7: nonce-based
-        f"style-src 'self' {nonce_directive}",    # P1-7: nonce-based
+        f"style-src 'self' {nonce_directive}",  # P1-7: nonce-based
         "img-src 'self' data:",
         "font-src 'self'",
         "connect-src 'self'",
@@ -247,16 +259,16 @@ async def security_headers_middleware(request: Request, call_next):
         "upgrade-insecure-requests",
     ]
     response.headers["Content-Security-Policy"] = "; ".join(csp_directives)
-    
+
     # ─── Anti-MIME-Sniffing ─────────────────────────────────────────
     response.headers["X-Content-Type-Options"] = "nosniff"
-    
+
     # ─── Clickjacking Protection ────────────────────────────────────
     response.headers["X-Frame-Options"] = "DENY"
-    
+
     # ─── XSS Filter (legacy browsers) ───────────────────────────────
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    
+
     # ─── HSTS (P3-1) ────────────────────────────────────────────────
     # Only when HTTPS is guaranteed (production behind TLS proxy)
     is_https = (
@@ -267,14 +279,14 @@ async def security_headers_middleware(request: Request, call_next):
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains; preload"
         )
-    
+
     # ─── Referrer Policy ────────────────────────────────────────────
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    
+
     # ─── Cache Control (prevent sensitive data caching) ─────────────
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
     response.headers["Pragma"] = "no-cache"
-    
+
     # ─── Permissions Policy (P0-5) ──────────────────────────────────
     # Disable unnecessary browser features
     response.headers["Permissions-Policy"] = (
@@ -287,22 +299,25 @@ async def security_headers_middleware(request: Request, call_next):
         "gyroscope=(), "
         "accelerometer=()"
     )
-    
+
     # ─── Cross-Origin Isolation ─────────────────────────────────────
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
     response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
-    
+
     # ─── MED-03: CSP Report-Only ────────────────────────────────────
-    # Send CSP violation reports without blocking. Useful for testing
-    # new CSP policies before enforcing them.
-    # Set CSP_REPORT_URI in .env to receive reports (e.g., https://report-uri.com)
     csp_report_uri = getattr(settings, "csp_report_uri", "") or ""
     if csp_report_uri:
-        csp_report_directives = csp_directives + [f"report-uri {csp_report_uri}", f"report-to csp-endpoint"]
-        response.headers["Content-Security-Policy-Report-Only"] = "; ".join(csp_report_directives)
-    
+        csp_report_directives = csp_directives + [
+            f"report-uri {csp_report_uri}",
+            f"report-to csp-endpoint",
+        ]
+        response.headers["Content-Security-Policy-Report-Only"] = (
+            "; ".join(csp_report_directives)
+        )
+
     return response
+
 
 # Request logging middleware
 @app.middleware("http")
@@ -321,9 +336,13 @@ async def request_logging_middleware(request: Request, call_next):
 
     return response
 
+
 # ─── Exception Handlers (MED-09: Security headers on error pages) ──────
 
-def _apply_security_headers_to_response(response: Response, request: Request) -> Response:
+
+def _apply_security_headers_to_response(
+    response: Response, request: Request
+) -> Response:
     """
     MED-09: Apply security headers to error responses.
     FastAPI's default exception handlers bypass middleware, so error responses
@@ -333,7 +352,7 @@ def _apply_security_headers_to_response(response: Response, request: Request) ->
     # CSP with nonce (if available)
     csp_nonce = getattr(request.state, "csp_nonce", None)
     nonce_directive = f"'nonce-{csp_nonce}'" if csp_nonce else "'none'"
-    
+
     response.headers["Content-Security-Policy"] = (
         f"default-src 'none'; "
         f"script-src {nonce_directive}; "
@@ -350,12 +369,12 @@ def _apply_security_headers_to_response(response: Response, request: Request) ->
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
     response.headers["Cross-Origin-Embedder-Policy"] = "require-corp"
-    
+
     # Include request ID for tracing
     request_id = getattr(request.state, "request_id", None)
     if request_id:
         response.headers["X-Request-ID"] = request_id
-    
+
     return response
 
 
@@ -395,7 +414,9 @@ async def global_exception_handler(request: Request, exc: Exception):
                     "path": str(request.url.path),
                     "method": request.method,
                     "error_type": type(exc).__name__,
-                    "request_id": getattr(request.state, "request_id", "unknown"),
+                    "request_id": getattr(
+                        request.state, "request_id", "unknown"
+                    ),
                 },
             )
     except Exception as log_err:
@@ -407,6 +428,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
     return _apply_security_headers_to_response(response, request)
 
+
 # ─── Routers ───────────────────────────────────────────────────────────
 
 # Client-facing API (v1)
@@ -417,19 +439,23 @@ app.include_router(admin_router, prefix="/api")
 
 # ─── Admin Panel HTML Routes ──────────────────────────────────────────
 
+
 @app.get("/admin", tags=["admin-panel"])
 async def admin_login_page(request: Request, response: Response):
     """
     Serve admin login page with CSRF token.
-    
+
     C-05: Generates a CSRF token and sets it as a cookie.
     The token is also passed to the template for inclusion in forms.
     """
     csrf_token = generate_csrf_token()
-    response = templates.TemplateResponse("login.html", {
-        "request": request,
-        "csrf_token": csrf_token,
-    })
+    response = templates.TemplateResponse(
+        "login.html",
+        {
+            "request": request,
+            "csrf_token": csrf_token,
+        },
+    )
     response.set_cookie(
         key="admin_csrf_token",
         value=csrf_token,
@@ -444,15 +470,63 @@ async def admin_login_page(request: Request, response: Response):
 @app.get("/admin/dashboard", tags=["admin-panel"])
 async def admin_dashboard_page(request: Request, response: Response):
     """
-    Serve admin dashboard (auth checked client-side via cookie).
-    
-    C-05: Refreshes CSRF token for authenticated sessions.
+    Serve admin dashboard.
+
+    NEW-HIGH-02 FIX: Server-side session validation added.
+    Previously, the dashboard was served to ANY unauthenticated visitor.
+    Now we verify the admin session token server-side against the
+    PostgreSQL admin_sessions table before serving the page.
+    Unauthenticated users are redirected to /admin (login page).
     """
+    from app.api.deps import _hash_admin_token
+    from app.models.admin_session import AdminSession
+    from app.models.user import User
+
+    # Server-side auth check: verify admin session cookie
+    admin_token = request.cookies.get("admin_session") or request.headers.get(
+        "x-admin-token"
+    )
+    if not admin_token:
+        return RedirectResponse(url="/admin", status_code=302)
+
+    # Validate token against PostgreSQL admin_sessions table
+    try:
+        async with async_session_factory() as db:
+            token_hash = _hash_admin_token(admin_token)
+            stmt = select(AdminSession).where(
+                and_(
+                    AdminSession.token_hash == token_hash,
+                    AdminSession.revoked_at.is_(None),
+                )
+            )
+            result = await db.execute(stmt)
+            admin_session = result.scalar_one_or_none()
+
+            if not admin_session or admin_session.is_expired:
+                return RedirectResponse(url="/admin", status_code=302)
+
+            # Check user is still active
+            user_stmt = select(User).where(
+                and_(
+                    User.id == admin_session.user_id,
+                    User.status == "active",
+                )
+            )
+            user_result = await db.execute(user_stmt)
+            if not user_result.scalar_one_or_none():
+                return RedirectResponse(url="/admin", status_code=302)
+    except Exception:
+        # Any DB error — fail-closed: redirect to login
+        return RedirectResponse(url="/admin", status_code=302)
+
     csrf_token = generate_csrf_token()
-    response = templates.TemplateResponse("dashboard.html", {
-        "request": request,
-        "csrf_token": csrf_token,
-    })
+    response = templates.TemplateResponse(
+        "dashboard.html",
+        {
+            "request": request,
+            "csrf_token": csrf_token,
+        },
+    )
     response.set_cookie(
         key="admin_csrf_token",
         value=csrf_token,
@@ -462,6 +536,7 @@ async def admin_dashboard_page(request: Request, response: Response):
         max_age=86400,  # 24 hours (matches session)
     )
     return response
+
 
 # ─── Health Check ──────────────────────────────────────────────────────
 
@@ -491,6 +566,7 @@ async def root():
         }
     # Production: return 404 to avoid information disclosure
     raise HTTPException(status_code=404, detail="not_found")
+
 
 # ─── Run ───────────────────────────────────────────────────────────────
 

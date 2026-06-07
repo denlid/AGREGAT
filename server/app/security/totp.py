@@ -1,8 +1,4 @@
-"""
-AGREGAT Server — TOTP (Time-based One-Time Password)
-
-MFA for admin panel. Compatible with Google Authenticator, Authy, etc.
-"""
+""" AGREGAT Server — TOTP (Time-based One-Time Password) MFA for admin panel. Compatible with Google Authenticator, Authy, etc. """
 
 import base64
 import hashlib
@@ -23,7 +19,7 @@ def generate_totp_secret() -> str:
 def _hotp(secret: str, counter: int) -> str:
     """
     HMAC-based One-Time Password (RFC 4226).
-    
+
     P1-3: Uses SHA-256 instead of SHA-1 for stronger HMAC.
     Compatible with modern authenticator apps (Google Authenticator, Authy, etc.)
     that support SHA-256 TOTP.
@@ -54,6 +50,11 @@ def verify_totp(
     """
     Verify TOTP code with time window tolerance.
     window=1 allows previous, current, and next period.
+
+    NEW-CRIT-02 FIX: Uses hmac.compare_digest() for constant-time comparison
+    to prevent timing side-channel attacks. Python == is NOT constant-time —
+    it short-circuits on first mismatch, leaking information about correct
+    digits via response time.
     """
     code = code.strip()
     if len(code) != 6 or not code.isdigit():
@@ -63,26 +64,33 @@ def verify_totp(
     counter = t // period
 
     for offset in range(-window, window + 1):
-        if _hotp(secret, counter + offset) == code:
+        expected = _hotp(secret, counter + offset)
+        # CONSTANT-TIME comparison — prevents timing side-channel
+        if hmac.compare_digest(expected, code):
             return True
+
     return False
 
 
 def generate_totp_uri(secret: str, email: str, issuer: str = "AGREGAT") -> str:
     """
     Generate otpauth:// URI for QR code.
-    
+
     P1-3: Uses SHA256 algorithm instead of SHA1.
     """
     encoded_issuer = quote(issuer)
     encoded_email = quote(email)
-    return f"otpauth://totp/{encoded_issuer}:{encoded_email}?secret={secret}&issuer={encoded_issuer}&algorithm=SHA256&digits=6&period=30"
+    return (
+        f"otpauth://totp/{encoded_issuer}:{encoded_email}"
+        f"?secret={secret}&issuer={encoded_issuer}"
+        f"&algorithm=SHA256&digits=6&period=30"
+    )
 
 
 def generate_backup_codes(count: int = 8) -> list[str]:
     """
     Generate one-time backup codes (12-digit hex = 48 bits entropy).
-    
+
     P1-4: Increased from 32-bit (8 hex chars) to 48-bit (12 hex chars).
     48 bits = ~281 trillion combinations. Even with unlimited attempts,
     brute-forcing is computationally infeasible.
@@ -98,9 +106,13 @@ def verify_backup_code(stored_codes: list[str], code: str) -> tuple[bool, list[s
     """
     Verify and consume a backup code.
     Returns (is_valid, remaining_codes).
+
+    NEW-CRIT-02 FIX: Uses hmac.compare_digest for constant-time comparison
+    on each backup code to prevent timing-based enumeration.
     """
     code = code.strip().lower()
-    if code in stored_codes:
-        remaining = [c for c in stored_codes if c != code]
-        return True, remaining
+    for stored in stored_codes:
+        if hmac.compare_digest(stored, code):
+            remaining = [c for c in stored_codes if c != stored]
+            return True, remaining
     return False, stored_codes
