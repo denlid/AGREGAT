@@ -1,21 +1,20 @@
-"""Sprint 3.5 — Settings persistence (load / save ``settings.json``).
+"""SettingsTab preferences controller.
 
-Reads / writes the on-disk JSON file that backs the GUI's lightweight
-settings (last CSV path, last strategy, theme, asset, view range …).
-``MainWindow`` keeps thin ``load_settings`` / ``save_settings`` methods
-that delegate here.
+Owns the SettingsTab draft/applied state machine and preference
+persistence. Last-opened CSV/strategy/chart position are handled by
+SessionStateController.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from typing import TYPE_CHECKING, Any
 
-from engine.strategy.context import StrategyLoader
-from engine.data.data_loader import DataLoader
-from gui.controllers.settings_registry import DEFAULTS
+from gui.controllers.settings_registry import (
+    DEFAULTS,
+    PREFERENCE_KEYS,
+    SESSION_KEYS,
+)
 from gui.persistence import settings_persist
 
 if TYPE_CHECKING:
@@ -25,201 +24,228 @@ logger = logging.getLogger("StrategyTester.gui.settings")
 
 
 class SettingsController:
-    """Owns the GUI's small JSON settings dict + on-disk file."""
+    """Owns SettingsTab state, Apply/Reject flow, and preference JSON."""
 
     def __init__(self, host: MainWindow, settings_file: str) -> None:
         self._host = host
         self.settings_file = settings_file
         self.settings: dict[str, Any] = {}
+        self.settings_tab = None
+        self.applied_state: dict[str, Any] = {}
+        self.draft_state: dict[str, Any] = {}
+        self.strategy_params: dict[str, Any] = {}
+        self.dirty = False
+
+    def attach_settings_tab(self, tab) -> None:
+        self.settings_tab = tab
+        setattr(tab, "_settings_controller", self)
+        tab.apply_btn.clicked.connect(self.apply_changes)
+        tab.reject_btn.clicked.connect(self.reject_changes)
+        tab.reset_btn.clicked.connect(self.reset_defaults)
+        tab.ai_provider_cb.currentTextChanged.connect(tab._on_ai_provider_changed)
+        tab._bind.wire_all(self.on_settings_changed, apply_runtime=False)
+        self._set_dirty(False)
+
+    def _tab(self):
+        return self.settings_tab or getattr(self._host, "settings_tab", None)
+
+    def _set_dirty(self, dirty: bool) -> None:
+        self.dirty = bool(dirty)
+        tab = self._tab()
+        if tab is not None and hasattr(tab, "_set_dirty"):
+            tab._set_dirty(self.dirty)
+
+    def on_settings_changed(self) -> None:
+        tab = self._tab()
+        if tab is None or getattr(tab, "_loading_settings", False):
+            return
+        self.draft_state = self.capture_ui_settings()
+        self._set_dirty(True)
+
+    def apply_persisted(self, settings: dict[str, Any]) -> None:
+        tab = self._tab()
+        if tab is None:
+            return
+        state = dict(settings or {})
+        if "chart_colors" in state and "chart_scheme" not in state:
+            state["chart_scheme"] = state["chart_colors"]
+        self.strategy_params = dict(state.get("strategy_params", {}) or {})
+        self.load_to_ui(state)
+        self.load_to_vars()
+        self.applied_state = self.capture_ui_settings()
+        self.draft_state = dict(self.applied_state)
+        self.settings.clear()
+        self.settings.update(self.applied_state)
+        self._set_dirty(False)
+
+    def apply_changes(self) -> None:
+        tab = self._tab()
+        if tab is None:
+            return
+        next_state = self.capture_ui_settings()
+        changed = self._changed_keys(self.applied_state, next_state)
+        self.apply_changed_to_vars(changed)
+        self.draft_state = dict(next_state)
+        self.applied_state = dict(self.draft_state)
+        self._set_dirty(False)
+        self.save()
+        logger.info("Settings applied")
+
+    def reject_changes(self) -> None:
+        tab = self._tab()
+        if tab is None:
+            return
+        state = self.applied_state or {
+            key: value for key, value in DEFAULTS.items()
+            if key in PREFERENCE_KEYS
+        }
+        self.load_to_ui(state)
+        self.draft_state = dict(self.applied_state)
+        self._set_dirty(False)
+        logger.info("Settings changes rejected")
+
+    def reset_defaults(self) -> None:
+        tab = self._tab()
+        if tab is None:
+            return
+        defaults = {
+            key: value for key, value in DEFAULTS.items()
+            if key in PREFERENCE_KEYS
+        }
+        self.load_to_ui(defaults)
+        self.draft_state = self.capture_ui_settings()
+        self._set_dirty(True)
+        logger.info("Settings defaults loaded into draft")
+
+    def capture_settings_snapshot(self) -> dict[str, Any]:
+        if self.dirty and self.applied_state:
+            return dict(self.applied_state)
+        return self.capture_ui_settings() or dict(self.applied_state)
+
+    def sync_applied_from_ui(self) -> None:
+        self.applied_state = self.capture_ui_settings()
+        self.draft_state = dict(self.applied_state)
+        self._set_dirty(False)
+
+    def strategy_params_for(self, strategy) -> dict[str, Any]:
+        state = self.draft_state or self.applied_state or self.settings
+        strategy_params = self.strategy_params
+        if isinstance(state, dict) and state.get("strategy_params"):
+            strategy_params = state.get("strategy_params", {})
+        return dict((strategy_params.get(type(strategy).__name__, {}) or {}))
+
+    def _normalize_loaded_ai_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        tab = self._tab()
+        out = dict(settings)
+        provider = (out.get("ai_provider") or "OpenAI").strip()
+        legacy = getattr(tab, "_AI_LEGACY_PROVIDER", {}) if tab is not None else {}
+        providers = getattr(tab, "AI_PROVIDERS", ()) if tab is not None else ()
+        if provider in legacy:
+            new_provider, new_model = legacy[provider]
+            out["ai_provider"] = new_provider
+            out.setdefault("ai_model", new_model)
+        elif providers and provider not in providers:
+            out["ai_provider"] = "OpenAI"
+            out.setdefault("ai_model", "gpt-4o")
+        return out
+
+    def load_to_ui(self, settings: dict[str, Any]) -> None:
+        tab = self._tab()
+        if tab is None:
+            return
+        tab._loading_settings = True
+        for widget in tab._bind.widgets_to_block():
+            widget.blockSignals(True)
+        try:
+            state = self._normalize_loaded_ai_settings(settings)
+            tab._bind.apply_all(state, DEFAULTS)
+            tab._repopulate_ai_model_combo(
+                select_model=state.get("ai_model") or "gpt-4o"
+            )
+            tab._update_ai_custom_visibility()
+        finally:
+            for widget in tab._bind.widgets_to_block():
+                widget.blockSignals(False)
+            tab._loading_settings = False
+
+    def load_to_vars(self) -> None:
+        tab = self._tab()
+        if tab is None:
+            return
+        tab._bind.apply_runtime_all(exclude={"ai_provider"})
+        tab._apply_strategy_runtime()
+
+    def apply_changed_to_vars(self, changed_keys: set[str]) -> None:
+        """Apply only runtime callbacks for changed settings."""
+        tab = self._tab()
+        if tab is None:
+            return
+        for key in changed_keys:
+            if key == "ai_provider":
+                continue
+            if key == "strategy_params":
+                continue
+            if key in getattr(tab._bind, "_bindings", {}):
+                tab._bind.apply_runtime(key)
+        if "strategy_params" in changed_keys:
+            tab._apply_strategy_runtime()
+
+    @staticmethod
+    def _changed_keys(before: dict[str, Any], after: dict[str, Any]) -> set[str]:
+        keys = set(before) | set(after)
+        return {key for key in keys if before.get(key) != after.get(key)}
+
+    def capture_ui_settings(self) -> dict[str, Any]:
+        tab = self._tab()
+        if tab is None:
+            return {}
+        if not hasattr(tab, "_bind"):
+            return dict(self.applied_state)
+        snapshot: dict[str, Any] = {}
+        snapshot.update(tab._bind.capture_all())
+        strategy = getattr(tab.engine, "strategy", None)
+        if strategy is not None and getattr(tab, "_strategy_widgets", None):
+            self.strategy_params[type(strategy).__name__] = tab._strategy_form_values()
+            snapshot["strategy_params"] = dict(self.strategy_params)
+        elif self.strategy_params:
+            snapshot["strategy_params"] = dict(self.strategy_params)
+        return {
+            key: value for key, value in snapshot.items()
+            if key in PREFERENCE_KEYS
+        }
 
     def load(self) -> None:
-        """Restore persisted asset, equity, last CSV/strategy and view range."""
-        logger.info("=== SettingsController.load() START ===")
-        if not os.path.exists(self.settings_file):
-            logger.warning(f"settings.json NOT FOUND at {self.settings_file}")
-            return
-        h = self._host
         try:
-            with open(self.settings_file, encoding="utf-8") as f:
-                self.settings = json.load(f)
-            logger.info(f"✅ settings.json loaded. keys={list(self.settings.keys())}")
-            logger.info(f"   last_csv={self.settings.get('last_csv')}")
-            logger.info(f"   last_strat={self.settings.get('last_strat')}")
-            logger.info(f"   current_idx={self.settings.get('current_idx')}")
-            
-            h.asset_cb.setCurrentText(self.settings.get("asset", "DE40"))
-            h.engine.load_asset_config(h.asset_cb.currentText())
-            eq = self.settings.get("initial_equity", 100000)
-            h.settings_tab.equity_spin.setValue(eq)
-            h.engine.initial_equity = float(eq)
-            h.engine.equity = float(eq)
-            h.engine.max_equity = float(eq)
-            
-            logger.info("→ _restore_last_csv()")
-            self._restore_last_csv()
-            logger.info(f"   after CSV: engine.df is None? {h.engine.df is None}, current_idx={h.engine.current_idx}")
-            
-            logger.info("→ _restore_last_strategy()")
-            self._restore_last_strategy()
-            logger.info(f"   after STRAT: strategy={type(h.engine.strategy).__name__}")
-            
-            for k, setter in (
-                ("timeframe", h.chart_tab.visual_tf_cb.setCurrentText),
-                ("chart_mode", h.chart_tab.chart_mode_cb.setCurrentText),
-            ):
-                if k in self.settings:
-                    setter(self.settings[k])
-            if "show_markers" in self.settings:
-                h.chart_tab.show_markers_cb.setChecked(self.settings["show_markers"])
-            cc = self.settings.get("chart_colors")
-            if cc:
-                h.chart_tab.set_color_scheme(cc)
-                h.settings_tab.colors_cb.setCurrentText(cc)
-            
-            logger.info("→ _restore_step_position()")
-            self._restore_step_position()
-            logger.info(f"   after RESTORE: current_idx={h.engine.current_idx}, trades={len(h.engine.trades)}")
-            
-            logger.info("→ _restore_view_range()")
-            self._restore_view_range()
-            
-            logger.info("=== SettingsController.load() END ===")
-        except Exception as e:
-            logger.warning(f"Settings: {e}", exc_info=True)
+            self.apply_persisted(settings_persist.load_preferences())
+        except Exception as exc:
+            logger.warning("Settings preferences load failed: %s", exc, exc_info=True)
 
     def save(self, key: str | None = None, value: Any = None) -> None:
-        """Persist a single key (when given) and the live UI snapshot to disk.
-
-        Uses :data:`SETTINGS_REGISTRY <gui.controllers.settings_registry.SETTINGS_REGISTRY>`
-        to guarantee every known setting is written, even if the caller
-        only provided a subset.
-        """
-        h = self._host
+        """Persist preferences; delegate session keys as a back-compat shim."""
         if key:
-            self.settings[key] = value
+            normalized_key = "chart_scheme" if key == "chart_colors" else key
+            if normalized_key in SESSION_KEYS and normalized_key not in PREFERENCE_KEYS:
+                session_ctrl = getattr(self._host, "_session_state_ctrl", None)
+                if session_ctrl is not None:
+                    session_ctrl.save(normalized_key, value)
+                else:
+                    settings_persist.save_session_state({normalized_key: value})
+                return
+            if normalized_key in PREFERENCE_KEYS:
+                self.settings[normalized_key] = value
 
-        # --- snapshot: беремо всі ключі з реєстру -----------------
-        snapshot = dict(DEFAULTS)
-
-        # 1. Поверх старого self.settings (зберігає ручні ключі)
-        snapshot.update(self.settings)
-
-        # 2. Актуальні значення з UI / engine
-        snapshot.update({
-            "asset": h.asset_cb.currentText(),
-            "initial_equity": h.settings_tab.equity_spin.value(),
-            "timeframe": h.chart_tab.visual_tf_cb.currentText(),
-            "chart_mode": h.chart_tab.chart_mode_cb.currentText(),
-            "show_markers": h.chart_tab.show_markers_cb.isChecked(),
-            "current_idx": h.engine.current_idx,
-            "view_range": h.chart_tab.plot_widget.getViewBox().viewRange(),
-            "chart_colors": h.chart_tab._color_scheme,
-            "last_csv": self.settings.get("last_csv", ""),
-            "last_strat": self.settings.get("last_strat", ""),
-            "ai_provider": h.settings_tab.ai_provider_cb.currentText(),
-            "ai_model": h.settings_tab.ai_model_cb.currentText(),
-            "ai_api_key": h.settings_tab.ai_api_key_le.text(),
-            "ai_custom_base_url": h.settings_tab.ai_custom_base_url_le.text(),
-            "ai_custom_extra_body": h.settings_tab.ai_custom_extra_body_le.text(),
-        })
+        capture = self.capture_settings_snapshot()
+        preferences = {
+            pref_key: pref_value
+            for pref_key, pref_value in {**self.settings, **capture}.items()
+            if pref_key in PREFERENCE_KEYS
+        }
+        if not preferences:
+            preferences = {
+                pref_key: pref_value for pref_key, pref_value in DEFAULTS.items()
+                if pref_key in PREFERENCE_KEYS
+            }
 
         self.settings.clear()
-        self.settings.update(snapshot)
-
-        try:
-            settings_persist.save(self.settings)
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------
-    def _restore_last_csv(self) -> None:
-        h = self._host
-        lc = self.settings.get("last_csv")
-        if lc and os.path.exists(lc):
-            h.engine.load_data(DataLoader.load_csv(lc))
-
-    def _restore_last_strategy(self) -> None:
-        h = self._host
-        ls = self.settings.get("last_strat")
-        if not (ls and os.path.exists(ls)):
-            return
-        # Load file into editor FIRST, regardless of compilation errors
-        if hasattr(h, "strategy_editor_tab"):
-            h.strategy_editor_tab.bind_strategy_file(ls)
-        try:
-            strat = StrategyLoader.load(ls)
-            h.engine.load_strategy(strat)
-            if hasattr(h.settings_tab, "rebuild_strategy_form"):
-                try:
-                    h.settings_tab.rebuild_strategy_form(strat)
-                except Exception as e:
-                    logger.debug(f"rebuild_strategy_form failed: {e!r}")
-        except Exception as e:
-            logger.warning(f"Strategy: {e}")
-
-    def _restore_step_position(self) -> None:
-        h = self._host
-        if h.engine.df is None:
-            return  # no data loaded → nothing to restore
-
-        # Sprint 3.5 — Fast startup cache
-        # Always attempt to load the pre-calculated session state.
-        cache_path = os.path.join(
-            os.path.dirname(self.settings_file), ".auto_save.agbk"
-        )
-        cache_loaded = False
-
-        if os.path.exists(cache_path):
-            try:
-                from engine import load_session
-
-                load_session(h.engine, cache_path)
-                logger.info("⚡ Restored state from fast cache (.auto_save.agbk)")
-                cache_loaded = True
-            except Exception as exc:
-                logger.warning(
-                    f"Failed to load fast cache, falling back to simulation: {exc}"
-                )
-
-        # Fall back to simulating from saved index if cache missing or corrupted
-        if not cache_loaded:
-            si = self.settings.get("current_idx", -1)
-            if si >= 0:
-                h.engine.step_n(si + 1)
-            else:
-                # Step to at least candle 0 so the chart has data to display
-                h.engine.step_n(1)
-        else:
-            # Even when cache loaded, step to at least candle 0 so chart displays data
-            if h.engine.current_idx < 0:
-                h.engine.step_n(1)
-
-        # Notify chart to redraw after state restoration
-        if h.engine.current_idx >= 0:
-            h.engine.step_completed.emit(
-                h.engine.current_idx,
-                h.engine.candle_at(h.engine.current_idx),
-            )
-            h.engine.update_stats()
-            # Force chart redraw (deferred redraw timer may not be active yet)
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(100, h.chart_tab.redraw_chart)
-
-    def _restore_view_range(self) -> None:
-        h = self._host
-        vr = self.settings.get("view_range")
-        if not (vr and h.engine.current_idx >= 0):
-            return
-
-        def restore() -> None:
-            try:
-                if (vr[0][1] - vr[0][0]) > 1 and (vr[1][1] - vr[1][0]) > 10:
-                    h.chart_tab._need_autorange = False
-                    h.chart_tab.plot_widget.getViewBox().setRange(
-                        xRange=vr[0], yRange=vr[1], padding=0
-                    )
-            except Exception:
-                pass
-
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(300, restore)
+        self.settings.update(preferences)
+        settings_persist.save_preferences(preferences)

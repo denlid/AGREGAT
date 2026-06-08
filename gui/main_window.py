@@ -38,6 +38,7 @@ from gui.controllers.asset_controller import AssetController
 from gui.controllers.menu_controller import MenuController
 from gui.controllers.replay_controller import ReplayController
 from gui.controllers.session_lifecycle_controller import SessionLifecycleController
+from gui.controllers.session_state_controller import SessionStateController
 from gui.controllers.settings_controller import SettingsController
 from gui.controllers.status_bar_controller import StatusBarController
 from gui.controllers.mode_controller import ModeController
@@ -146,6 +147,8 @@ class MainWindow(QMainWindow):
         self._session_ctrl = SessionLifecycleController(self)
         self._replay_ctrl = ReplayController(self)
         self._settings_ctrl = SettingsController(self, SETTINGS_FILE)
+        self._session_state_ctrl = SessionStateController(self, SETTINGS_FILE)
+        self._settings_ctrl.attach_settings_tab(self.settings_tab)
         self.settings = self._settings_ctrl.settings
         self.settings_file = SETTINGS_FILE
         self._menu_ctrl = MenuController(self)
@@ -351,13 +354,13 @@ class MainWindow(QMainWindow):
         sc("Ctrl+S", self._on_save_ctrl_s)
 
     def _restore_persisted_settings_tab(self) -> None:
-        try:
-            from gui.persistence import settings_persist
+        from gui.persistence import settings_persist
 
-            self._persisted_settings = settings_persist.load()
-            self.settings_tab.apply_persisted(self._persisted_settings)
-        except Exception:
-            pass
+        try:
+            self._persisted_settings = settings_persist.load_preferences()
+            self._settings_ctrl.apply_persisted(self._persisted_settings)
+        except Exception as exc:
+            logger.warning("Failed to restore persisted settings: %s", exc)
 
     # -- back-compat public shims (referenced by tests / external code) -
     def on_load_data(self) -> None:
@@ -382,11 +385,26 @@ class MainWindow(QMainWindow):
         self._replay_ctrl.step_back_visual_candle()
 
     def load_settings(self) -> None:
-        self._settings_ctrl.load()
-        self.settings = self._settings_ctrl.settings
+        self._session_state_ctrl.restore()
+        self.settings = {
+            **self._settings_ctrl.settings,
+            **self._session_state_ctrl.state,
+        }
 
     def save_settings(self, key=None, value=None) -> None:  # type: ignore[no-untyped-def]
-        self._settings_ctrl.save(key, value)
+        if key is None:
+            self._settings_ctrl.save()
+            self._session_state_ctrl.save()
+            return
+        if key in {"chart_colors", "chart_scheme"}:
+            normalized = "chart_scheme"
+            self._settings_ctrl.save(normalized, value)
+            self._session_state_ctrl.save(normalized, value)
+        elif key in {"asset", "timeframe", "chart_mode", "show_markers",
+                     "current_idx", "view_range", "last_csv", "last_strat"}:
+            self._session_state_ctrl.save(key, value)
+        else:
+            self._settings_ctrl.save(key, value)
 
     def _start_async_csv_load(self, fp: str, save_last: bool) -> None:
         self._session_ctrl.start_async_csv_load(fp, save_last)

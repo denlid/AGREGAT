@@ -19,7 +19,7 @@ class ThemeController:
     def __init__(self, host: MainWindow) -> None:
         self._host = host
 
-    def switch_theme(self, name: str) -> None:
+    def switch_theme(self, name: str, *, persist: bool = True) -> None:
         from PySide6.QtWidgets import QApplication
 
         from gui.styling.theme import apply_theme
@@ -33,7 +33,8 @@ class ThemeController:
                 applied = "dark"
         apply_theme(QApplication.instance(), applied)
         self._host.chart_tab.apply_chart_theme()
-        self._host.save_settings("theme", name)
+        if persist:
+            self._host.save_settings("theme", name)
 
     def switch_chart_colors(self, name: str) -> None:
         self._host.chart_tab.set_color_scheme(name)

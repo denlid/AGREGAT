@@ -48,6 +48,10 @@ class ModeController(QObject):
         # Restore saved preference if available.
         try:
             settings = getattr(host, "settings", {}) or {}
+            if not settings:
+                from gui.persistence import settings_persist
+
+                settings = settings_persist.load_preferences()
             saved = settings.get("dashboard_mode", _RETAIL)
         except Exception:
             saved = _RETAIL

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from PySide6.QtWidgets import (
@@ -16,6 +17,12 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QWidget,
 )
+
+
+@dataclass
+class SettingBinding:
+    widget: QWidget
+    apply: Callable[[Any], None] | None = None
 
 
 class SettingsBinding:
@@ -35,15 +42,21 @@ class SettingsBinding:
     """
 
     def __init__(self) -> None:
-        self._bindings: dict[str, QWidget] = {}
+        self._bindings: dict[str, SettingBinding] = {}
 
     # ------------------------------------------------------------------
     # Реєстрація
     # ------------------------------------------------------------------
 
-    def bind(self, key: str, widget: QWidget) -> None:
+    def bind(
+        self,
+        key: str,
+        widget: QWidget,
+        *,
+        apply: Callable[[Any], None] | None = None,
+    ) -> None:
         """Зареєструвати віджет за ключем налаштування."""
-        self._bindings[key] = widget
+        self._bindings[key] = SettingBinding(widget=widget, apply=apply)
 
     # ------------------------------------------------------------------
     # Read / Write значень (адаптери)
@@ -68,9 +81,9 @@ class SettingsBinding:
     def set_widget_value(widget: QWidget, value: Any) -> None:
         """Записати значення у віджет."""
         if isinstance(widget, QSpinBox):
-            widget.setValue(int(value))
+            widget.setValue(int(value if value is not None else widget.minimum()))
         elif isinstance(widget, QDoubleSpinBox):
-            widget.setValue(float(value))
+            widget.setValue(float(value if value is not None else widget.minimum()))
         elif isinstance(widget, QCheckBox):
             widget.setChecked(bool(value))
         elif isinstance(widget, QComboBox):
@@ -98,33 +111,72 @@ class SettingsBinding:
 
     def capture_all(self) -> dict[str, Any]:
         """Створити словник {ключ: значення} з усіх зареєстрованих віджетів."""
-        return {key: self.get_widget_value(w) for key, w in self._bindings.items()}
+        return {
+            key: self.get_widget_value(binding.widget)
+            for key, binding in self._bindings.items()
+        }
 
-    def apply_all(self, settings: dict, defaults: dict) -> None:
+    def apply_all(
+        self,
+        settings: dict,
+        defaults: dict,
+        *,
+        apply_runtime: bool = False,
+        exclude_runtime: set[str] | None = None,
+    ) -> None:
         """Застосувати словник налаштувань до всіх віджетів.
 
         Пропускає ключі, яких немає в settings (залишаються поточними).
         """
-        for key, widget in self._bindings.items():
+        for key, binding in self._bindings.items():
             if key in settings:
-                self.set_widget_value(widget, settings[key])
+                self.set_widget_value(binding.widget, settings[key])
             elif key in defaults:
-                self.set_widget_value(widget, defaults[key])
+                self.set_widget_value(binding.widget, defaults[key])
+        if apply_runtime:
+            self.apply_runtime_all(exclude=exclude_runtime)
 
-    def reset_all(self, defaults: dict) -> None:
+    def reset_all(
+        self,
+        defaults: dict,
+        *,
+        apply_runtime: bool = False,
+        exclude_runtime: set[str] | None = None,
+    ) -> None:
         """Скинути всі зареєстровані віджети до дефолтних значень."""
-        for key, widget in self._bindings.items():
+        for key, binding in self._bindings.items():
             if key in defaults:
-                self.set_widget_value(widget, defaults[key])
+                self.set_widget_value(binding.widget, defaults[key])
+        if apply_runtime:
+            self.apply_runtime_all(exclude=exclude_runtime)
 
-    def wire_all(self, callback: Callable) -> None:
+    def apply_runtime(self, key: str) -> None:
+        """Apply one bound setting to runtime state, if it has an applier."""
+        binding = self._bindings[key]
+        if binding.apply is not None:
+            binding.apply(self.get_widget_value(binding.widget))
+
+    def apply_runtime_all(self, *, exclude: set[str] | None = None) -> None:
+        """Apply every bound setting with a runtime applier."""
+        exclude = exclude or set()
+        for key in self._bindings:
+            if key in exclude:
+                continue
+            self.apply_runtime(key)
+
+    def wire_all(self, callback: Callable, *, apply_runtime: bool = True) -> None:
         """Підключити callback (зазвичай ``self._persist``) до всіх віджетів."""
-        for widget in self._bindings.values():
-            self.connect_change_signal(widget, callback)
+        for key, binding in self._bindings.items():
+            def on_change(*_args: Any, key: str = key) -> None:
+                if apply_runtime:
+                    self.apply_runtime(key)
+                callback()
+
+            self.connect_change_signal(binding.widget, on_change)
 
     def widgets_to_block(self) -> list[QWidget]:
         """Повернути список усіх зареєстрованих віджетів (для blockSignals)."""
-        return list(self._bindings.values())
+        return [binding.widget for binding in self._bindings.values()]
 
     def validate(self, all_keys: set[str], /, *, exclude: set[str] | None = None) -> None:
         """Перевірити що всі ключі (крім виключених) зареєстровані.

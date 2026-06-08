@@ -128,6 +128,7 @@ class ChartTab(QWidget):
         self.plot_widget.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.plot_widget.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         self.plot_widget.setBackground(QColor("#0D0D10"))
+        self.show_grid = True
         self.plot_widget.showGrid(x=True, y=True, alpha=0.06)
         self.plot_widget.setMenuEnabled(False)
         self.plot_widget.hideButtons()
@@ -482,7 +483,12 @@ class ChartTab(QWidget):
         from gui.styling.theme import get_theme_name
 
         alpha_val = 0.06 if get_theme_name() == "dark" else 0.15
-        self.plot_widget.showGrid(x=True, y=True, alpha=alpha_val)
+        grid_on = bool(getattr(self, "show_grid", True))
+        self.plot_widget.showGrid(
+            x=grid_on,
+            y=grid_on,
+            alpha=alpha_val if grid_on else 0.0,
+        )
 
     def _apply_theme(self) -> None:
         """Phase 3 theme-listener entry — re-apply locally-overridden QSS

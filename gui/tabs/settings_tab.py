@@ -1,4 +1,4 @@
-"""Settings Tab — Comprehensive preferences and configuration."""
+﻿"""Settings Tab вЂ” Comprehensive preferences and configuration."""
 
 import logging
 
@@ -22,8 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.controllers.settings_binding import SettingsBinding
-from gui.controllers.settings_registry import ALL_KEYS, DEFAULTS
-from gui.persistence import settings_persist
+from gui.controllers.settings_registry import ALL_KEYS
 from gui.styling.theme import CHART_SCHEMES, register_theme_listener
 
 logger = logging.getLogger("StrategyTester.gui.settings_tab")
@@ -68,7 +67,7 @@ class SettingsTab(QWidget):
         "OpenAI (GPT-4o)": ("OpenAI", "gpt-4o"),
         "Anthropic (Claude 3.5)": ("Anthropic", "claude-3-5-sonnet-20240620"),
         "Mistral (Large)": ("Mistral", "mistral-large-latest"),
-        "Google Gemini (2.5 → 1.5 → 2.0 Flash)": ("Google Gemini", "gemini-2.5-flash"),
+        "Google Gemini (2.5 в†’ 1.5 в†’ 2.0 Flash)": ("Google Gemini", "gemini-2.5-flash"),
     }
 
     def __init__(self, engine, parent_window=None):
@@ -76,6 +75,8 @@ class SettingsTab(QWidget):
         self.engine = engine
         self.pw = parent_window
         self._groups = []
+        self._loading_settings = False
+        self._settings_controller = None
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(6, 6, 6, 6)
@@ -83,7 +84,7 @@ class SettingsTab(QWidget):
 
         # Header
         header = QHBoxLayout()
-        title = QLabel("⚙️ Settings & Preferences")
+        title = QLabel("Settings & Preferences")
         title_font = QFont()
         title_font.setPointSize(14)
         title_font.setBold(True)
@@ -91,11 +92,25 @@ class SettingsTab(QWidget):
         header.addWidget(title)
         header.addStretch()
 
-        btn_reset = QPushButton("🔄 Reset to Defaults")
-        btn_reset.setFixedWidth(150)
-        btn_reset.clicked.connect(self._reset_defaults)
-        btn_reset.setToolTip("Reset all settings to default values")
-        header.addWidget(btn_reset)
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setFixedWidth(90)
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.setVisible(False)
+        self.apply_btn.setToolTip("Apply changed settings now")
+        header.addWidget(self.apply_btn)
+
+        self.reject_btn = QPushButton("Reject")
+        self.reject_btn.setFixedWidth(90)
+        self.reject_btn.setEnabled(False)
+        self.reject_btn.setVisible(False)
+        self.reject_btn.setToolTip("Discard changed settings")
+        header.addWidget(self.reject_btn)
+
+        self.reset_btn = QPushButton("Reset to Defaults")
+        self.reset_btn.setFixedWidth(150)
+        self.reset_btn.setToolTip("Reset all settings to default values")
+        header.addWidget(self.reset_btn)
+        self._apply_action_button_styles()
 
         main_layout.addLayout(header)
 
@@ -126,20 +141,20 @@ class SettingsTab(QWidget):
         hotkeys_pane = _new_pane()
         ai_pane = _new_pane()
         # Container for strategy-specific widgets (rebuilt whenever a
-        # new strategy is loaded). Settings → Strategy auto-discovers
+        # new strategy is loaded). Settings в†’ Strategy auto-discovers
         # the loaded strategy's PARAMS list and builds a form from it.
         self._strategy_pane = strategy_pane
         self._strategy_widgets: dict = {}
         self._strategy_form_holder: QGroupBox | None = None
 
-        layout = appearance_pane._lay  # initial layout — appearance groups go here
+        layout = appearance_pane._lay  # initial layout вЂ” appearance groups go here
 
         # --- Appearance ---
-        grp1 = self._create_group("🎨 Appearance")
+        grp1 = self._create_group("Appearance")
         f1 = QFormLayout()
         f1.setSpacing(8)
 
-        # Sprint 2.8 — themes come from ThemeService.available_themes()
+        # Sprint 2.8 вЂ” themes come from ThemeService.available_themes()
         # so dropping a new ``custom.qss`` next to ``THEMES["custom"]``
         # registers it without code changes here.
         from gui.themes import ThemeService
@@ -147,7 +162,6 @@ class SettingsTab(QWidget):
         self.theme_cb = QComboBox()
         theme_choices = list(ThemeService.available_themes()) + ["auto"]
         self.theme_cb.addItems(theme_choices)
-        self.theme_cb.currentTextChanged.connect(self._on_theme)
         self.theme_cb.setToolTip(
             "Choose UI theme. 'auto' follows the system's color scheme on the "
             "next app launch (falls back to dark if the OS does not expose one)."
@@ -157,7 +171,6 @@ class SettingsTab(QWidget):
         self.colors_cb = QComboBox()
         self.colors_cb.addItems(list(CHART_SCHEMES.keys()))
         self.colors_cb.setCurrentText("Classic")
-        self.colors_cb.currentTextChanged.connect(self._on_colors)
         self.colors_cb.setToolTip("Choose chart color scheme")
         f1.addRow("Chart Preset:", self.colors_cb)
 
@@ -187,7 +200,6 @@ class SettingsTab(QWidget):
         self.font_size_spin.setValue(11)
         self.font_size_spin.setSuffix(" pt")
         self.font_size_spin.setToolTip("UI text font size")
-        self.font_size_spin.valueChanged.connect(self._on_font_size)
         f1.addRow("Font Size:", self.font_size_spin)
 
         grp1.setLayout(f1)
@@ -196,7 +208,7 @@ class SettingsTab(QWidget):
 
         # --- Chart Display ---
         layout = chart_pane._lay
-        grp2 = self._create_group("📊 Chart Display")
+        grp2 = self._create_group("Chart Display")
         f2 = QFormLayout()
         f2.setSpacing(8)
 
@@ -204,7 +216,6 @@ class SettingsTab(QWidget):
         self.tz_spin.setRange(-12, 14)
         self.tz_spin.setValue(0)
         self.tz_spin.setSuffix(" hours (UTC offset)")
-        self.tz_spin.valueChanged.connect(self._on_tz_changed)
         self.tz_spin.setToolTip("Adjust displayed time zone")
         f2.addRow("Timezone:", self.tz_spin)
 
@@ -213,25 +224,21 @@ class SettingsTab(QWidget):
         self.render_win.setValue(300)
         self.render_win.setSuffix(" candles")
         self.render_win.setToolTip("Number of candles to render (lower = faster)")
-        self.render_win.valueChanged.connect(self._on_render_win_changed)
         f2.addRow("Render Window:", self.render_win)
 
         self.show_grid_cb = QCheckBox("Show Grid")
         self.show_grid_cb.setChecked(True)
         self.show_grid_cb.setToolTip("Display chart grid lines")
-        self.show_grid_cb.toggled.connect(self._on_show_grid)
         f2.addRow("Grid:", self.show_grid_cb)
 
         self.crosshair_cb = QCheckBox("Crosshair")
         self.crosshair_cb.setChecked(True)
         self.crosshair_cb.setToolTip("Show crosshair on mouse hover")
-        self.crosshair_cb.toggled.connect(self._on_crosshair)
         f2.addRow("Crosshair:", self.crosshair_cb)
 
         self.autofit_y_cb = QCheckBox("Auto-fit Y Axis")
         self.autofit_y_cb.setChecked(True)
         self.autofit_y_cb.setToolTip("Automatically adjust the Y axis to fit the visible candles")
-        self.autofit_y_cb.toggled.connect(self._on_autofit_y)
         f2.addRow("Auto-fit Y:", self.autofit_y_cb)
 
         grp2.setLayout(f2)
@@ -240,7 +247,7 @@ class SettingsTab(QWidget):
 
         # --- Trading Parameters ---
         layout = trading_pane._lay
-        grp3 = self._create_group("💰 Trading Parameters")
+        grp3 = self._create_group("Trading Parameters")
         f3 = QFormLayout()
         f3.setSpacing(8)
 
@@ -250,7 +257,6 @@ class SettingsTab(QWidget):
         self.equity_spin.setSingleStep(10_000)
         self.equity_spin.setPrefix("$ ")
         self.equity_spin.setDecimals(0)
-        self.equity_spin.valueChanged.connect(self._on_equity)
         self.equity_spin.setToolTip("Starting capital for backtesting")
         f3.addRow("Initial Equity:", self.equity_spin)
 
@@ -261,7 +267,6 @@ class SettingsTab(QWidget):
         self.risk_pct_spin.setSuffix(" %")
         self.risk_pct_spin.setDecimals(2)
         self.risk_pct_spin.setToolTip("Risk per trade as % of equity (used by ctx.calculate_lot)")
-        self.risk_pct_spin.valueChanged.connect(self._on_risk_pct)
         f3.addRow("Risk per Trade:", self.risk_pct_spin)
 
         self.max_lots_spin = QDoubleSpinBox()
@@ -270,7 +275,6 @@ class SettingsTab(QWidget):
         self.max_lots_spin.setSingleStep(1)
         self.max_lots_spin.setDecimals(0)
         self.max_lots_spin.setToolTip("Maximum lots per 100k equity (clamps ctx.calculate_lot)")
-        self.max_lots_spin.valueChanged.connect(self._on_max_lots)
         f3.addRow("Max Lots/100k:", self.max_lots_spin)
 
         grp3.setLayout(f3)
@@ -280,7 +284,7 @@ class SettingsTab(QWidget):
         # --- Strategy (auto-built from Strategy.PARAMS) ---
         layout = strategy_pane._lay
         # Hint group: shown when no strategy is loaded.
-        self._strategy_empty = self._create_group("🧠 Strategy")
+        self._strategy_empty = self._create_group("Strategy")
         empty_lay = QVBoxLayout()
         empty_lay.addWidget(
             QLabel("Load a strategy via the Strategy menu to expose its parameters here.")
@@ -292,7 +296,7 @@ class SettingsTab(QWidget):
 
         # --- Execution Model ---
         layout = execution_pane._lay
-        grp_exec = self._create_group("📉 Execution Model")
+        grp_exec = self._create_group("Execution Model")
         fexec = QFormLayout()
         fexec.setSpacing(8)
 
@@ -305,7 +309,6 @@ class SettingsTab(QWidget):
             "Optimistic = no costs (upper bound). Realistic = use AssetConfig defaults. "
             "Custom = override with the values below."
         )
-        self.exec_profile_cb.currentTextChanged.connect(self._on_exec_profile)
         fexec.addRow("Profile:", self.exec_profile_cb)
 
         self.spread_spin = QDoubleSpinBox()
@@ -320,7 +323,6 @@ class SettingsTab(QWidget):
             "the chart, while long SL/TP and short entries fill exactly on the "
             "chart Bid."
         )
-        self.spread_spin.valueChanged.connect(self._on_spread)
         fexec.addRow("Spread:", self.spread_spin)
 
         self.commission_spin = QDoubleSpinBox()
@@ -330,7 +332,6 @@ class SettingsTab(QWidget):
         self.commission_spin.setDecimals(2)
         self.commission_spin.setSuffix(" $")
         self.commission_spin.setToolTip("Commission per lot per round-trip ($).")
-        self.commission_spin.valueChanged.connect(self._on_commission)
         fexec.addRow("Commission/Lot:", self.commission_spin)
 
         self.slippage_spin = QDoubleSpinBox()
@@ -342,7 +343,6 @@ class SettingsTab(QWidget):
         self.slippage_spin.setToolTip(
             "Avg slippage per leg (points). Applied to fills and non-stop closes."
         )
-        self.slippage_spin.valueChanged.connect(self._on_slippage)
         fexec.addRow("Slippage:", self.slippage_spin)
 
         grp_exec.setLayout(fexec)
@@ -351,16 +351,15 @@ class SettingsTab(QWidget):
 
         # --- Performance ---
         layout = performance_pane._lay
-        grp4 = self._create_group("⚡ Performance")
+        grp4 = self._create_group("Performance")
         f4 = QFormLayout()
         f4.setSpacing(8)
 
         self.fast_mode_cb = QCheckBox("Fast Mode")
         self.fast_mode_cb.setChecked(False)
         self.fast_mode_cb.setToolTip(
-            "Skip per-candle chart redraws during bulk run — helpful for huge datasets."
+            "Skip per-candle chart redraws during bulk run вЂ” helpful for huge datasets."
         )
-        self.fast_mode_cb.toggled.connect(self._on_fast_mode)
         f4.addRow("Optimization:", self.fast_mode_cb)
 
         self.cache_size_spin = QSpinBox()
@@ -375,7 +374,6 @@ class SettingsTab(QWidget):
         self.batch_size_spin.setValue(5000)
         self.batch_size_spin.setSuffix(" candles")
         self.batch_size_spin.setToolTip("Batch size for Run to End")
-        self.batch_size_spin.valueChanged.connect(self._on_batch_size_changed)
         f4.addRow("Batch Size:", self.batch_size_spin)
 
         grp4.setLayout(f4)
@@ -384,21 +382,19 @@ class SettingsTab(QWidget):
 
         # --- Logging ---
         layout = logs_pane._lay
-        grp5 = self._create_group("📝 Logging")
+        grp5 = self._create_group("Logging")
         f5 = QFormLayout()
         f5.setSpacing(8)
 
         self.log_level_cb = QComboBox()
         self.log_level_cb.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.log_level_cb.setCurrentText("INFO")
-        self.log_level_cb.currentTextChanged.connect(self._on_log_level)
         self.log_level_cb.setToolTip("Logging verbosity level")
         f5.addRow("Log Level:", self.log_level_cb)
 
         self.auto_save_logs_cb = QCheckBox("Auto-save Logs")
         self.auto_save_logs_cb.setChecked(True)
         self.auto_save_logs_cb.setToolTip("Automatically save logs to file")
-        self.auto_save_logs_cb.toggled.connect(self._on_auto_save_logs)
         f5.addRow("Auto-save:", self.auto_save_logs_cb)
 
         self.max_log_lines_spin = QSpinBox()
@@ -406,7 +402,6 @@ class SettingsTab(QWidget):
         self.max_log_lines_spin.setValue(5000)
         self.max_log_lines_spin.setSuffix(" lines")
         self.max_log_lines_spin.setToolTip("Maximum lines retained in the log console")
-        self.max_log_lines_spin.valueChanged.connect(self._on_max_log_lines)
         f5.addRow("Max Lines:", self.max_log_lines_spin)
 
         grp5.setLayout(f5)
@@ -415,28 +410,28 @@ class SettingsTab(QWidget):
 
         # --- Shortcuts ---
         layout = hotkeys_pane._lay
-        grp6 = self._create_group("⌨️ Keyboard Shortcuts")
+        grp6 = self._create_group("Keyboard Shortcuts")
         self.shortcuts_text = QLabel("""
 <b>Navigation:</b><br>
-• Space — Play/Pause<br>
-• Shift+Right — Step Forward<br>
-• Shift+Left — Step Back<br>
-• Home — Zoom to Fit<br>
-• End — Jump to End<br>
+&bull; Space - Play/Pause<br>
+&bull; Shift+Right - Step Forward<br>
+&bull; Shift+Left - Step Back<br>
+&bull; Home - Zoom to Fit<br>
+&bull; End - Jump to End<br>
 <br>
 <b>File Operations:</b><br>
-• Ctrl+O — Load Data<br>
-• Ctrl+L — Load Strategy<br>
-• Ctrl+R — Reset<br>
-• Ctrl+E — Export Trades<br>
+&bull; Ctrl+O - Load Data<br>
+&bull; Ctrl+L - Load Strategy<br>
+&bull; Ctrl+R - Reset<br>
+&bull; Ctrl+E - Export Trades<br>
 <br>
 <b>Drawing:</b><br>
-• Ctrl+Z — Undo<br>
-• Ctrl+Shift+Z — Redo<br>
-• Escape — Cancel Tool<br>
+&bull; Ctrl+Z - Undo<br>
+&bull; Ctrl+Shift+Z - Redo<br>
+&bull; Escape - Cancel Tool<br>
 <br>
 <b>Quick Actions:</b><br>
-• Ctrl+Alt+R — Run to End<br>
+&bull; Ctrl+Alt+R - Run to End<br>
         """)
         from gui.styling import style_helpers as sh
         from gui.styling.theme import get_theme as _gt
@@ -455,7 +450,7 @@ class SettingsTab(QWidget):
 
         # --- AI Settings ---
         layout = ai_pane._lay
-        grp7 = self._create_group("🤖 AI Provider")
+        grp7 = self._create_group("AI Provider")
         f7 = QFormLayout()
         f7.setSpacing(8)
 
@@ -463,7 +458,6 @@ class SettingsTab(QWidget):
         self.ai_provider_cb.addItems(list(self.AI_PROVIDERS))
         self.ai_provider_cb.setCurrentText("OpenAI")
         self.ai_provider_cb.setToolTip("LLM vendor for the strategy editor / global AI chat")
-        self.ai_provider_cb.currentTextChanged.connect(self._on_ai_provider_changed)
         f7.addRow("Provider:", self.ai_provider_cb)
 
         self.ai_model_cb = QComboBox()
@@ -496,7 +490,7 @@ class SettingsTab(QWidget):
 
         self.ai_api_key_le = QLineEdit()
         self.ai_api_key_le.setEchoMode(QLineEdit.EchoMode.Password)
-        self.ai_api_key_le.setPlaceholderText("API key (OpenAI sk-…, Anthropic, Mistral, Gemini, nvapi-…)")
+        self.ai_api_key_le.setPlaceholderText("API key (OpenAI sk-..., Anthropic, Mistral, Gemini, nvapi-...)")
         self.ai_api_key_le.setToolTip(
             "API key for the selected provider. Gemini: https://aistudio.google.com/apikey"
         )
@@ -532,73 +526,73 @@ class SettingsTab(QWidget):
         self.sub_tabs.addTab(ai_pane, "AI")
         main_layout.addWidget(self.sub_tabs)
 
-        # --- SettingsBinding — автоматичний capture/apply/reset/wire ---
+        # --- SettingsBinding вЂ” Р°РІС‚РѕРјР°С‚РёС‡РЅРёР№ capture/apply/reset/wire ---
         self._bind = SettingsBinding()
-        self._bind.bind("theme", self.theme_cb)
-        self._bind.bind("chart_scheme", self.colors_cb)
-        self._bind.bind("font_size", self.font_size_spin)
-        self._bind.bind("timezone", self.tz_spin)
-        self._bind.bind("render_window", self.render_win)
+        self._bind.bind("theme", self.theme_cb, apply=self._on_theme)
+        self._bind.bind("chart_scheme", self.colors_cb, apply=self._on_colors)
+        self._bind.bind("font_size", self.font_size_spin, apply=self._on_font_size)
+        self._bind.bind("timezone", self.tz_spin, apply=self._on_tz_changed)
+        self._bind.bind("render_window", self.render_win, apply=self._on_render_win_changed)
         self._bind.bind("cache_size", self.cache_size_spin)
-        self._bind.bind("batch_size", self.batch_size_spin)
-        self._bind.bind("show_grid", self.show_grid_cb)
-        self._bind.bind("crosshair", self.crosshair_cb)
-        self._bind.bind("autofit_y", self.autofit_y_cb)
-        self._bind.bind("initial_equity", self.equity_spin)
-        self._bind.bind("risk_pct", self.risk_pct_spin)
-        self._bind.bind("max_lots_per_100k", self.max_lots_spin)
-        self._bind.bind("exec_profile", self.exec_profile_cb)
-        self._bind.bind("exec_spread_points", self.spread_spin)
-        self._bind.bind("exec_commission_per_lot", self.commission_spin)
-        self._bind.bind("exec_slippage_points", self.slippage_spin)
-        self._bind.bind("fast_mode", self.fast_mode_cb)
-        self._bind.bind("log_level", self.log_level_cb)
-        self._bind.bind("auto_save_logs", self.auto_save_logs_cb)
-        self._bind.bind("max_log_lines", self.max_log_lines_spin)
-        self._bind.bind("ai_provider", self.ai_provider_cb)
+        self._bind.bind("batch_size", self.batch_size_spin, apply=self._on_batch_size_changed)
+        self._bind.bind("show_grid", self.show_grid_cb, apply=self._on_show_grid)
+        self._bind.bind("crosshair", self.crosshair_cb, apply=self._on_crosshair)
+        self._bind.bind("autofit_y", self.autofit_y_cb, apply=self._on_autofit_y)
+        self._bind.bind("initial_equity", self.equity_spin, apply=self._on_equity)
+        self._bind.bind("risk_pct", self.risk_pct_spin, apply=self._on_risk_pct)
+        self._bind.bind("max_lots_per_100k", self.max_lots_spin, apply=self._on_max_lots)
+        self._bind.bind("exec_profile", self.exec_profile_cb, apply=self._apply_execution_settings)
+        self._bind.bind("exec_spread_points", self.spread_spin, apply=self._apply_execution_settings)
+        self._bind.bind("exec_commission_per_lot", self.commission_spin, apply=self._apply_execution_settings)
+        self._bind.bind("exec_slippage_points", self.slippage_spin, apply=self._apply_execution_settings)
+        self._bind.bind("fast_mode", self.fast_mode_cb, apply=self._on_fast_mode)
+        self._bind.bind("log_level", self.log_level_cb, apply=self._on_log_level)
+        self._bind.bind("auto_save_logs", self.auto_save_logs_cb, apply=self._on_auto_save_logs)
+        self._bind.bind("max_log_lines", self.max_log_lines_spin, apply=self._on_max_log_lines)
+        self._bind.bind("ai_provider", self.ai_provider_cb, apply=self._on_ai_provider_changed)
         self._bind.bind("ai_model", self.ai_model_cb)
         self._bind.bind("ai_api_key", self.ai_api_key_le)
         self._bind.bind("ai_custom_base_url", self.ai_custom_base_url_le)
         self._bind.bind("ai_custom_extra_body", self.ai_custom_extra_body_le)
         self._bind.bind("ai_max_tokens", self.ai_max_tokens_spin)
 
-        # Wire persistence — every relevant signal saves the full snapshot.
-        self._wire_persistence_signals()
-
-        # Валідація: перевіряємо що всі ключі з реєстру зареєстровані
-        # (крім тих, що управляються вручну)
+        # Р’Р°Р»С–РґР°С†С–СЏ: РїРµСЂРµРІС–СЂСЏС”РјРѕ С‰Рѕ РІСЃС– РєР»СЋС‡С– Р· СЂРµС”СЃС‚СЂСѓ Р·Р°СЂРµС”СЃС‚СЂРѕРІР°РЅС–
+        # (РєСЂС–Рј С‚РёС…, С‰Рѕ СѓРїСЂР°РІР»СЏСЋС‚СЊСЃСЏ РІСЂСѓС‡РЅСѓ)
         try:
-            self._bind.validate(ALL_KEYS, exclude={"last_csv", "last_strat", "current_idx",
-                                                     "view_range", "chart_colors", "show_markers",
-                                                     "chart_mode", "timeframe", "asset",
-                                                     "show_volume", "last_asset",
-                                                     "strategy_params"})
+            self._bind.validate(
+                ALL_KEYS,
+                exclude={"show_volume", "strategy_params", "dashboard_mode"},
+            )
         except RuntimeError as e:
             logger.warning(f"SettingsBinding validation: {e}")
 
         register_theme_listener(self._apply_theme)
 
-    def _wire_persistence_signals(self) -> None:
-        """Підключити сигнали зміни до self._persist через SettingsBinding."""
-        # Автоматично підключаємо всі зареєстровані віджети
-        self._bind.wire_all(self._persist)
+        """РџС–РґРєР»СЋС‡РёС‚Рё СЃРёРіРЅР°Р»Рё Р·РјС–РЅРё РґРѕ self._persist С‡РµСЂРµР· SettingsBinding."""
+        # РђРІС‚РѕРјР°С‚РёС‡РЅРѕ РїС–РґРєР»СЋС‡Р°С”РјРѕ РІСЃС– Р·Р°СЂРµС”СЃС‚СЂРѕРІР°РЅС– РІС–РґР¶РµС‚Рё
 
-    def _normalize_loaded_ai_settings(self, settings: dict) -> dict:
-        out = dict(settings)
-        prov = (out.get("ai_provider") or "OpenAI").strip()
-        if prov in self._AI_LEGACY_PROVIDER:
-            np, nm = self._AI_LEGACY_PROVIDER[prov]
-            out["ai_provider"] = np
-            out.setdefault("ai_model", nm)
-        elif prov not in self.AI_PROVIDERS:
-            out["ai_provider"] = "OpenAI"
-            out.setdefault("ai_model", "gpt-4o")
-        return out
+    def _set_dirty(self, dirty: bool = True) -> None:
+        dirty = bool(dirty)
+        if hasattr(self, "apply_btn"):
+            self.apply_btn.setEnabled(dirty)
+            self.apply_btn.setVisible(dirty)
+        if hasattr(self, "reject_btn"):
+            self.reject_btn.setEnabled(dirty)
+            self.reject_btn.setVisible(dirty)
+
+    def _controller(self):
+        if self._settings_controller is not None:
+            return self._settings_controller
+        if self.pw is None:
+            return None
+        return (
+            getattr(self.pw, "settings_controller", None)
+            or getattr(self.pw, "_settings_ctrl", None)
+        )
 
     def _on_ai_provider_changed(self, _text: str | None = None) -> None:
         self._repopulate_ai_model_combo()
         self._update_ai_custom_visibility()
-        self._persist()
 
     def _repopulate_ai_model_combo(self, *, select_model: str | None = None) -> None:
         prov = self.ai_provider_cb.currentText()
@@ -653,84 +647,8 @@ class SettingsTab(QWidget):
             "max_tokens": self.ai_max_tokens_spin.value(),
         }
 
-    # ---- Persistence (Phase 2) ----
-    def _capture_settings(self) -> dict:
-        """Return current widget state as a settings dict.
-
-        Uses :class:`SettingsBinding` for automatic capture of registered
-        widgets, then adds engine-derived values on top.
-        """
-        em = getattr(self.engine, "execution_model", None)
-        # Автоматично збираємо всі зареєстровані віджети
-        snapshot = dict(DEFAULTS)
-        snapshot.update(self._bind.capture_all())
-        # Додаємо значення, які не прив'язані до віджетів напряму
-        snapshot.update({
-            "last_asset": getattr(self.engine.asset_config, "name", "DE40"),
-            "exec_spread_points": em.spread_points if em else None,
-            "exec_commission_per_lot": em.commission_per_lot if em else None,
-            "exec_slippage_points": em.slippage_points if em else None,
-        })
-        # Strategy params — persisted under the strategy class name so
-        # multiple strategies can be remembered independently.
-        strategy = getattr(self.engine, "strategy", None)
-        if strategy is not None and self._strategy_widgets:
-            try:
-                existing = (settings_persist.load() or {}).get("strategy_params", {})
-            except Exception:
-                existing = {}
-            existing[type(strategy).__name__] = self._strategy_form_values()
-            snapshot["strategy_params"] = existing
-        return snapshot
-
-    def _persist(self) -> None:
-        """Save current settings to disk (called after every user change).
-
-        Delegates to :meth:`SettingsController.save` if available,
-        otherwise writes directly (fallback).
-        """
-        try:
-            if self.pw and hasattr(self.pw, "settings_controller"):
-                self.pw.settings_controller.save()
-            else:
-                settings_persist.save(self._capture_settings())
-        except Exception as e:
-            logger.debug(f"Settings persistence failed: {e!r}")
-
-    def apply_persisted(self, settings: dict) -> None:
-        """Apply a settings dict to the UI (call after `__init__`).
-
-        Uses :class:`SettingsBinding` for automatic apply of registered
-        widgets, then handles special cases (AI combo, visibility).
-        """
-        # Block all signals to avoid triggering _persist() with a partially-applied
-        # snapshot (which would overwrite later keys with default/stale values).
-        for w in self._bind.widgets_to_block():
-            w.blockSignals(True)
-        try:
-            settings = self._normalize_loaded_ai_settings(dict(settings))
-            # Автоматичне застосування через binding
-            self._bind.apply_all(settings, DEFAULTS)
-            # Спеціальні випадки (AI combo, видимість)
-            self._repopulate_ai_model_combo(
-                select_model=settings.get("ai_model") or "gpt-4o"
-            )
-            self._update_ai_custom_visibility()
-            em = getattr(self.engine, "execution_model", None)
-            if em is not None:
-                em.spread_points = settings.get("exec_spread_points")
-                em.commission_per_lot = settings.get("exec_commission_per_lot")
-                em.slippage_points = settings.get("exec_slippage_points")
-        except Exception as e:
-            logger.debug(f"Could not fully apply persisted settings: {e!r}")
-        finally:
-            for w in self._bind.widgets_to_block():
-                w.blockSignals(False)
-            # One single save after all values are applied.
-            self._persist()
-
     # ------------------------------------------------------------------
-    # Strategy → PARAMS auto-form (Etap 4 of LINEAR LOGIC CORE plan)
+    # Strategy в†’ PARAMS auto-form (Etap 4 of LINEAR LOGIC CORE plan)
     # ------------------------------------------------------------------
     def rebuild_strategy_form(self, strategy=None) -> None:
         """Rebuild the Strategy sub-tab to match the loaded strategy's PARAMS.
@@ -742,10 +660,10 @@ class SettingsTab(QWidget):
         The form mirrors the ordering of ``strategy.PARAMS`` and uses
         widget kinds keyed off ``Param.kind``:
 
-        * ``"bool"``    — ``QCheckBox``
-        * ``"int"``     — ``QSpinBox``
-        * ``"float"``   — ``QDoubleSpinBox``
-        * ``"choice"``  — ``QComboBox`` over ``Param.choices``
+        * ``"bool"``    вЂ” ``QCheckBox``
+        * ``"int"``     вЂ” ``QSpinBox``
+        * ``"float"``   вЂ” ``QDoubleSpinBox``
+        * ``"choice"``  вЂ” ``QComboBox`` over ``Param.choices``
 
         Persistence is wired to the same disk file as the rest of
         Settings via :meth:`_persist`. The strategy's
@@ -754,7 +672,7 @@ class SettingsTab(QWidget):
         """
         from PySide6.QtWidgets import QLineEdit
 
-        # Tear down the previous form (if any) — Qt deletes the
+        # Tear down the previous form (if any) вЂ” Qt deletes the
         # widgets, but we also drop our references so the wiring is
         # clean.
         if self._strategy_form_holder is not None:
@@ -769,7 +687,7 @@ class SettingsTab(QWidget):
         if not params:
             return
 
-        title = "🧠 " + getattr(strategy, "name", type(strategy).__name__)
+        title = getattr(strategy, "name", type(strategy).__name__)
         grp = self._create_group(title)
         form = QFormLayout()
         form.setSpacing(8)
@@ -832,36 +750,41 @@ class SettingsTab(QWidget):
 
         # Apply any previously persisted strategy params on top of
         # defaults.
+        controller = self._controller()
+        persisted_values = {}
+        if controller is not None:
+            persisted_values = controller.strategy_params_for(strategy)
+        self._loading_settings = True
         try:
-            persisted = settings_persist.load() or {}
-        except Exception:
-            persisted = {}
-        sp = persisted.get("strategy_params", {})
-        # Strategy class identity is encoded into a single key so two
-        # different strategies persist independently.
-        cls = type(strategy).__name__
-        for name, val in (sp.get(cls, {}) or {}).items():
-            entry = self._strategy_widgets.get(name)
-            if entry is None:
-                continue
-            _p, w = entry
-            try:
-                if _p.kind == "bool":
-                    w.setChecked(bool(val))
-                elif _p.kind == "int":
-                    w.setValue(int(val))
-                elif _p.kind == "float":
-                    w.setValue(float(val))
-                elif _p.kind == "choice":
-                    idx = w.findText(str(val))
-                    if idx >= 0:
-                        w.setCurrentIndex(idx)
-            except Exception:
-                pass
+            for name, val in persisted_values.items():
+                entry = self._strategy_widgets.get(name)
+                if entry is None:
+                    continue
+                _p, w = entry
+                try:
+                    if _p.kind == "bool":
+                        w.setChecked(bool(val))
+                    elif _p.kind == "int":
+                        w.setValue(int(val))
+                    elif _p.kind == "float":
+                        w.setValue(float(val))
+                    elif _p.kind == "choice":
+                        idx = w.findText(str(val))
+                        if idx >= 0:
+                            w.setCurrentIndex(idx)
+                except Exception:
+                    pass
+        finally:
+            self._loading_settings = False
 
         # Push current values into the strategy *and* the engine
         # (force-eod / ott toggles also need to mirror onto AssetConfig).
-        self._on_strategy_param_changed(None)
+        self._apply_strategy_runtime()
+        controller = self._controller()
+        if controller is not None:
+            controller.sync_applied_from_ui()
+        else:
+            self._set_dirty(False)
 
     def _strategy_form_values(self) -> dict:
         """Read the current strategy form into a ``{name: value}`` dict."""
@@ -882,8 +805,8 @@ class SettingsTab(QWidget):
                 pass
         return out
 
-    def _on_strategy_param_changed(self, _p) -> None:
-        """Apply the current form to the engine + strategy and persist."""
+    def _apply_strategy_runtime(self) -> None:
+        """Apply the current strategy form to the engine + strategy."""
         values = self._strategy_form_values()
         strategy = getattr(self.engine, "strategy", None)
         if strategy is not None and hasattr(strategy, "apply_params"):
@@ -901,7 +824,15 @@ class SettingsTab(QWidget):
             if "ott_filter" in values:
                 ac.enforce_trading_hours = bool(values["ott_filter"])
 
-        self._persist()
+    def _on_strategy_param_changed(self, _p) -> None:
+        """Mark strategy settings as changed; Apply commits them."""
+        if self._loading_settings:
+            return
+        controller = self._controller()
+        if controller is not None:
+            controller.on_settings_changed()
+        else:
+            self._set_dirty(True)
 
     def _create_group(self, title):
         """Create a styled group box using theme tokens."""
@@ -928,11 +859,74 @@ class SettingsTab(QWidget):
         self._groups.append(grp)
         return grp
 
+    def _apply_action_button_styles(self) -> None:
+        """Style Apply/Reject as semantic actions."""
+        from gui.styling.theme import get_theme
+
+        def tint(hex_color: str, alpha: float) -> str:
+            raw = str(hex_color or "").lstrip("#")
+            if len(raw) != 6:
+                return "transparent"
+            try:
+                r = int(raw[0:2], 16)
+                g = int(raw[2:4], 16)
+                b = int(raw[4:6], 16)
+            except ValueError:
+                return "transparent"
+            return f"rgba({r}, {g}, {b}, {alpha:.2f})"
+
+        t = get_theme()
+        apply_hover_bg = tint(t["green"], 0.16)
+        apply_pressed_bg = tint(t["green"], 0.28)
+        reject_hover_bg = tint(t["red"], 0.16)
+        reject_pressed_bg = tint(t["red"], 0.28)
+        self.apply_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: 1px solid {t["green_bright"]};
+                border-radius: 5px;
+                color: {t["green_bright"]};
+                font-weight: 600;
+                padding: 4px 10px;
+            }}
+            QPushButton:hover {{
+                background: {apply_hover_bg};
+                border-color: {t["green_bright"]};
+                color: {t["green_bright"]};
+            }}
+            QPushButton:pressed {{
+                background: {apply_pressed_bg};
+                border-color: {t["green"]};
+                color: {t["green_bright"]};
+            }}
+        """)
+        self.reject_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: 1px solid {t["red_bright"]};
+                border-radius: 5px;
+                color: {t["red_bright"]};
+                font-weight: 600;
+                padding: 4px 10px;
+            }}
+            QPushButton:hover {{
+                background: {reject_hover_bg};
+                border-color: {t["red_bright"]};
+                color: {t["red_bright"]};
+            }}
+            QPushButton:pressed {{
+                background: {reject_pressed_bg};
+                border-color: {t["red"]};
+                color: {t["red_bright"]};
+            }}
+        """)
+
     def _apply_theme(self):
         from gui.styling import style_helpers as sh
         from gui.styling.theme import get_theme
 
         t = get_theme()
+        self._apply_action_button_styles()
         qss = f"""
             QGroupBox {{
                 font-weight: bold;
@@ -960,14 +954,14 @@ class SettingsTab(QWidget):
     def _on_theme(self, name):
         if self.pw:
             self.pw._switch_theme(name)
-            logger.info(f"🎨 Theme changed to: {name}")
+            logger.info(f"Theme changed to: {name}")
 
     def _on_colors(self, name):
         if self.pw and name != "Custom":
             self.pw.chart_tab.set_color_scheme(name)
             if getattr(self.pw, "chart_tab_2", None) is not None:
                 self.pw.chart_tab_2.set_color_scheme(name)
-            logger.info(f"🎨 Chart colors changed to: {name}")
+            logger.info(f"Chart colors changed to: {name}")
 
     def _pick_custom_color(self, target):
         if not self.pw:
@@ -976,28 +970,28 @@ class SettingsTab(QWidget):
         if c.isValid():
             if target == "bg":
                 self.pw.chart_tab.plot_widget.setBackground(c)
-                logger.info(f"🎨 Background color changed to: {c.name()}")
+                logger.info(f"Background color changed to: {c.name()}")
             elif target == "bull":
                 self.pw.chart_tab.candlestick_item.bull_color = c.name()
                 self.pw.chart_tab.redraw_chart()
-                logger.info(f"🎨 Bull candle color changed to: {c.name()}")
+                logger.info(f"Bull candle color changed to: {c.name()}")
             elif target == "bear":
                 self.pw.chart_tab.candlestick_item.bear_color = c.name()
                 self.pw.chart_tab.redraw_chart()
-                logger.info(f"🎨 Bear candle color changed to: {c.name()}")
+                logger.info(f"Bear candle color changed to: {c.name()}")
 
     def _on_tz_changed(self, v):
         if self.pw:
             self.pw.chart_tab.time_axis.tz_offset = v
             self.pw.chart_tab.redraw_chart()
-            logger.info(f"🌍 Timezone offset changed to: UTC{v:+d}")
+            logger.info(f"Timezone offset changed to: UTC{v:+d}")
 
     def _on_equity(self, v):
         self.engine.initial_equity = v
         if self.engine.current_idx < 0:
             self.engine.equity = float(v)
             self.engine.max_equity = float(v)
-        logger.info(f"💰 Initial equity changed to: ${v:,.0f}")
+        logger.info(f"Initial equity changed to: ${v:,.0f}")
 
     def _on_log_level(self, level):
         """Change the UI display threshold + logger level.
@@ -1025,7 +1019,7 @@ class SettingsTab(QWidget):
             from gui.tabs.log_console import GUILogHandler
             if not isinstance(handler, GUILogHandler):
                 handler.setLevel(target_level)
-        logger.info(f"📝 Log level changed to: {level}")
+        logger.info(f"Log level changed to: {level}")
 
     def _on_render_win_changed(self, v):
         """Update chart render window size.
@@ -1040,22 +1034,22 @@ class SettingsTab(QWidget):
             if getattr(self.pw, "chart_tab_2", None) is not None:
                 self.pw.chart_tab_2._cache_key = None
                 self.pw.chart_tab_2.redraw_chart()
-        logger.info(f"📊 Render window changed to: {v} candles")
+        logger.info(f"Render window changed to: {v} candles")
 
     def _on_batch_size_changed(self, v):
         """Update batch size for Run to End."""
         if self.pw and hasattr(self.pw, "bar_replay"):
             self.pw.bar_replay._run_to_end_batch = v
-        logger.info(f"⚡ Batch size changed to: {v} candles")
+        logger.info(f"Batch size changed to: {v} candles")
 
     # ---- New wired callbacks (Phase 1) ----
     def _on_risk_pct(self, v: float) -> None:
         self.engine.risk_pct = float(v)
-        logger.info(f"💰 Risk per trade: {v:.2f}%")
+        logger.info(f"Risk per trade: {v:.2f}%")
 
     def _on_max_lots(self, v: float) -> None:
         self.engine.asset_config.max_lots_per_100k = int(v)
-        logger.info(f"💰 Max lots per 100k: {int(v)}")
+        logger.info(f"Max lots per 100k: {int(v)}")
 
     def _apply_to_charts(self, fn) -> None:
         """Apply `fn(chart_tab)` to every visible chart_tab on the parent window."""
@@ -1071,10 +1065,11 @@ class SettingsTab(QWidget):
 
     def _on_show_grid(self, on: bool) -> None:
         def apply(ct):
+            ct.show_grid = bool(on)
             ct.plot_widget.showGrid(x=on, y=on, alpha=0.06 if on else 0.0)
 
         self._apply_to_charts(apply)
-        logger.info(f"📊 Grid: {'ON' if on else 'OFF'}")
+        logger.info(f"Grid: {'ON' if on else 'OFF'}")
 
     def _on_crosshair(self, on: bool) -> None:
         def apply(ct):
@@ -1084,7 +1079,7 @@ class SettingsTab(QWidget):
                     line.setVisible(on)
 
         self._apply_to_charts(apply)
-        logger.info(f"🎯 Crosshair: {'ON' if on else 'OFF'}")
+        logger.info(f"Crosshair: {'ON' if on else 'OFF'}")
 
     def _on_autofit_y(self, on: bool) -> None:
         def apply(ct):
@@ -1093,48 +1088,78 @@ class SettingsTab(QWidget):
                 ct.redraw_chart()
 
         self._apply_to_charts(apply)
-        logger.info(f"📊 Auto-fit Y: {'ON' if on else 'OFF'}")
+        logger.info(f"Auto-fit Y: {'ON' if on else 'OFF'}")
 
     def _on_fast_mode(self, on: bool) -> None:
         self.engine.fast_mode = bool(on)
-        logger.info(f"⚡ Fast mode: {'ON' if on else 'OFF'}")
+        logger.info(f"Fast mode: {'ON' if on else 'OFF'}")
 
     def _on_auto_save_logs(self, on: bool) -> None:
         if self.pw and hasattr(self.pw, "log_console"):
             self.pw.log_console.auto_save_cb.setChecked(on)
-        logger.info(f"📁 Log auto-save: {'ON' if on else 'OFF'}")
+        logger.info(f"Log auto-save: {'ON' if on else 'OFF'}")
 
     def _on_max_log_lines(self, n: int) -> None:
         if self.pw and hasattr(self.pw, "log_console"):
             self.pw.log_console.set_max_lines(int(n))
-        logger.info(f"📝 Log max lines: {int(n)}")
+        logger.info(f"Log max lines: {int(n)}")
 
     # ---- Execution Model (Phase 2) ----
     def _on_exec_profile(self, name: str) -> None:
         em = self.engine.execution_model
         em.profile = name  # type: ignore[assignment]
-        logger.info(f"📉 Execution profile: {name}")
+        logger.info(f"Execution profile: {name}")
+
+    def _apply_execution_settings(self, _value=None) -> None:
+        """Apply the execution widgets as one coherent runtime snapshot."""
+        em = getattr(self.engine, "execution_model", None)
+        ac = getattr(self.engine, "asset_config", None)
+        profile = self.exec_profile_cb.currentText()
+        spread = float(self.spread_spin.value())
+        commission = float(self.commission_spin.value())
+        slippage = float(self.slippage_spin.value())
+
+        if ac is not None:
+            ac.spread_points = spread
+            ac.commission_per_lot = commission
+            ac.slippage_points = slippage
+
+        if em is not None:
+            em.profile = profile
+            if profile == "Custom":
+                em.spread_points = spread
+                em.commission_per_lot = commission
+                em.slippage_points = slippage
+            else:
+                em.spread_points = None
+                em.commission_per_lot = None
+                em.slippage_points = None
+            invalidate = getattr(em, "invalidate_caches", None)
+            if callable(invalidate):
+                invalidate()
+
+        logger.info(f"Execution profile: {profile}")
 
     def _on_spread(self, v: float) -> None:
         self.engine.asset_config.spread_points = float(v)
         em = self.engine.execution_model
         if em.profile == "Custom":
             em.spread_points = float(v)
-        logger.info(f"📉 Spread: {v:.2f} pts")
+        logger.info(f"Spread: {v:.2f} pts")
 
     def _on_commission(self, v: float) -> None:
         self.engine.asset_config.commission_per_lot = float(v)
         em = self.engine.execution_model
         if em.profile == "Custom":
             em.commission_per_lot = float(v)
-        logger.info(f"📉 Commission/lot: ${v:.2f}")
+        logger.info(f"Commission/lot: ${v:.2f}")
 
     def _on_slippage(self, v: float) -> None:
         self.engine.asset_config.slippage_points = float(v)
         em = self.engine.execution_model
         if em.profile == "Custom":
             em.slippage_points = float(v)
-        logger.info(f"📉 Slippage: {v:.2f} pts")
+        logger.info(f"Slippage: {v:.2f} pts")
 
     def _on_font_size(self, n: int) -> None:
         from PySide6.QtGui import QFont
@@ -1145,13 +1170,5 @@ class SettingsTab(QWidget):
             return
         f = QFont("Segoe UI", int(n))
         app.setFont(f)
-        logger.info(f"🔤 Font size: {int(n)} pt")
+        logger.info(f"Font size: {int(n)} pt")
 
-    def _reset_defaults(self):
-        """Reset all settings to defaults using SettingsBinding."""
-        # Автоматичне скидання через binding
-        self._bind.reset_all(DEFAULTS)
-        # Спеціальні випадки (AI combo, видимість)
-        self._repopulate_ai_model_combo(select_model="gpt-4o")
-        self._update_ai_custom_visibility()
-        logger.info("🔄 Settings reset to defaults")

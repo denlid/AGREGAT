@@ -51,8 +51,6 @@ def _enable_gpu_if_available() -> None:
 def _bg_license_check() -> None:
     """Periodic license re-validation (runs every 5 min)."""
     # Deferred import to avoid circular dependency with engine internals.
-    from engine.security.license_manager import verify_license  # noqa: F811
-
     ok, _ = verify_license()
     if not ok:
         sys.exit(1)
