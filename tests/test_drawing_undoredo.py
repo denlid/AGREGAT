@@ -133,3 +133,24 @@ def test_drawing_multiple_steps_undo():
         assert len(ctrl.user_drawings) == 0
     finally:
         cleanup_file(symbol)
+
+def test_clear_all_persists_empty_drawings_for_symbol():
+    symbol = "test_clear_symbol"
+    cleanup_file(symbol)
+    cleanup_file("default")
+
+    mock_pw = MagicMock(spec=pg.PlotWidget)
+    ctrl = DrawingController(mock_pw, persist_key=symbol)
+
+    try:
+        ctrl.user_drawings.append({"type": "hline", "p": 100.0, "color": "#FFFFFF", "width": 2})
+        ctrl.save()
+        assert len(drawings_persist.load(symbol)) == 1
+
+        ctrl.clear_all()
+
+        assert ctrl.user_drawings == []
+        assert drawings_persist.load(symbol) == []
+    finally:
+        cleanup_file(symbol)
+        cleanup_file("default")

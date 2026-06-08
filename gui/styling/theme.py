@@ -22,9 +22,11 @@ from __future__ import annotations
 import logging
 from typing import Callable, List
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QWidget
+
+from gui.persistence.settings_persist import load as load_settings
 
 logger = logging.getLogger("StrategyTester.gui.theme")
 
@@ -164,6 +166,28 @@ def get_theme():
 
 def get_theme_name():
     return _current_theme
+
+
+def resolve_theme(app: QApplication) -> str:
+    """Resolve persisted theme choice to a concrete theme name."""
+    try:
+        settings = load_settings() or {}
+        theme_choice = str(settings.get("theme", "dark"))
+    except Exception:
+        logger.debug("Theme settings unavailable; falling back to dark", exc_info=True)
+        theme_choice = "dark"
+
+    if theme_choice == "auto":
+        try:
+            scheme = app.styleHints().colorScheme()
+            return "light" if scheme == Qt.ColorScheme.Light else "dark"
+        except Exception:
+            logger.debug("System color scheme unavailable; falling back to dark", exc_info=True)
+            return "dark"
+
+    if theme_choice not in ("dark", "light"):
+        return "dark"
+    return theme_choice
 
 
 # ==========================================

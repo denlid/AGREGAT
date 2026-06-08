@@ -489,7 +489,7 @@ class DrawingController(QObject):
         self._redo.clear()
         self._dirty = False  # items already cleared, no rebuild needed
         self._last_rt = None
-        drawings_persist.save(self.user_drawings)
+        drawings_persist.save(self.user_drawings, self._persist_key)
         self.drawings_changed.emit()
         logger.info("User drawings cleared")
 
@@ -1343,6 +1343,5 @@ class DrawingController(QObject):
                 new_p = pt["p"] + y_offset
                 new_pts.append({"t": new_t, "p": new_p})
             d["points"] = new_pts
-
 
 

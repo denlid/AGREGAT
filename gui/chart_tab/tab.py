@@ -331,7 +331,7 @@ class ChartTab(QWidget):
         # State
         self.current_tool = "None"  # kept as proxy for external callers; drawing_ctrl is authoritative
         self._last_hovered_drawing = None  # track last hovered drawing for RMB context menu
-        self.strategy_graphic_items = {}
+        self.strategy_graphic_items = []
         self.trade_graphic_items = []
         self.res_times = np.array([])
         self._need_autorange = True
@@ -874,7 +874,7 @@ class ChartTab(QWidget):
 
     def _clear_strategy_drawings(self):
         """Clear all strategy-generated drawings from engine."""
-        for item in self.strategy_graphic_items.values():
+        for item in self.strategy_graphic_items:
             self.plot_widget.removeItem(item)
             if hasattr(item, "deleteLater"):
                 item.deleteLater()
@@ -1407,7 +1407,7 @@ class ChartTab(QWidget):
     # Strategy drawings
     # ==============================
     def _draw_strategy(self, rt):
-        for item in self.strategy_graphic_items.values():
+        for item in self.strategy_graphic_items:
             self.plot_widget.removeItem(item)
         self.strategy_graphic_items.clear()
         hidden = {tag for tag, act in self.layer_cbs.items() if not act.isChecked()}

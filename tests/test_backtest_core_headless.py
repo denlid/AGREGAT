@@ -190,6 +190,21 @@ def test_drawing_callbacks_fire_with_id() -> None:
     assert seen_ids[-1] == drawing_id
 
 
+def test_reset_clears_strategy_drawings() -> None:
+    core = _make_core()
+    core.load_data(_df())
+
+    first_id = core.add_drawing({"t": "2024-01-02 10:00", "kind": "marker"})
+    assert first_id == 1
+    assert len(core.drawings) == 1
+
+    core.reset()
+
+    assert core.drawings == []
+    assert core._next_drawing_id == 0
+    assert core.add_drawing({"t": "2024-01-02 10:01", "kind": "marker"}) == 1
+
+
 def test_layer_registered_callback_is_idempotent() -> None:
     core = _make_core()
     received: List[Tuple[str, str, bool]] = []

@@ -61,13 +61,18 @@ class ReplayController:
         except Exception:
             pass
         # Очищаем пользовательские рисунки при ресете
-        h.chart_tab.drawing_ctrl.clear_all()
+        chart_tabs = [h.chart_tab]
+        chart_tab_2 = getattr(h, "chart_tab_2", None)
+        if chart_tab_2 is not None:
+            chart_tabs.append(chart_tab_2)
         # Очищаем стратегические рисунки (FVG, линии и т.д.)
-        for item in h.chart_tab.strategy_graphic_items.values():
-            h.chart_tab.plot_widget.removeItem(item)
-            if hasattr(item, "deleteLater"):
-                item.deleteLater()
-        h.chart_tab.strategy_graphic_items.clear()
+        for chart in chart_tabs:
+            chart.drawing_ctrl.clear_all()
+            for item in chart.strategy_graphic_items:
+                chart.plot_widget.removeItem(item)
+                if hasattr(item, "deleteLater"):
+                    item.deleteLater()
+            chart.strategy_graphic_items.clear()
         h.engine.drawings.clear()
         h.trades_tab._clear()
         h.analytics_tab.refresh_all(force=True)
