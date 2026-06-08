@@ -1,0 +1,19 @@
+# ============================================================
+# AGREGAT Server — Railway.app Configuration
+# ============================================================
+# Railway auto-detects this file and uses it for deployment.
+# Docs: https://docs.railway.app/reference/railway-toml
+# ============================================================
+
+[build]
+builder = "NIXPACKS"
+buildCommand = "pip install -r requirements.txt"
+
+[deploy]
+startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+# Railway automatically sets $PORT — don't override it
+# Environment variables are set in Railway Dashboard → Variables
