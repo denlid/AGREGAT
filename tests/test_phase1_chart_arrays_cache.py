@@ -83,7 +83,8 @@ def test_on_tf_changed_invalidates_resolved_dataframe_cache(qapp) -> None:
     assert tab._cached_res_df is not None
     tab.visual_tf_cb.setCurrentText("5m")
     tab.on_tf_changed("5m")
-    assert tab._cache_key is None
+    assert tab._cache_key is not None
+    assert tab._cache_key[1] == "5m"
     assert tab._cached_res_df is not None
 
 

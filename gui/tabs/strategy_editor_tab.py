@@ -1,4 +1,5 @@
 import ast
+import logging
 import os
 import importlib.util
 import json
@@ -11,6 +12,7 @@ from gui.workers.ai_worker import AIAssistantWorker
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEMP_STRAT_PATH = os.path.join(_APP_DIR, "strategies", "temp_ai_strategy.py")
+logger = logging.getLogger("StrategyTester.gui.strategy_editor")
 
 
 def _validate_code_syntax(code: str) -> tuple[bool, str]:
@@ -36,7 +38,8 @@ def _syntax_diagnostics_for_code(code: str) -> list[dict]:
         end_line = max(int(getattr(e, "end_lineno", None) or line), line)
         end_column = int(getattr(e, "end_offset", None) or column + 1)
         if end_line == line and end_column <= column:
-            end_column = column + 1
+            problem_text = e.text.rstrip("\n") if e.text else ""
+            end_column = len(problem_text) + 1 if problem_text else column + 1
         return [
             {
                 "message": e.msg,
@@ -411,6 +414,7 @@ class StrategyEditorTab(QWidget):
 
     def on_run_backtest(self, code):
         try:
+            self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(code))
             self._apply_compiled_code_to_engine(code)
 
             # 5. Run the backtest
@@ -438,6 +442,11 @@ class StrategyEditorTab(QWidget):
     def handle_backtest_error(self, traceback_str):
         """Show error in the editor. Does NOT auto-trigger AI."""
         self.latest_error = traceback_str
+        logger.error("Backtest error from strategy editor:\n%s", traceback_str)
+        try:
+            self.pw.show_error(traceback_str)
+        except Exception:
+            logger.debug("Failed to show strategy backtest error toast", exc_info=True)
         self.editor.show_system_message(f"⚠️ Backtest error:\n{traceback_str}", is_error=True)
 
     def on_stop_ai(self):
@@ -446,7 +455,12 @@ class StrategyEditorTab(QWidget):
         # Signal the JS that generation was stopped by user (not an error)
         self.editor.finish_generation("__stopped__")
 
+    def save_current_strategy(self) -> None:
+        """Save the current Monaco editor contents through the existing JS bridge."""
+        self.editor.page().runJavaScript("saveStrategy();")
+
     def on_save_strategy(self, code):
+        self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(code))
         bound = self._strategy_file_path
         if bound and os.path.isfile(bound):
             try:
@@ -458,8 +472,14 @@ class StrategyEditorTab(QWidget):
             try:
                 self._apply_compiled_code_to_engine(code)
             except Exception as e:
+                logger.exception("Saved strategy file, but strategy did not load: %s", bound)
                 self.pw.show_error(f"Saved file, but strategy did not load:\n{e}")
-            self.editor.show_system_message(f"Saved {os.path.basename(bound)}")
+                self.editor.show_system_message(
+                    f"Saved {os.path.basename(bound)}, but strategy did not load:\n{e}",
+                    is_error=True,
+                )
+            else:
+                self.editor.show_system_message(f"Saved {os.path.basename(bound)}")
             self._editor_dirty = False
             self._refresh_header_title()
             return
@@ -481,8 +501,14 @@ class StrategyEditorTab(QWidget):
             try:
                 self._apply_compiled_code_to_engine(code)
             except Exception as e:
+                logger.exception("Saved strategy file, but strategy did not load: %s", path)
                 self.pw.show_error(f"Saved file, but strategy did not load:\n{e}")
-            self.editor.show_system_message(f"Saved to {os.path.basename(path)}")
+                self.editor.show_system_message(
+                    f"Saved to {os.path.basename(path)}, but strategy did not load:\n{e}",
+                    is_error=True,
+                )
+            else:
+                self.editor.show_system_message(f"Saved to {os.path.basename(path)}")
             self._editor_dirty = False
             self._refresh_header_title()
 

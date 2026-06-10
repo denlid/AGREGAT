@@ -35,8 +35,10 @@ class MenuController:
 
         fm.addAction("New Strategy...", h._session_ctrl.create_strategy, "Ctrl+N")
         fm.addSeparator()
-        fm.addAction("Load Data...", h._session_ctrl.load_data, "Ctrl+O")
         fm.addAction("Load Strategy...", h._session_ctrl.load_strategy, "Ctrl+L")
+        fm.addAction("Save Strategy...", h.strategy_editor_tab.save_current_strategy)
+        fm.addSeparator()
+        fm.addAction("Load Data...", h._session_ctrl.load_data, "Ctrl+O")
         # Phase 2.6 (C9) — submenu populated lazily via aboutToShow so
         # the contents always reflect the latest persisted MRU list.
         self._recent_menu = fm.addMenu("Open Recent")
@@ -120,6 +122,7 @@ class MenuController:
             ("File: Load CSV data", h._session_ctrl.load_data),
             ("File: New strategy", h._session_ctrl.create_strategy),
             ("File: Load strategy", h._session_ctrl.load_strategy),
+            ("File: Save strategy", h.strategy_editor_tab.save_current_strategy),
             ("File: Save .agbk session", h._session_ctrl.save_session),
             ("File: Load .agbk session", h._session_ctrl.load_session),
             ("File: Export trades CSV", lambda: h.trades_tab.export_csv()),

@@ -347,7 +347,24 @@ class BarReplayControls(QWidget):
         if self.progress_dialog:
             self.progress_dialog.close()
             self.progress_dialog = None
-        logger.exception("Quant run failed", exc_info=exc)
+        logger.error("Backtest run failed", exc_info=(type(exc), exc, exc.__traceback__))
+        if getattr(self, "_headless_progress_timer", None):
+            try:
+                self._headless_progress_timer.stop()
+            except Exception:
+                pass
+            self._headless_progress_timer = None
+        try:
+            self.engine._suppress_drawings = False
+            self.engine._suppress_signals = False
+        except Exception:
+            pass
+        try:
+            win = self.window()
+            if hasattr(win, "show_error"):
+                win.show_error(str(exc))
+        except Exception:
+            logger.debug("Failed to show run error toast", exc_info=True)
 
     def toggle_play(self):
         self.btn_play.setChecked(not self.btn_play.isChecked())

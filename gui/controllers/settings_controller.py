@@ -23,21 +23,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger("StrategyTester.gui.settings")
 
 
+def strategy_display_name(strategy) -> str:
+    """Human-facing strategy name."""
+    if strategy is None:
+        return "Strategy without name"
+    return (getattr(strategy, "name", "Strategy without name") or "Strategy without name").strip()
+
+
 def strategy_settings_key(strategy) -> str:
     """Stable bucket key for persisted strategy-specific settings."""
     if strategy is None:
         return ""
-    class_name = type(strategy).__name__
-    if class_name != "_CompiledStrategy":
-        return class_name
-    declarative = getattr(strategy, "_declarative", None)
-    declarative_name = getattr(declarative, "_name", None)
-    if isinstance(declarative_name, str) and declarative_name.strip():
-        return declarative_name.strip()
-    name = getattr(strategy, "name", None)
-    if isinstance(name, str) and name.strip():
-        return name.strip()
-    return class_name
+    return strategy_display_name(strategy)
 
 
 class SettingsController:

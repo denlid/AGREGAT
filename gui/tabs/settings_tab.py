@@ -693,7 +693,10 @@ class SettingsTab(QWidget):
         if not params:
             return
 
-        title = getattr(strategy, "name", type(strategy).__name__)
+        title = (
+            getattr(strategy, "name", "Strategy without name")
+            or "Strategy without name"
+        ).strip()
         grp = self._create_group(title)
         form = QFormLayout()
         form.setSpacing(8)

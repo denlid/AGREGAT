@@ -42,7 +42,12 @@ def export_report_dialog(parent: QWidget) -> Optional[str]:
         return None
 
     asset = getattr(getattr(engine, "asset_config", None), "name", None)
-    strategy_name = type(getattr(engine, "strategy", None) or object()).__name__
+    strategy = getattr(engine, "strategy", None)
+    strategy_name = (
+        getattr(strategy, "name", "Strategy without name") or "Strategy without name"
+        if strategy is not None
+        else "Strategy without name"
+    ).strip()
     return export_report(
         engine,
         out_dir,

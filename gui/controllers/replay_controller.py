@@ -95,8 +95,11 @@ class ReplayController:
         price = c.get("close", "-")
         if isinstance(price, float):
             price = f"{price:.2f}"
-        sn = h.engine.strategy.__class__.__name__
-        if sn == "_Empty":
+        sn = (
+            getattr(h.engine.strategy, "name", "Strategy without name")
+            or "Strategy without name"
+        ).strip()
+        if h.engine.strategy.__class__.__name__ == "_Empty":
             sn = "Browse"
         ts = ""
         t = c.get("time")

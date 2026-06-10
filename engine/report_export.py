@@ -663,9 +663,15 @@ def export_report(
     asset = asset_name or getattr(
         getattr(engine, "asset_config", None), "name", "ASSET"
     )
-    strat = (
-        strategy_name or type(getattr(engine, "strategy", None) or object()).__name__
-    )
+    strat = strategy_name
+    if not strat:
+        strategy = getattr(engine, "strategy", None)
+        strat = (
+            getattr(strategy, "name", "Strategy without name") or "Strategy without name"
+            if strategy is not None
+            else "Strategy without name"
+        )
+    strat = strat.strip()
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     folder = os.path.join(out_dir, f"report_{asset}_{ts}")
     os.makedirs(folder, exist_ok=True)

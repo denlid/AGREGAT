@@ -123,7 +123,14 @@ def _(c):
             logger.info(f"📜 Loading new strategy from: {fp}")
             strategy = StrategyLoader.load(fp)
             h.engine.load_strategy(strategy)
-            logger.info(f"✅ Strategy loaded: {strategy.__class__.__name__}")
+
+
+            sn = (
+                getattr(h.engine.strategy, "name", "Strategy without name")
+                or "Strategy without name"
+            ).strip()
+
+            logger.info("✅ Strategy loaded: %s", sn)
             h._settings_ctrl.save("last_strat", fp)
             if hasattr(h, "settings_tab") and hasattr(h.settings_tab, "rebuild_strategy_form"):
                 try:
@@ -148,7 +155,13 @@ def _(c):
             logger.info(f"📜 Loading strategy from: {fp}")
             strategy = StrategyLoader.load(fp)
             h.engine.load_strategy(strategy)
-            logger.info(f"✅ Strategy loaded: {strategy.__class__.__name__}")
+
+            sn = (
+                getattr(h.engine.strategy, "name", "Strategy without name")
+                or "Strategy without name"
+            ).strip()
+            logger.info("✅ Strategy loaded: %s", sn)
+
             h._settings_ctrl.save("last_strat", fp)
             if hasattr(h, "settings_tab") and hasattr(h.settings_tab, "rebuild_strategy_form"):
                 try:
@@ -167,7 +180,7 @@ def _(c):
         fps, _ = QFileDialog.getOpenFileNames(h, "Load Data", "", "Data Files (*.csv *.parquet *.pq *.feather *.ipc)")
         if not fps:
             return
-        
+
         # Phase 4 DataPager autowire:
         try:
             from engine.data.data_pager import make_pager

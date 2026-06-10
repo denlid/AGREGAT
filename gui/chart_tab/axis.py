@@ -18,6 +18,7 @@ class TimeAxisItem(pg.AxisItem):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._times = np.array([])
+        self._x_offset = 0
         self.tz_offset = 0
         self.setStyle(tickLength=-6, showValues=True)
         self.setHeight(36)
@@ -39,8 +40,9 @@ class TimeAxisItem(pg.AxisItem):
         else:
             super().mouseDoubleClickEvent(ev)
 
-    def set_times(self, times) -> None:  # type: ignore[no-untyped-def]
+    def set_times(self, times, x_offset: int = 0) -> None:  # type: ignore[no-untyped-def]
         self._times = times
+        self._x_offset = int(x_offset)
 
     def tickSpacing(self, minVal, maxVal, size):  # type: ignore[no-untyped-def]
         rng = max(1, maxVal - minVal)
@@ -57,7 +59,7 @@ class TimeAxisItem(pg.AxisItem):
         result = []
         prev_date = None
         for v in values:
-            idx = int(round(v))
+            idx = int(round(v)) - self._x_offset
             if 0 <= idx < len(self._times):
                 try:
                     t = pd.Timestamp(self._times[idx])

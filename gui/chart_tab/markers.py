@@ -48,6 +48,7 @@ def build_trade_marker_arrays(
     position: Optional[Any] = None,
     position_close_price: Optional[float] = None,
     show_connections: bool = True,
+    x_offset: int = 0,
 ) -> TradeMarkerArrays:
     """Bucket ``trades`` (and optional ``position``) into marker arrays.
 
@@ -128,13 +129,17 @@ def build_trade_marker_arrays(
             is_long = vis_dirs_arr == "long"
 
             # Split by direction using boolean indexing (vectorized)
-            out.bx = ie_arr[is_long].tolist()
+            x_offset = int(x_offset)
+            ie_x = ie_arr + x_offset
+            ix_x = ix_arr + x_offset
+
+            out.bx = ie_x[is_long].tolist()
             out.by = vis_entry_prices[is_long].tolist()
-            out.sx = ie_arr[~is_long].tolist()
+            out.sx = ie_x[~is_long].tolist()
             out.sy = vis_entry_prices[~is_long].tolist()
 
             # Close markers (all trades)
-            out.cx = ix_arr.tolist()
+            out.cx = ix_x.tolist()
             out.cy = vis_exit_prices.tolist()
 
             if show_connections:
@@ -145,8 +150,8 @@ def build_trade_marker_arrays(
 
                 # Pre-allocate arrays for winners
                 if n_win > 0:
-                    win_ie = ie_arr[is_win]
-                    win_ix = ix_arr[is_win]
+                    win_ie = ie_x[is_win]
+                    win_ix = ix_x[is_win]
                     win_ep = vis_entry_prices[is_win]
                     win_xp = vis_exit_prices[is_win]
 
@@ -166,8 +171,8 @@ def build_trade_marker_arrays(
 
                 # Pre-allocate arrays for losers
                 if n_loss > 0:
-                    loss_ie = ie_arr[~is_win]
-                    loss_ix = ix_arr[~is_win]
+                    loss_ie = ie_x[~is_win]
+                    loss_ix = ix_x[~is_win]
                     loss_ep = vis_entry_prices[~is_win]
                     loss_xp = vis_exit_prices[~is_win]
 
@@ -192,7 +197,7 @@ def build_trade_marker_arrays(
         if et_np is None:
             et_np = np.datetime64(pd.to_datetime(position.entry_time))
         if et_np >= t0:
-            ie = max(0, int(np.searchsorted(rt, et_np, side="right")) - 1)
+            ie = int(x_offset) + max(0, int(np.searchsorted(rt, et_np, side="right")) - 1)
             cp = position.entry_price if position_close_price is None else position_close_price
             if position.direction == "long":
                 out.bx.append(ie)
@@ -207,10 +212,10 @@ def build_trade_marker_arrays(
                     else position.entry_price - cp
                 )
                 if u >= 0:
-                    out.win_x.extend((ie, len(rt) - 1, _NAN))
+                    out.win_x.extend((ie, int(x_offset) + len(rt) - 1, _NAN))
                     out.win_y.extend((position.entry_price, cp, _NAN))
                 else:
-                    out.loss_x.extend((ie, len(rt) - 1, _NAN))
+                    out.loss_x.extend((ie, int(x_offset) + len(rt) - 1, _NAN))
                     out.loss_y.extend((position.entry_price, cp, _NAN))
 
     return out

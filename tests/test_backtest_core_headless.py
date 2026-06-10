@@ -190,6 +190,21 @@ def test_drawing_callbacks_fire_with_id() -> None:
     assert seen_ids[-1] == drawing_id
 
 
+def test_strategy_drawing_accepts_epoch_nanoseconds_as_string() -> None:
+    core = _make_core()
+    core.load_data(_df())
+
+    t1_ns = "1609768800000000000"
+    t2_ns = "1609768860000000000"
+    drawing_id = core.add_drawing(
+        {"t1": t1_ns, "p1": 100.0, "t2": t2_ns, "p2": 101.0, "kind": "rect"}
+    )
+
+    drawing = next(d for d in core.drawings if d["_id"] == drawing_id)
+    assert drawing["_t1_np"] == pd.to_datetime(int(t1_ns), unit="ns").to_datetime64()
+    assert drawing["_t2_np"] == pd.to_datetime(int(t2_ns), unit="ns").to_datetime64()
+
+
 def test_drawing_batch_operations_by_tag() -> None:
     core = _make_core()
     core.load_data(_df())
