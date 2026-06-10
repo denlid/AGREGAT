@@ -1038,7 +1038,9 @@ class DrawingController(QObject):
             else:
                 item.unsetCursor()
 
-            if orig_hover is not None:
+            if orig_hover is not None and (
+                hasattr(ev, "acceptDrags") or hasattr(ev, "acceptClicks")
+            ):
                 orig_hover(ev)
         item.hoverEvent = _he
 
@@ -1054,7 +1056,8 @@ class DrawingController(QObject):
         orig_hover = roi.hoverEvent
 
         def _hover(ev, _orig=orig_hover):
-            _orig(ev)
+            if hasattr(ev, "acceptDrags") or hasattr(ev, "acceptClicks"):
+                _orig(ev)
             visible = not ev.isExit()
             
             roi.mouseHovering = visible
@@ -1343,5 +1346,3 @@ class DrawingController(QObject):
                 new_p = pt["p"] + y_offset
                 new_pts.append({"t": new_t, "p": new_p})
             d["points"] = new_pts
-
-

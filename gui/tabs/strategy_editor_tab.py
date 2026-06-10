@@ -24,6 +24,32 @@ def _validate_code_syntax(code: str) -> tuple[bool, str]:
         return False, f"Syntax error at {line_info}: {e.msg}{text_info}"
 
 
+def _syntax_diagnostics_for_code(code: str) -> list[dict]:
+    """Return Monaco-compatible diagnostics for Python syntax errors."""
+    if not code.strip():
+        return []
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        line = max(int(e.lineno or 1), 1)
+        column = max(int(e.offset or 1), 1)
+        end_line = max(int(getattr(e, "end_lineno", None) or line), line)
+        end_column = int(getattr(e, "end_offset", None) or column + 1)
+        if end_line == line and end_column <= column:
+            end_column = column + 1
+        return [
+            {
+                "message": e.msg,
+                "startLineNumber": line,
+                "startColumn": column,
+                "endLineNumber": end_line,
+                "endColumn": max(end_column, 1),
+                "severity": "error",
+            }
+        ]
+    return []
+
+
 def _validate_strategy_structure(code: str) -> list[str]:
     """Return warnings about potential structural issues in strategy code."""
     warnings = []
@@ -87,11 +113,15 @@ class StrategyEditorTab(QWidget):
         self.editor.bridge.attachment_requested.connect(self.on_attachment_requested)
         self.editor.bridge.ready.connect(self._on_editor_web_ready)
         self.editor.bridge.editor_model_changed.connect(self._on_editor_model_changed)
+        self.editor.bridge.editor_code_changed.connect(self._on_editor_code_changed)
         self.editor.bridge.rename_strategy_requested.connect(self.on_rename_strategy)
 
     def _on_editor_model_changed(self) -> None:
         self._editor_dirty = True
         self._refresh_header_title()
+
+    def _on_editor_code_changed(self, code: str) -> None:
+        self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(code))
 
     def should_sync_editor_to_engine(self) -> bool:
         return self._editor_dirty
@@ -100,6 +130,7 @@ class StrategyEditorTab(QWidget):
         self._editor_web_ready = True
         if self._queued_editor_source is not None:
             self.editor.set_editor_value(self._queued_editor_source)
+            self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(self._queued_editor_source))
             self._queued_editor_source = None
         self._refresh_header_title()
         # Restore persisted chat tabs from disk into Editor panel
@@ -128,6 +159,7 @@ class StrategyEditorTab(QWidget):
         self._strategy_file_path = fp
         if self._editor_web_ready:
             self.editor.set_editor_value(src)
+            self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(src))
         else:
             self._queued_editor_source = src
         self._refresh_header_title()

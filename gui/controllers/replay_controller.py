@@ -171,13 +171,9 @@ class ReplayController:
             return
         h.chart_tab._cache_key = None
         h.chart_tab._cached_snapshot = None
-        h.chart_tab._cached_chart_arrays_key = None
-        h.chart_tab._cached_chart_arrays = None
         if h.chart_tab_2 is not None and h.chart_tab_2.isVisible():
             h.chart_tab_2._cache_key = None
             h.chart_tab_2._cached_snapshot = None
-            h.chart_tab_2._cached_chart_arrays_key = None
-            h.chart_tab_2._cached_chart_arrays = None
         h.engine.reset()
         # Suppress autorange — we want to keep the user's zoom (_user_zoom_width)
         h.chart_tab._need_autorange = False

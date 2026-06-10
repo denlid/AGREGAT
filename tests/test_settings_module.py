@@ -376,6 +376,50 @@ def test_settings_tab_show_grid_updates_chart_runtime_state(qapp):
     assert chart.plot_widget.calls[-1] == {"x": False, "y": False, "alpha": 0.0}
 
 
+def test_ai_model_combo_accepts_custom_model_for_builtin_provider(qapp):
+    from engine.backtest_engine import BacktestEngine
+    from gui.tabs.settings_tab import SettingsTab
+
+    tab = SettingsTab(BacktestEngine(), parent_window=None)
+    tab.ai_provider_cb.setCurrentText("OpenAI")
+    tab._repopulate_ai_model_combo(select_model="gpt-4.1-custom")
+
+    assert tab.ai_model_cb.isEditable() is True
+    assert tab.ai_model_cb.currentText() == "gpt-4.1-custom"
+    assert tab.ai_model_cb.findText("gpt-4.1-custom") >= 0
+
+    tab.ai_model_cb.setEditText("my-org/private-openai-model")
+
+    assert tab.get_ai_worker_kwargs()["model"] == "my-org/private-openai-model"
+
+
+def test_settings_controller_preserves_unknown_ai_model_on_load(
+    qapp, monkeypatch, isolated_settings
+):
+    from engine.backtest_engine import BacktestEngine
+    from gui.tabs.settings_tab import SettingsTab
+
+    monkeypatch.setattr(settings_persist, "save_preferences", lambda _settings: None)
+
+    engine = BacktestEngine()
+    tab = SettingsTab(engine, parent_window=None)
+    host = _controller_host(tab, engine)
+    tab.pw = host
+    ctrl = SettingsController(host, str(isolated_settings))
+    host._settings_ctrl = ctrl
+    ctrl.attach_settings_tab(tab)
+
+    ctrl.apply_persisted({
+        "ai_provider": "Anthropic",
+        "ai_model": "claude-custom-router",
+    })
+
+    assert tab.ai_provider_cb.currentText() == "Anthropic"
+    assert tab.ai_model_cb.isEditable() is True
+    assert tab.ai_model_cb.currentText() == "claude-custom-router"
+    assert ctrl.applied_state["ai_model"] == "claude-custom-router"
+
+
 def test_settings_controller_changes_are_draft_until_apply(qapp, monkeypatch, isolated_settings):
     from engine.backtest_engine import BacktestEngine
     from gui.tabs.settings_tab import SettingsTab
@@ -502,3 +546,117 @@ def test_settings_controller_dirty_capture_returns_applied_snapshot(qapp, isolat
     captured = ctrl.capture_settings_snapshot()
 
     assert captured["risk_pct"] == pytest.approx(1.25)
+
+
+def _load_api_strategy_with_param(engine, tab, *, name="API Strategy", default=1.0):
+    from engine.api import Strategy as ApiStrategy
+    from engine.strategy.context import Param
+
+    api_strategy = ApiStrategy(
+        name=name,
+        risk_pct=Param(
+            name="risk_pct",
+            label="Risk %",
+            kind="float",
+            default=default,
+            min=0.1,
+            max=10.0,
+            step=0.1,
+        ),
+    )
+    strategy = api_strategy._build_class()()
+    engine.load_strategy(strategy)
+    tab.rebuild_strategy_form(strategy)
+    return strategy
+
+
+def test_api_strategy_params_use_strategy_name_bucket(
+    qapp, monkeypatch, isolated_settings
+):
+    from engine.backtest_engine import BacktestEngine
+    from gui.tabs.settings_tab import SettingsTab
+
+    monkeypatch.setattr(settings_persist, "save_preferences", lambda _settings: None)
+
+    engine = BacktestEngine()
+    tab = SettingsTab(engine, parent_window=None)
+    host = _controller_host(tab, engine)
+    tab.pw = host
+    ctrl = SettingsController(host, str(isolated_settings))
+    host._settings_ctrl = ctrl
+    ctrl.attach_settings_tab(tab)
+    ctrl.apply_persisted({
+        "strategy_params": {
+            "API Strategy": {"risk_pct": 2.5},
+            "_CompiledStrategy": {"risk_pct": 9.0},
+        }
+    })
+
+    strategy = _load_api_strategy_with_param(engine, tab, name="API Strategy")
+
+    assert tab._strategy_widgets["risk_pct"][1].value() == pytest.approx(2.5)
+    assert strategy.params["risk_pct"] == pytest.approx(2.5)
+    assert "API Strategy" in ctrl.applied_state["strategy_params"]
+
+
+def test_strategy_param_reject_restores_applied_ui_snapshot(
+    qapp, monkeypatch, isolated_settings
+):
+    from engine.backtest_engine import BacktestEngine
+    from gui.tabs.settings_tab import SettingsTab
+
+    monkeypatch.setattr(
+        settings_persist,
+        "save_preferences",
+        lambda _settings: pytest.fail("unexpected save"),
+    )
+
+    engine = BacktestEngine()
+    tab = SettingsTab(engine, parent_window=None)
+    host = _controller_host(tab, engine)
+    tab.pw = host
+    ctrl = SettingsController(host, str(isolated_settings))
+    host._settings_ctrl = ctrl
+    ctrl.attach_settings_tab(tab)
+    ctrl.apply_persisted({"strategy_params": {"API Strategy": {"risk_pct": 1.5}}})
+    strategy = _load_api_strategy_with_param(engine, tab, name="API Strategy")
+    widget = tab._strategy_widgets["risk_pct"][1]
+
+    widget.setValue(3.0)
+    ctrl.reject_changes()
+
+    assert widget.value() == pytest.approx(1.5)
+    assert strategy.params["risk_pct"] == pytest.approx(1.5)
+    assert ctrl.dirty is False
+
+
+def test_strategy_param_reset_defaults_is_draft_until_apply(
+    qapp, monkeypatch, isolated_settings
+):
+    from engine.backtest_engine import BacktestEngine
+    from gui.tabs.settings_tab import SettingsTab
+
+    saved = []
+    monkeypatch.setattr(settings_persist, "save_preferences", saved.append)
+
+    engine = BacktestEngine()
+    tab = SettingsTab(engine, parent_window=None)
+    host = _controller_host(tab, engine)
+    tab.pw = host
+    ctrl = SettingsController(host, str(isolated_settings))
+    host._settings_ctrl = ctrl
+    ctrl.attach_settings_tab(tab)
+    ctrl.apply_persisted({"strategy_params": {"API Strategy": {"risk_pct": 2.5}}})
+    strategy = _load_api_strategy_with_param(engine, tab, name="API Strategy")
+    widget = tab._strategy_widgets["risk_pct"][1]
+
+    ctrl.reset_defaults()
+
+    assert widget.value() == pytest.approx(1.0)
+    assert strategy.params["risk_pct"] == pytest.approx(2.5)
+    assert ctrl.dirty is True
+
+    ctrl.apply_changes()
+
+    assert strategy.params["risk_pct"] == pytest.approx(1.0)
+    assert saved[-1]["strategy_params"]["API Strategy"]["risk_pct"] == pytest.approx(1.0)

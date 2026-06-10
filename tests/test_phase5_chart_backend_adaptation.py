@@ -8,7 +8,9 @@ import pandas as pd
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from gui.chart_tab.tab import ChartTab
+from gui.chart_tab.gpu_config import should_use_gl_candles
+from gui.chart_tab.gl_candle import GLCandlestickItem, is_gl_candle_available, make_candlestick_item
+from gui.chart_tab.items import CandlestickItem
 
 
 class _Signal:
@@ -63,43 +65,23 @@ def _df(n: int = 256) -> pd.DataFrame:
     return df
 
 
-def test_phase5_backend_state_reports_gpu_policy(qapp) -> None:
-    tab = ChartTab(_Engine(_df(64)))
-    state = tab._phase5_backend_state(5_000)
-    assert "gpu_enabled" in state
-    assert "gpu_backend" in state
-    assert "gl_candles_requested" in state
-    assert "gl_candles_active" in state
-    assert "render_backend" in state
+def test_phase5_gpu_policy_respects_explicit_gl_candle_override(qapp) -> None:
+    assert should_use_gl_candles(force_gl_candles=True, bars_hint=1) is True
+    assert should_use_gl_candles(force_gl_candles=False, bars_hint=5_000) is False
 
 
-def test_phase5_adaptive_lod_reduces_budget_on_slow_frame(qapp) -> None:
-    tab = ChartTab(_Engine(_df(128)))
-    tab.candlestick_item.set_max_bars(2_000)
-    tab._adaptive_lod_cooldown = 0
-    decision = tab._maybe_adapt_render_budget({"total_ms": 99.0})
-    assert decision["adaptive_lod_applied"] is True
-    assert decision["adaptive_reason"] == "frame_budget_exceeded"
-    assert decision["adaptive_lod_prev"] == 2_000
-    assert decision["adaptive_lod_new"] < 2_000
-    assert tab.candlestick_item._max_bars == decision["adaptive_lod_new"]
+def test_phase5_gl_candle_factory_force_false_uses_software_item(qapp) -> None:
+    item = make_candlestick_item(force=False)
+    assert isinstance(item, CandlestickItem)
+    assert not isinstance(item, GLCandlestickItem)
 
 
-def test_phase5_adaptive_lod_respects_cooldown(qapp) -> None:
-    tab = ChartTab(_Engine(_df(128)))
-    tab.candlestick_item.set_max_bars(2_000)
-    tab._adaptive_lod_cooldown = 2
-    decision = tab._maybe_adapt_render_budget({"total_ms": 99.0})
-    assert decision["adaptive_lod_applied"] is False
-    assert decision["adaptive_reason"] == "cooldown"
-    assert tab.candlestick_item._max_bars == 2_000
+def test_phase5_gl_candle_factory_force_true_matches_availability(qapp) -> None:
+    item = make_candlestick_item(force=True)
+    assert isinstance(item, GLCandlestickItem if is_gl_candle_available() else CandlestickItem)
 
 
-def test_phase5_adaptive_lod_skips_fast_frame(qapp) -> None:
-    tab = ChartTab(_Engine(_df(128)))
-    tab.candlestick_item.set_max_bars(2_000)
-    tab._adaptive_lod_cooldown = 0
-    decision = tab._maybe_adapt_render_budget({"total_ms": 5.0})
-    assert decision["adaptive_lod_applied"] is False
-    assert decision["adaptive_reason"] == "within_budget"
-    assert tab.candlestick_item._max_bars == 2_000
+def test_phase5_candlestick_item_exposes_current_bar_budget(qapp) -> None:
+    item = CandlestickItem(max_bars=2_000)
+    item.set_max_bars(750)
+    assert item._max_bars == 750

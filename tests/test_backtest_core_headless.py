@@ -190,6 +190,30 @@ def test_drawing_callbacks_fire_with_id() -> None:
     assert seen_ids[-1] == drawing_id
 
 
+def test_drawing_batch_operations_by_tag() -> None:
+    core = _make_core()
+    core.load_data(_df())
+
+    rect_1 = core.add_drawing({"t": "2024-01-02 10:00", "kind": "rect", "tag": "fvg"})
+    rect_2 = core.add_drawing({"t": "2024-01-02 10:01", "kind": "rect", "tag": "fvg"})
+    text = core.add_drawing({"t": "2024-01-02 10:02", "kind": "text", "tag": "label"})
+
+    seen_ids: List[int] = []
+    core.on_drawing_changed.append(lambda d_id: seen_ids.append(d_id))
+
+    assert core.update_drawings_by_tag("fvg", {"color": "green"}) == 2
+    assert [d.get("color") for d in core.drawings if d.get("tag") == "fvg"] == [
+        "green",
+        "green",
+    ]
+    assert "color" not in next(d for d in core.drawings if d.get("_id") == text)
+    assert seen_ids[-2:] == [rect_1, rect_2]
+
+    assert core.remove_drawings_by_tag("fvg") == 2
+    assert [d.get("_id") for d in core.drawings] == [text]
+    assert seen_ids[-2:] == [rect_1, rect_2]
+
+
 def test_reset_clears_strategy_drawings() -> None:
     core = _make_core()
     core.load_data(_df())

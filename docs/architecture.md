@@ -24,7 +24,7 @@ Institutional-grade quantitative backtesting platform with PySide6 GUI.
 AGREGAT/
 ├── app.py                 # Entry point (license, splash, theme, GPU)
 ├── engine/                # Headless core (no PySide6 dependency)
-│   ├── core/              #   Iterative & linear engines
+│   ├── core/              #   Iterative backtest core
 │   ├── strategy/          #   Strategy API (Context, Param, loader)
 │   ├── data/              #   Data loading, TF aggregation
 │   ├── execution/         #   Bid/Ask model, slippage, vectorized engine
@@ -36,8 +36,7 @@ AGREGAT/
 │   ├── security/          #   License verification
 │   ├── adapters/          #   Qt signal bridge
 │   ├── observability/     #   Sentry, audit log
-│   ├── metrics/           #   Advanced metrics (registry, pain, ratios)
-│   └── ai/                #   AI DSL support
+│   └── metrics/           #   Advanced metrics (registry, pain, ratios)
 ├── gui/                   # PySide6 UI
 │   ├── main_window.py     #   Orchestrator: engine + tabs + controllers
 │   ├── chart_tab/         #   OpenGL-accelerated multi-timeframe chart
@@ -110,7 +109,6 @@ Data Source (CSV/Parquet/Feather)
 | Engine | File | Characteristics |
 |--------|------|----------------|
 | BacktestCore | `engine/core/backtest_core.py` | Iterative, per-bar step, pure Python, no Qt |
-| LINEAR LOGIC CORE | `engine/core/linear.py` | TODO — structure and purpose need documentation |
 | VectorizedEngine | `engine/execution/vectorized_engine.py` | NumPy array operations, bulk signal evaluation |
 
 The `BacktestEngine` import is a shim (`engine/backtest_engine.py`) that re-exports `QtBacktestAdapter` (the adapter wrapping `BacktestCore` with Qt signals).

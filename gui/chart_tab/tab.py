@@ -1002,6 +1002,40 @@ class ChartTab(QWidget):
         m = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
         return m.get(self.visual_tf_cb.currentText().lower(), 1)
 
+    def _build_forming_tf_from_df(self, tf: str, idx: int):
+        """Build the current visual HTF candle directly from loaded 1m data.
+
+        This is a chart-only fallback for moments when the runtime
+        aggregator has no completed/forming candle yet, such as switching
+        to a higher timeframe before the next replay step.
+        """
+        df = self.engine.df
+        if df is None or idx < 0 or idx >= len(df):
+            return None
+        minutes = self._get_tf_minutes()
+        if minutes <= 1:
+            return None
+        try:
+            time_col = pd.to_datetime(df["time"])
+            bucket_start = pd.Timestamp(time_col.iloc[idx]).floor(f"{minutes}min")
+            start = int(time_col.searchsorted(bucket_start, side="left"))
+            start = max(0, min(start, idx))
+            bucket = df.iloc[start : idx + 1]
+            if bucket.empty:
+                return None
+            result = {
+                "time": bucket_start.to_datetime64(),
+                "open": float(bucket["open"].iloc[0]),
+                "high": float(bucket["high"].max()),
+                "low": float(bucket["low"].min()),
+                "close": float(bucket["close"].iloc[-1]),
+                "volume": float(bucket["volume"].sum()) if "volume" in bucket else 0.0,
+            }
+            return result
+        except Exception:
+            logger.exception("Failed to build chart forming candle fallback for %s", tf)
+            return None
+
     # ==============================
     # Main redraw
     # ==============================
@@ -1035,6 +1069,10 @@ class ChartTab(QWidget):
                 comp = self.engine.tf_aggregator.get_completed_tail(tf, 9999999)
                 form = self.engine.tf_aggregator.get_forming(tf)
                 agg = comp + ([form] if form else [])
+                if not agg:
+                    fallback_form = self._build_forming_tf_from_df(tf, idx)
+                    if fallback_form is not None:
+                        agg = [fallback_form]
                 if agg:
                     res_df = pd.DataFrame(agg)
                 else:
@@ -1053,6 +1091,11 @@ class ChartTab(QWidget):
                 res_df = tail
 
             if len(res_df) == 0:
+                self._cached_res_df = None
+                self.price_curve.setData([], [])
+                self.current_marker.setData([], [])
+                self.candlestick_item.set_data([])
+                self.price_hline.hide()
                 return
             self._cache_key = ck
             self._cached_res_df = res_df

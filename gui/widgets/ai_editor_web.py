@@ -25,12 +25,17 @@ class UnifiedBridge(QObject):
     chart_selection_requested = Signal()
     attachment_requested = Signal(str)
     editor_model_changed = Signal()
+    editor_code_changed = Signal(str)
     chat_tabs_state_changed = Signal(str)  # JSON state pushed from JS
     rename_strategy_requested = Signal(str)  # new_name
 
     @Slot()
     def receive_editor_dirty(self) -> None:
         self.editor_model_changed.emit()
+
+    @Slot(str)
+    def receive_editor_code_changed(self, code: str) -> None:
+        self.editor_code_changed.emit(code)
 
     @Slot()
     def editor_ready(self):
@@ -185,6 +190,10 @@ class AIAssistantEditor(QWebEngineView):
     def set_editor_value(self, text: str) -> None:
         escaped = json.dumps(text or "")
         self.page().runJavaScript(f"window.set_editor_value({escaped});")
+
+    def set_editor_diagnostics(self, diagnostics: list[dict]) -> None:
+        escaped = json.dumps(diagnostics)
+        self.page().runJavaScript(f"window.set_editor_diagnostics({escaped});")
 
     def set_strategy_header_title(self, title: str) -> None:
         escaped = json.dumps(title or "")

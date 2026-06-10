@@ -462,7 +462,10 @@ class SettingsTab(QWidget):
 
         self.ai_model_cb = QComboBox()
         self.ai_model_cb.setMinimumWidth(260)
-        self.ai_model_cb.setToolTip("Model id for the selected provider (free text when Custom)")
+        self.ai_model_cb.setEditable(True)
+        self.ai_model_cb.setToolTip(
+            "Model id for the selected provider. Choose a known model or type/paste a custom id."
+        )
         f7.addRow("Model:", self.ai_model_cb)
 
         self.ai_custom_wrap = QWidget()
@@ -598,22 +601,24 @@ class SettingsTab(QWidget):
         prov = self.ai_provider_cb.currentText()
         self.ai_model_cb.blockSignals(True)
         self.ai_model_cb.clear()
-        if prov == "Custom (OpenAI-compatible)":
-            self.ai_model_cb.setEditable(True)
-            le = self.ai_model_cb.lineEdit()
-            le.setPlaceholderText("e.g. deepseek-ai/deepseek-v4-pro")
-            want = (select_model or "").strip()
-            self.ai_model_cb.setEditText(want)
+        self.ai_model_cb.setEditable(True)
+        le = self.ai_model_cb.lineEdit()
+        if le is not None:
+            le.setPlaceholderText("Type or paste a model id")
+
+        models = self.AI_PROVIDER_MODELS.get(prov, [])
+        for m in models:
+            self.ai_model_cb.addItem(m)
+
+        want = (select_model or "").strip()
+        if want:
+            if self.ai_model_cb.findText(want) < 0:
+                self.ai_model_cb.addItem(want)
+            self.ai_model_cb.setCurrentText(want)
+        elif models:
+            self.ai_model_cb.setCurrentIndex(0)
         else:
-            self.ai_model_cb.setEditable(False)
-            models = self.AI_PROVIDER_MODELS.get(prov, [])
-            for m in models:
-                self.ai_model_cb.addItem(m)
-            want = (select_model or "").strip()
-            if want and self.ai_model_cb.findText(want) >= 0:
-                self.ai_model_cb.setCurrentText(want)
-            elif models:
-                self.ai_model_cb.setCurrentIndex(0)
+            self.ai_model_cb.setEditText("")
         self.ai_model_cb.blockSignals(False)
 
     def _update_ai_custom_visibility(self) -> None:
@@ -667,8 +672,9 @@ class SettingsTab(QWidget):
 
         Persistence is wired to the same disk file as the rest of
         Settings via :meth:`_persist`. The strategy's
-        ``apply_params(values)`` method is called on every change so
-        the next backtest run picks up the new values immediately.
+        ``apply_params(values)`` method is called when the Settings
+        controller applies the draft, so the next backtest run picks up
+        the committed values.
         """
         from PySide6.QtWidgets import QLineEdit
 
@@ -754,28 +760,7 @@ class SettingsTab(QWidget):
         persisted_values = {}
         if controller is not None:
             persisted_values = controller.strategy_params_for(strategy)
-        self._loading_settings = True
-        try:
-            for name, val in persisted_values.items():
-                entry = self._strategy_widgets.get(name)
-                if entry is None:
-                    continue
-                _p, w = entry
-                try:
-                    if _p.kind == "bool":
-                        w.setChecked(bool(val))
-                    elif _p.kind == "int":
-                        w.setValue(int(val))
-                    elif _p.kind == "float":
-                        w.setValue(float(val))
-                    elif _p.kind == "choice":
-                        idx = w.findText(str(val))
-                        if idx >= 0:
-                            w.setCurrentIndex(idx)
-                except Exception:
-                    pass
-        finally:
-            self._loading_settings = False
+        self.load_strategy_params_to_ui(persisted_values)
 
         # Push current values into the strategy *and* the engine
         # (force-eod / ott toggles also need to mirror onto AssetConfig).
@@ -804,6 +789,54 @@ class SettingsTab(QWidget):
             except Exception:
                 pass
         return out
+
+    def load_strategy_params_to_ui(self, values: dict | None) -> None:
+        """Load strategy-specific settings into the strategy form only."""
+        values = values or {}
+        self._loading_settings = True
+        blocked = []
+        try:
+            for _name, (_p, w) in self._strategy_widgets.items():
+                try:
+                    w.blockSignals(True)
+                    blocked.append(w)
+                except Exception:
+                    pass
+            for name, val in values.items():
+                entry = self._strategy_widgets.get(name)
+                if entry is None:
+                    continue
+                _p, w = entry
+                try:
+                    if _p.kind == "bool":
+                        w.setChecked(bool(val))
+                    elif _p.kind == "int":
+                        w.setValue(int(val))
+                    elif _p.kind == "float":
+                        w.setValue(float(val))
+                    elif _p.kind == "choice":
+                        idx = w.findText(str(val))
+                        if idx >= 0:
+                            w.setCurrentIndex(idx)
+                    else:
+                        w.setText(str(val if val is not None else ""))
+                except Exception:
+                    pass
+        finally:
+            for w in blocked:
+                try:
+                    w.blockSignals(False)
+                except Exception:
+                    pass
+            self._loading_settings = False
+
+    def reset_strategy_params_to_defaults(self) -> None:
+        """Reset the strategy form widgets to their declared defaults."""
+        defaults = {
+            name: p.default
+            for name, (p, _w) in self._strategy_widgets.items()
+        }
+        self.load_strategy_params_to_ui(defaults)
 
     def _apply_strategy_runtime(self) -> None:
         """Apply the current strategy form to the engine + strategy."""

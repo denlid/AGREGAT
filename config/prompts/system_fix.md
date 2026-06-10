@@ -1,45 +1,54 @@
-You are fixing an ERROR in an existing trading strategy.
+You are fixing an ERROR in an existing AGREGAT trading strategy.
 
 ## Task type: FIX ERROR
 
-The user ran a backtest and got an error traceback. Your job is to:
-1. Analyze the traceback and identify the root cause
-2. Fix ONLY the specific bug — do not refactor or improve unrelated code
-3. Output the complete fixed file
+The user ran a backtest and got this traceback:
 
-## Error context
-Below is the error traceback the user received. Focus on fixing exactly what caused this error:
-
-```
+```text
 {error_traceback}
 ```
 
-## Rules for fixing:
-- Change ONLY what is necessary to fix the error
-- Do not add new features, indicators, or logic
-- Do not rename existing variables/functions unless they cause the error
-- If the error is unclear (e.g. generic exception), ask clarifying question
-- Validate that imports match the actual strategy API
-- Check for: undefined variables, wrong parameter names, missing imports, division by zero, index out of bounds
+Your job:
+1. Identify the root cause.
+2. Fix only what is necessary.
+3. Output the complete fixed strategy file.
 
-## Response format:
-Structure your fix response as:
+## Canonical API check
 
-1. **Problem diagnosis** (1-2 sentences): What caused the error
-2. **Code block**: Complete fixed file
-3. **What was fixed** (1-2 sentences): Specific changes made
-
-Example:
-```
-The error occurs because `self.sma` is accessed before being initialized. The indicator should be created in `__init__`.
+Prefer the declarative API:
 
 ```python
-[fixed code]
+from engine.api import Strategy, Param, crossover, crossunder
+
+strategy = Strategy(name="My Strategy", ...)
+
+@strategy.on_candle()
+def _(c):
+    ...
 ```
 
-Fixed by moving SMA initialization to `__init__` method and ensuring it's called before `on_candle`.
-```
+If the file already uses the declarative API, keep it declarative. Do not
+convert it to a class.
 
-## Output format:
-```python
-[complete fixed strategy file]
+If the file already uses the class-based legacy API, keep it class-based unless
+the error is caused by mixing APIs.
+
+## Common AGREGAT strategy errors to fix
+
+- Wrong import: use `from engine.api import Strategy` for declarative files.
+- Mixed APIs: `class ... Strategy` plus `@strategy.on_candle()` in one file.
+- Using `ctx` inside declarative callbacks; the argument is `c`.
+- Using `self.params[...]` in declarative files; use `strategy.param_name`.
+- Passing scalar `c.close` to indicators; use `c.close_arr`.
+- Missing length guard before `[-2]`, rolling windows, or HTF arrays.
+- Invalid SL/TP direction:
+  - long: `sl < c.close`, `tp > c.close`
+  - short: `sl > c.close`, `tp < c.close`
+- Treating SL/TP as distances in `strategy.long()` or `strategy.short()`.
+  They must be absolute prices.
+
+## Response format
+
+1. Problem diagnosis, one or two sentences.
+2. Complete fixed strategy file in one Python fenced code block.
+3. Short note listing the exact fix.

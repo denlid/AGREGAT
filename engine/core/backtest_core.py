@@ -1367,6 +1367,34 @@ class BacktestCore:
                     self._fire(self.on_drawing_changed, d_id)
                 break
 
+    def remove_drawings_by_tag(self, tag: str) -> int:
+        before = len(self.drawings)
+        removed_ids = [d.get("_id") for d in self.drawings if d.get("tag") == tag]
+        if not removed_ids:
+            return 0
+        self.drawings = [d for d in self.drawings if d.get("tag") != tag]
+        removed = before - len(self.drawings)
+        if not self._suppress_signals:
+            for d_id in removed_ids:
+                if d_id is not None:
+                    self._fire(self.on_drawing_changed, d_id)
+        return removed
+
+    def update_drawings_by_tag(self, tag: str, updates: Dict[str, Any]) -> int:
+        changed_ids: List[int] = []
+        changed = 0
+        for d in self.drawings:
+            if d.get("tag") == tag:
+                d.update(updates)
+                changed += 1
+                d_id = d.get("_id")
+                if d_id is not None:
+                    changed_ids.append(d_id)
+        if changed_ids and not self._suppress_signals:
+            for d_id in changed_ids:
+                self._fire(self.on_drawing_changed, d_id)
+        return changed
+
     def register_layer(self, tag: str, label: str, default_on: bool = True) -> None:
         """Register a layer for UI toggle. Idempotent."""
         if tag in self._registered_layers:

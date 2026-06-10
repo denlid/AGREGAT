@@ -815,6 +815,7 @@
                 let lastFlushTime = 0;
                 const FLUSH_THROTTLE_MS = 100;
                 let _suppressEditorDirty = false;
+                let _editorDiagnosticsTimer = 0;
                 let _panelCollapsed = null; // null = none, 'editor' = editor hidden, 'chat' = chat hidden
                 const EDITOR_MIN = 200;
                 const CHAT_MIN = 250;
@@ -1210,6 +1211,30 @@
 
                 function getEditorValue() {
                     return isEditorReady() ? editor.getValue() : '';
+                }
+
+                function applyEditorDiagnostics(diagnostics) {
+                    if (!isEditorReady() || !window.monaco) return;
+                    const model = editor.getModel();
+                    if (!model) return;
+
+                    const markers = Array.isArray(diagnostics) ? diagnostics.map(function (item) {
+                        const severityName = String(item.severity || 'error').toLowerCase();
+                        const severity = severityName === 'warning'
+                            ? monaco.MarkerSeverity.Warning
+                            : monaco.MarkerSeverity.Error;
+                        return {
+                            severity: severity,
+                            message: String(item.message || 'Syntax error'),
+                            startLineNumber: Math.max(Number(item.startLineNumber || 1), 1),
+                            startColumn: Math.max(Number(item.startColumn || 1), 1),
+                            endLineNumber: Math.max(Number(item.endLineNumber || item.startLineNumber || 1), 1),
+                            endColumn: Math.max(Number(item.endColumn || item.startColumn || 2), 1),
+                            source: 'AGREGAT'
+                        };
+                    }) : [];
+
+                    monaco.editor.setModelMarkers(model, 'agregat-python-syntax', markers);
                 }
 
                 // ============= VIEW ZONES MANAGEMENT =============
@@ -2194,6 +2219,10 @@
                     }
                 };
 
+                window.set_editor_diagnostics = function (diagnostics) {
+                    applyEditorDiagnostics(diagnostics);
+                };
+
                 window.apply_app_theme = function (theme) {
                     if (!theme) return;
                     const root = document.documentElement;
@@ -2223,6 +2252,17 @@
 
                 function notifyEditorDirty() {
                     if (_suppressEditorDirty) return;
+                    if (_editorDiagnosticsTimer) {
+                        clearTimeout(_editorDiagnosticsTimer);
+                    }
+                    _editorDiagnosticsTimer = setTimeout(function () {
+                        _editorDiagnosticsTimer = 0;
+                        if (pyBridge && typeof pyBridge.receive_editor_code_changed === 'function') {
+                            pyBridge.receive_editor_code_changed(getEditorValue());
+                        } else if (pyBridge && typeof pyBridge.receive_editor_dirty === 'function') {
+                            pyBridge.receive_editor_dirty();
+                        }
+                    }, 250);
                     if (pyBridge && typeof pyBridge.receive_editor_dirty === 'function') {
                         pyBridge.receive_editor_dirty();
                     }
