@@ -189,6 +189,8 @@ class ChartTab(QWidget):
         # Override wheel event for smooth independent axis zoom
         self._orig_wheelEvent = vb.wheelEvent
         vb.wheelEvent = self._smooth_wheel_zoom
+        self._orig_vb_mouseDragEvent = vb.mouseDragEvent
+        vb.mouseDragEvent = self._viewbox_mouseDragEvent
 
         # Override plot_widget mouse events for precise drawing (Brush, etc)
         self.plot_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -350,6 +352,7 @@ class ChartTab(QWidget):
         self._selection_mask_items = []
         self._selection_rect_data = None
         self._redraw_pending = False
+        self._chart_pan_cursor_active = False
         self._redraw_timer = QTimer()
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(60)
@@ -541,6 +544,19 @@ class ChartTab(QWidget):
         self.cancel_btn.hide()
         self.plot_widget.unsetCursor()
 
+    def _set_chart_pan_cursor(self, active: bool) -> None:
+        if active:
+            if not self._chart_pan_cursor_active:
+                self.plot_widget.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+                self.plot_widget.viewport().setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+                self._chart_pan_cursor_active = True
+            return
+
+        if self._chart_pan_cursor_active:
+            self.plot_widget.unsetCursor()
+            self.plot_widget.viewport().unsetCursor()
+            self._chart_pan_cursor_active = False
+
     def _create_selection_mask(self):
         self._clear_selection_mask()
         for _ in range(4):
@@ -613,6 +629,20 @@ class ChartTab(QWidget):
         self._user_zoom_width = vr[0][1] - vr[0][0]
         self._tracked_xrange = list(vr[0])
         ev.accept()
+
+    def _viewbox_mouseDragEvent(self, ev, axis=None):
+        pan_drag = (
+            self.drawing_ctrl.current_tool == "None"
+            and not self._selection_mode
+            and ev.button() == Qt.MouseButton.LeftButton
+        )
+        if pan_drag and ev.isStart():
+            self._set_chart_pan_cursor(True)
+        try:
+            return self._orig_vb_mouseDragEvent(ev, axis=axis)
+        finally:
+            if pan_drag and ev.isFinish():
+                self._set_chart_pan_cursor(False)
 
     def zoom_chart(self, factor):
         """Zoom in/out. factor>1 = zoom in, <1 = zoom out."""
@@ -732,6 +762,9 @@ class ChartTab(QWidget):
                 evt.accept()
                 return
 
+        if self.drawing_ctrl.current_tool == "None" and evt.button() == Qt.MouseButton.LeftButton:
+            self._set_chart_pan_cursor(True)
+
         return self._orig_plot_mousePressEvent(evt)
 
     def _plot_mouseDoubleClickEvent(self, evt):
@@ -783,6 +816,8 @@ class ChartTab(QWidget):
         self._orig_plot_mouseMoveEvent(evt)
 
     def _plot_mouseReleaseEvent(self, evt):
+        self._set_chart_pan_cursor(False)
+
         if self._selection_mode and self._selection_start is not None:
             scene_pos = (
                 evt.scenePos()
