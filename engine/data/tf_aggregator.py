@@ -366,6 +366,22 @@ class TimeframeAggregator:
         """
         if not self._prebuilt:
             return {tf: False for tf in self.TF_MINUTES}
+        if idx_1m == self._current_1m_idx + 1:
+            result: Dict[str, bool] = {}
+            for tf in self.TF_MINUTES:
+                cp = self._completion_points.get(tf)
+                if cp is None or idx_1m < 0:
+                    self._completed_count[tf] = 0
+                    result[tf] = False
+                    continue
+                cnt = self._completed_count[tf]
+                if cnt < cp.size and cp[cnt] == idx_1m:
+                    self._completed_count[tf] = cnt + 1
+                    result[tf] = True
+                else:
+                    result[tf] = False
+            self._current_1m_idx = idx_1m
+            return result
         result: Dict[str, bool] = {}
         for tf in self.TF_MINUTES:
             cp = self._completion_points.get(tf)

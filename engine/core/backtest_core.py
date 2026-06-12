@@ -23,6 +23,7 @@ Design notes:
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 from typing import Any, Callable, Dict, Iterator, List, Optional, TYPE_CHECKING
 
 import numpy as np
@@ -66,6 +67,17 @@ def _drawing_time_to_datetime64(value: Any) -> np.datetime64:
     strings after passing through the public drawing API; parse those by unit
     instead of letting pandas treat the digits as a calendar date.
     """
+    if isinstance(value, np.datetime64):
+        return value.astype("datetime64[ns]")
+    if isinstance(value, pd.Timestamp):
+        return value.to_datetime64()
+    if isinstance(value, (datetime, date)):
+        return np.datetime64(value, "ns")
+    to_datetime64 = getattr(value, "to_datetime64", None)
+    if callable(to_datetime64):
+        converted = to_datetime64()
+        if isinstance(converted, np.datetime64):
+            return converted.astype("datetime64[ns]")
     try:
         return pd.to_datetime(value).to_datetime64()
     except (OverflowError, ValueError, TypeError, pd.errors.OutOfBoundsDatetime):
@@ -275,11 +287,13 @@ class BacktestCore:
         self.pending_order: Optional[PendingOrder] = None
         self.trades: List[Trade] = []
         self.drawings: List[Dict[str, Any]] = []
+        self._drawings_by_id: Dict[int, Dict[str, Any]] = {}
         self._next_drawing_id = 0
         self._registered_layers: set[str] = set()
         self._next_trade_id = 0
         self._suppress_signals = False
         self._suppress_drawings = False
+        self._suppress_strategy_logs = False
 
         # Incremental stats accumulators
         self._stats_wins = 0
@@ -637,6 +651,7 @@ class BacktestCore:
         trades_count = len(self.trades)
         self.trades.clear()
         self.drawings.clear()
+        self._drawings_by_id.clear()
         self._next_drawing_id = 0
         self._registered_layers.clear()
         self._next_trade_id = 0
@@ -1386,28 +1401,33 @@ class BacktestCore:
         # Cache numpy datetime64 for fast rendering
         if "t" in kwargs:
             kwargs["_t_np"] = _drawing_time_to_datetime64(kwargs["t"])
+            kwargs["t"] = str(kwargs["t"])
         if "t1" in kwargs:
             kwargs["_t1_np"] = _drawing_time_to_datetime64(kwargs["t1"])
+            kwargs["t1"] = str(kwargs["t1"])
         if "t2" in kwargs:
             kwargs["_t2_np"] = _drawing_time_to_datetime64(kwargs["t2"])
+            kwargs["t2"] = str(kwargs["t2"])
         self.drawings.append(kwargs)
+        self._drawings_by_id[self._next_drawing_id] = kwargs
         if not self._suppress_drawings and not self._suppress_signals:
             self._fire(self.on_drawing_changed, self._next_drawing_id)
         return self._next_drawing_id
 
     def remove_drawing(self, d_id: int) -> None:
-        before = len(self.drawings)
+        if self._drawings_by_id.pop(d_id, None) is None:
+            return
         self.drawings = [d for d in self.drawings if d.get("_id") != d_id]
-        if len(self.drawings) != before and not self._suppress_signals:
+        if not self._suppress_signals:
             self._fire(self.on_drawing_changed, d_id)
 
     def update_drawing(self, d_id: int, updates: Dict[str, Any]) -> None:
-        for d in self.drawings:
-            if d.get("_id") == d_id:
-                d.update(updates)
-                if not self._suppress_signals:
-                    self._fire(self.on_drawing_changed, d_id)
-                break
+        d = self._drawings_by_id.get(d_id)
+        if d is None:
+            return
+        d.update(updates)
+        if not self._suppress_signals:
+            self._fire(self.on_drawing_changed, d_id)
 
     def remove_drawings_by_tag(self, tag: str) -> int:
         before = len(self.drawings)
@@ -1415,6 +1435,9 @@ class BacktestCore:
         if not removed_ids:
             return 0
         self.drawings = [d for d in self.drawings if d.get("tag") != tag]
+        for d_id in removed_ids:
+            if d_id is not None:
+                self._drawings_by_id.pop(d_id, None)
         removed = before - len(self.drawings)
         if not self._suppress_signals:
             for d_id in removed_ids:
@@ -1583,18 +1606,23 @@ class BacktestCore:
         # Встановлюємо пригнічення ДО reset(), щоб reset() не викликав
         # Qt сигнали (update_stats, on_step_completed) з фонового потоку.
         # Інакше графік очищується і залишається пустим після Cancel/завершення.
+        old_suppress_strategy_logs = self._suppress_strategy_logs
         self._suppress_signals = True
         self._suppress_drawings = True
-        self.reset()
+        self._suppress_strategy_logs = True
+        try:
+            self.reset()
 
-        for i in range(self.total_bars):
-            # Cooperative cancellation check
-            if cancel_token is not None and cancel_token.is_set():
-                logger.info("⚠️ Headless visual run cancelled by user")
-                break
-            ok = self._process_one_candle(i)
-            if not ok:
-                raise RuntimeError(self.last_run_error or f"Strategy run failed at candle #{i}")
+            for i in range(self.total_bars):
+                # Cooperative cancellation check
+                if cancel_token is not None and cancel_token.is_set():
+                    logger.info("⚠️ Headless visual run cancelled by user")
+                    break
+                ok = self._process_one_candle(i)
+                if not ok:
+                    raise RuntimeError(self.last_run_error or f"Strategy run failed at candle #{i}")
+        finally:
+            self._suppress_strategy_logs = old_suppress_strategy_logs
 
         # DO NOT restore flags here — they will be restored by the caller
         # on the main thread. Also do NOT emit any Qt signals from this

@@ -8,9 +8,11 @@ import importlib.util
 import logging
 import math
 import os
+from datetime import date, datetime
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from engine.models.models import (
@@ -668,6 +670,8 @@ class Context:
 
     # --- Logging ---
     def log(self, message: str) -> None:
+        if getattr(self._engine, "_suppress_strategy_logs", False):
+            return
         t_str = self._format_time()
         logger.info(f"{t_str}[Strategy] {message}")
 
@@ -690,9 +694,9 @@ class Context:
         line_id: int = self._engine.add_drawing(
             {
                 "type": "line",
-                "t1": str(t1),
+                "t1": t1,
                 "p1": p1,
-                "t2": str(t2),
+                "t2": t2,
                 "p2": p2,
                 "color": color,
                 "width": width,
@@ -715,9 +719,9 @@ class Context:
         rect_id: int = self._engine.add_drawing(
             {
                 "type": "rect",
-                "t1": str(t1),
+                "t1": t1,
                 "p1": p1,
-                "t2": str(t2),
+                "t2": t2,
                 "p2": p2,
                 "color": color,
                 "fill": fill,
@@ -733,7 +737,7 @@ class Context:
         text_id: int = self._engine.add_drawing(
             {
                 "type": "text",
-                "t": str(t),
+                "t": t,
                 "p": p,
                 "text": text,
                 "color": color,
@@ -759,6 +763,14 @@ class Context:
         t = self.candle.get("time", "")
         if t:
             try:
+                if isinstance(t, pd.Timestamp):
+                    return f"[{t.strftime('%Y-%m-%d %H:%M')}] "
+                if isinstance(t, datetime):
+                    return f"[{t.strftime('%Y-%m-%d %H:%M')}] "
+                if isinstance(t, date):
+                    return f"[{datetime.combine(t, datetime.min.time()).strftime('%Y-%m-%d %H:%M')}] "
+                if isinstance(t, np.datetime64):
+                    return f"[{pd.Timestamp(t).strftime('%Y-%m-%d %H:%M')}] "
                 return f"[{pd.to_datetime(t).strftime('%Y-%m-%d %H:%M')}] "
             except Exception:
                 pass

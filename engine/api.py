@@ -96,27 +96,33 @@ class _Context:
     # ── 1m data (scalars) ──
     @property
     def close(self) -> float:
-        return float(self._ctx.data.close[-1])
+        engine = self._ctx._engine
+        return float(engine._close[engine.current_idx])
 
     @property
     def high(self) -> float:
-        return float(self._ctx.data.high[-1])
+        engine = self._ctx._engine
+        return float(engine._high[engine.current_idx])
 
     @property
     def low(self) -> float:
-        return float(self._ctx.data.low[-1])
+        engine = self._ctx._engine
+        return float(engine._low[engine.current_idx])
 
     @property
     def open_(self) -> float:
-        return float(self._ctx.data.open[-1])
+        engine = self._ctx._engine
+        return float(engine._open[engine.current_idx])
 
     @property
     def volume(self) -> float:
-        return float(self._ctx.data.volume[-1])
+        engine = self._ctx._engine
+        return float(engine._volume[engine.current_idx])
 
     @property
     def time(self) -> Any:
-        return self._ctx.candle.get("time")
+        engine = self._ctx._engine
+        return engine._time[engine.current_idx]
 
     # ── 1m arrays ──
     @property
@@ -561,8 +567,8 @@ class Strategy:
         ctx = _current_ctx
         if ctx is not None:
             return ctx.draw_line(
-                str(t1), float(p1),
-                str(t2), float(p2),
+                t1, float(p1),
+                t2, float(p2),
                 color=color, width=width, tag=tag,
             )
         return 0
@@ -574,8 +580,8 @@ class Strategy:
         ctx = _current_ctx
         if ctx is not None:
             return ctx.draw_rect(
-                str(t1), float(p1),
-                str(t2), float(p2),
+                t1, float(p1),
+                t2, float(p2),
                 color=color, fill=fill,
                 opacity=opacity, tag=tag,
             )
@@ -587,7 +593,7 @@ class Strategy:
         ctx = _current_ctx
         if ctx is not None:
             return ctx.draw_text(
-                str(t), float(p),
+                t, float(p),
                 text, color=color, tag=tag,
             )
         return 0

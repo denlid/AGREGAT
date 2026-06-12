@@ -1,3 +1,5 @@
+import pandas as pd
+
 from engine.api import Strategy, Param
 
 
@@ -16,6 +18,10 @@ strategy._fvg_list  = []        # list of active FVG dicts
 strategy._htf_trend = None      # 'bullish', 'bearish', or None
 
 MAX_PIVOT_HISTORY = 10   # Keep last N pivots to avoid infinite list
+
+
+def _time_tag_part(value):
+    return pd.Timestamp(value).value
 
 
 def _find_last_swing_high(arr, min_dist):
@@ -142,7 +148,7 @@ def _update_htf_structure(c):
         t_start = c.time_htf_arr[-3]   # time of intermediate candle
         t_end = c.time_htf             # current candle time
         col = 'green' if fvg['dir'] == 'bull' else 'red'
-        tag = f"fvg_{int(t_start)}_{int(t_end)}"
+        tag = f"fvg_{_time_tag_part(t_start)}_{_time_tag_part(t_end)}"
         # Remove stale drawings for ALL inactive FVGs first
         for old_fvg in strategy._fvg_list[:]:
             if old_fvg is not fvg and old_fvg.get('drawing_id'):

@@ -82,6 +82,13 @@ class _BuyOnce(Strategy):
             self._sent = True
 
 
+class _LogEveryCandle(Strategy):
+    """Strategy that exercises ctx.log in the headless hot path."""
+
+    def on_candle(self, ctx) -> None:  # type: ignore[override]
+        ctx.log("tick")
+
+
 def _df() -> pd.DataFrame:
     rows = [
         ("2024-01-02 10:00", 100, 105, 100, 102),
@@ -128,6 +135,20 @@ def test_core_runs_a_backtest_without_qcoreapplication():
     assert core.current_idx == 2
     assert core.position is not None
     assert core.position.direction == "long"
+
+
+def test_run_visual_headless_suppresses_strategy_logs(caplog):
+    core = _make_core()
+    core.load_data(_df())
+    core.load_strategy(_LogEveryCandle())
+
+    core._suppress_strategy_logs = False
+    with caplog.at_level("INFO", logger="StrategyTester.engine.context"):
+        result = core.run_visual_headless()
+
+    assert result is not None
+    assert core._suppress_strategy_logs is False
+    assert not any("[Strategy] tick" in record.getMessage() for record in caplog.records)
 
 
 def test_core_callbacks_fire_in_correct_order():
@@ -184,9 +205,12 @@ def test_drawing_callbacks_fire_with_id() -> None:
 
     drawing_id = core.add_drawing({"t": "2024-01-02 10:00", "kind": "marker"})
     assert seen_ids[-1] == drawing_id
+    assert core._drawings_by_id[drawing_id] is core.drawings[-1]
 
     core.update_drawing(drawing_id, {"kind": "marker-updated"})
+    assert core._drawings_by_id[drawing_id]["kind"] == "marker-updated"
     core.remove_drawing(drawing_id)
+    assert drawing_id not in core._drawings_by_id
     assert seen_ids[-1] == drawing_id
 
 
@@ -226,6 +250,9 @@ def test_drawing_batch_operations_by_tag() -> None:
 
     assert core.remove_drawings_by_tag("fvg") == 2
     assert [d.get("_id") for d in core.drawings] == [text]
+    assert rect_1 not in core._drawings_by_id
+    assert rect_2 not in core._drawings_by_id
+    assert text in core._drawings_by_id
     assert seen_ids[-2:] == [rect_1, rect_2]
 
 
@@ -240,6 +267,7 @@ def test_reset_clears_strategy_drawings() -> None:
     core.reset()
 
     assert core.drawings == []
+    assert core._drawings_by_id == {}
     assert core._next_drawing_id == 0
     assert core.add_drawing({"t": "2024-01-02 10:01", "kind": "marker"}) == 1
 
