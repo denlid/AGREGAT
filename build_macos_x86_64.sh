@@ -47,6 +47,7 @@ python3 -m nuitka \
     --macos-target-arch="$ARCH" \
     --include-data-dir=gui/themes=gui/themes \
     --include-data-dir=gui/widgets=gui/widgets \
+    --include-data-dir=gui/web=gui/web \
     --include-data-dir=config=config \
     --include-data-dir=strategies=strategies \
     --include-package=engine \

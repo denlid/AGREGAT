@@ -9,6 +9,7 @@ python -m nuitka ^
     --enable-plugin=pyside6 ^
     --include-data-dir=gui/themes=gui/themes ^
     --include-data-dir=gui/widgets=gui/widgets ^
+    --include-data-dir=gui/web=gui/web ^
     --include-data-dir=config=config ^
     --include-data-dir=strategies=strategies ^
     --include-package=engine ^

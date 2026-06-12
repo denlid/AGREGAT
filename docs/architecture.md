@@ -43,6 +43,7 @@ AGREGAT/
 │   ├── tabs/              #   Stats, Trades, Analytics, Quant, Settings, Log
 │   ├── controllers/       #   Session, replay, settings, theme, toolbar, menu
 │   ├── widgets/           #   Bar replay, AI editor, metric cards, sparklines
+│   ├── web/               #   WebEngine app assets (AI editor HTML/CSS/JS)
 │   ├── dialogs/           #   Monte Carlo, custom asset, cheat sheet
 │   ├── styling/           #   Theme engine (dark/light)
 │   ├── components/        #   Toast, animations, quantum spinner
