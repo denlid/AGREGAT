@@ -19,20 +19,32 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from engine.analytics.trade_analytics import resolve_r_multiple
+
 logger = logging.getLogger("StrategyTester.gui.shared_data_cache")
 
 
 def _trade_cache_key(trades: List[Any], initial_equity: float) -> Tuple:
-    """Stable-ish key to detect trade list changes.
+    """Stable cache key (AI-6). Detects appends, resets, and in-place edits.
 
-    Uses length + last id + last exit timestamp (np preferred) + initial equity.
+    Checksumming the last 10 PnLs guards against some in-place mutations
+    or deletions that don't change the list length.
     """
     if not trades:
-        return (0, initial_equity)
+        return (0, None, None, float(initial_equity), 0.0)
     last = trades[-1]
     last_id = getattr(last, "id", None)
     last_xt = getattr(last, "exit_time_np", None) or getattr(last, "exit_time", None)
-    return (len(trades), last_id, str(last_xt), float(initial_equity))
+
+    # Detect in-place edits by summing last few PnLs
+    pnl_checksum = 0.0
+    try:
+        sample = trades[-10:]
+        pnl_checksum = sum(float(getattr(t, "pnl", 0.0) or 0.0) for t in sample)
+    except Exception:
+        pass
+
+    return (len(trades), last_id, str(last_xt), float(initial_equity), pnl_checksum)
 
 
 @dataclass
@@ -275,11 +287,8 @@ class SharedTradesCache:
 
         rr_arr = np.empty(n, dtype=float)
         for i, t in enumerate(trades):
-            rr_v = getattr(t, "rr", None)
-            try:
-                rr_arr[i] = float(rr_v) if rr_v is not None and np.isfinite(float(rr_v)) else np.nan
-            except Exception:
-                rr_arr[i] = np.nan
+            # Phase 1 stabilization — use centralized R-multiple resolver (AI-3)
+            rr_arr[i] = resolve_r_multiple(t)
         rr_finite = rr_arr[np.isfinite(rr_arr)]
         avg_rr = float(rr_finite.mean()) if rr_finite.size > 0 else 0.0
         pos_rr = rr_finite[rr_finite > 0]

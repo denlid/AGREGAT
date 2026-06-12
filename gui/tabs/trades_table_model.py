@@ -168,6 +168,14 @@ COL_RR = 18
 
 def _calc_rr(trade: Any) -> float:
     """Risk/Reward ratio (R-multiple). 0 when SL was zero / unknown."""
+    # Phase 1 Stabilization Step 5 — prioritise pre-computed RR from engine
+    rr = getattr(trade, "rr", None)
+    if rr is not None:
+        try:
+            return float(rr)
+        except (TypeError, ValueError):
+            pass
+
     try:
         initial_sl = getattr(trade, "initial_sl", None)
         if initial_sl is None or initial_sl == 0:
@@ -372,6 +380,9 @@ class TradesTableModel(QAbstractTableModel):
             self._is_long = np.concatenate([self._is_long, dir_arr == "LONG"])
             self._is_short = np.concatenate([self._is_short, dir_arr == "SHORT"])
 
+        # Phase 1 stabilization — incremental anomaly pass (AI-10)
+        self._compute_anomalies(start_idx=old_n)
+
     # ------------------------------------------------------------------
     # Phase 6.2 — sort-key + search-blob caches
     # ------------------------------------------------------------------
@@ -464,7 +475,7 @@ class TradesTableModel(QAbstractTableModel):
             self._drill_year = np.zeros(n, dtype=np.int16)
             self._drill_month = np.zeros(n, dtype=np.int8)
 
-        # Precompute direction booleans for fast filter mask (🟡16)
+        # Phase 6.3 — precompute direction booleans for fast filter mask (🟡16)
         directions = self._string_keys.get(COL_DIRECTION, [])
         if directions:
             dir_arr = np.asarray(directions, dtype=object)
@@ -474,16 +485,36 @@ class TradesTableModel(QAbstractTableModel):
             self._is_long = np.zeros(n, dtype=bool)
             self._is_short = np.zeros(n, dtype=bool)
 
-        # Phase 2 EPIC 2.3 — anomaly stripe.
-        # Outlier = |pnl| > μ + 3σ OR duration > μ + 3σ. The stripe is
-        # painted on the first column via BackgroundRole — amber for size
-        # outliers, green for big-win pnl outliers, red for big-loss.
-        # Fully vectorised so 60k-trade sessions stay below a few ms.
-        self._anomaly_kind = np.zeros(n, dtype=np.int8)  # 0 none, 1 size, 2 win, 3 loss
-        self._anomaly_text: list[str] = [""] * n
+        self._compute_anomalies(start_idx=0)
+
+    def _compute_anomalies(self, start_idx: int = 0) -> None:
+        """Phase 2 EPIC 2.3 — anomaly stripe detection (AI-10).
+
+        If start_idx > 0, we are performing an incremental pass on new trades.
+        """
+        n = len(self._trades)
+        if n == 0:
+            self._anomaly_kind = np.zeros(0, dtype=np.int8)
+            self._anomaly_text = []
+            return
+
+        if start_idx == 0:
+            self._anomaly_kind = np.zeros(n, dtype=np.int8)
+            self._anomaly_text = [""] * n
+        else:
+            # Incremental: extend arrays if needed
+            if self._anomaly_kind.size < n:
+                ext_n = n - self._anomaly_kind.size
+                self._anomaly_kind = np.concatenate(
+                    [self._anomaly_kind, np.zeros(ext_n, dtype=np.int8)]
+                )
+                self._anomaly_text.extend([""] * ext_n)
+
         try:
             pnl_arr = self._numeric_keys[COL_PNL_DOLLARS]
             dur_arr = self._numeric_keys[COL_DURATION]
+
+            # Re-calculate thresholds on the full set for accuracy
             abs_pnl = np.abs(pnl_arr)
             pnl_sd = float(abs_pnl.std(ddof=0))
             dur_sd = float(dur_arr.std(ddof=0))
@@ -491,36 +522,34 @@ class TradesTableModel(QAbstractTableModel):
             dur_thr = float(dur_arr.mean() + 3.0 * dur_sd) if dur_sd > 0 else np.inf
 
             pnl_mask = (pnl_sd > 0) & (abs_pnl > pnl_thr)
-            dur_mask = (dur_sd > 0) & (dur_arr > dur_thr) & ~pnl_mask  # pnl wins priority
+            dur_mask = (dur_sd > 0) & (dur_arr > dur_thr) & ~pnl_mask
             win_mask = pnl_mask & (pnl_arr > 0)
             loss_mask = pnl_mask & (pnl_arr <= 0)
 
-            self._anomaly_kind[win_mask] = 2
-            self._anomaly_kind[loss_mask] = 3
-            self._anomaly_kind[dur_mask] = 1
+            # Evaluate only the new slice [start_idx:]
+            idx_to_check = np.arange(start_idx, n)
+            self._anomaly_kind[idx_to_check] = 0
+            self._anomaly_kind[idx_to_check[win_mask[idx_to_check]]] = 2
+            self._anomaly_kind[idx_to_check[loss_mask[idx_to_check]]] = 3
+            self._anomaly_kind[idx_to_check[dur_mask[idx_to_check]]] = 1
 
-            # Format reason strings only for the (typically tiny) outlier set.
-            win_idx = np.where(win_mask)[0]
-            loss_idx = np.where(loss_mask)[0]
-            dur_idx = np.where(dur_mask)[0]
-            for i in win_idx:
-                self._anomaly_text[i] = (
-                    f"Outlier win: ${pnl_arr[i]:+,.0f} (> μ+3σ = ${pnl_thr:,.0f})."
-                )
-            for i in loss_idx:
-                self._anomaly_text[i] = (
-                    f"Outlier loss: ${pnl_arr[i]:+,.0f} "
-                    f"(> μ+3σ = ${pnl_thr:,.0f} in magnitude)."
-                )
-            for i in dur_idx:
-                self._anomaly_text[i] = (
-                    f"Outlier duration: {int(dur_arr[i])} min "
-                    f"(> μ+3σ = {dur_thr:,.0f} min)."
-                )
+            for i in idx_to_check:
+                if win_mask[i]:
+                    self._anomaly_text[i] = (
+                        f"Outlier win: ${pnl_arr[i]:+,.0f} (> μ+3σ = ${pnl_thr:,.0f})."
+                    )
+                elif loss_mask[i]:
+                    self._anomaly_text[i] = (
+                        f"Outlier loss: ${pnl_arr[i]:+,.0f} "
+                        f"(> μ+3σ = ${pnl_thr:,.0f} in magnitude)."
+                    )
+                elif dur_mask[i]:
+                    self._anomaly_text[i] = (
+                        f"Outlier duration: {int(dur_arr[i])} min "
+                        f"(> μ+3σ = {dur_thr:,.0f} min)."
+                    )
         except Exception:
-            # Defensive: leave anomaly arrays zeroed if anything fails.
-            self._anomaly_kind = np.zeros(n, dtype=np.int8)
-            self._anomaly_text = [""] * n
+            pass
 
     def search_blob(self, source_row: int) -> str:
         """Return the precomputed lowercased search blob for ``source_row``."""
@@ -1165,28 +1194,18 @@ class TradesFilterProxy(QAbstractTableModel):
         rr_values = src._numeric_keys.get(COL_RR)
         durations = src._numeric_keys.get(COL_DURATION)
 
+        # 1. Base filter types (Wins, Losses, BE, Long, Short)
         if ft == "Wins" and pnls is not None:
-            mask &= pnls > 0
+            mask &= (pnls > 1e-9)
         elif ft == "Losses" and pnls is not None:
-            mask &= pnls < 0
+            mask &= (pnls < -1e-9)
         elif ft == "BE" and pnls is not None:
-            mask &= pnls == 0
+            mask &= (np.abs(pnls) <= 1e-9)
         elif ft in ("Long", "Short"):
             target_long = ft == "Long"
             dir_mask = src._is_long if target_long else src._is_short
-            if dir_mask.size == n:
+            if dir_mask is not None and dir_mask.size == n:
                 mask &= dir_mask
-        elif ft == "Custom Date":
-            et = src._datetime_keys.get(COL_ENTRY_TIME)
-            if et is None:
-                # No precomputed timestamps → reject everything to mimic
-                # the legacy proxy (which short-circuited on ``None``).
-                mask &= False
-            else:
-                if self._date_from is not None:
-                    mask &= et >= self._date_from
-                if self._date_to is not None:
-                    mask &= et <= self._date_to
         # Phase 6.3 — extended filter presets
         elif ft == "Large Wins (>2R)" and rr_values is not None and pnls is not None:
             mask &= (pnls > 0) & (rr_values > 2.0)
@@ -1197,7 +1216,19 @@ class TradesFilterProxy(QAbstractTableModel):
         elif ft == "Short Duration (<5m)" and durations is not None:
             mask &= durations < 5
 
-        # Phase 6.3 — heatmap drill-down filters
+        # 2. Date Filtering (AI-2: Applies to all filter types)
+        # This covers both "Custom Date" and global "Period Sync".
+        et = src._datetime_keys.get(COL_ENTRY_TIME)
+        if et is not None:
+            if self._date_from is not None:
+                mask &= et >= self._date_from
+            if self._date_to is not None:
+                mask &= et <= self._date_to
+        elif ft == "Custom Date":
+            # If we explicitly asked for Custom Date but have no timestamps, reject all.
+            mask &= False
+
+        # 3. Heatmap drill-down filters (Phase 6.3)
         if hasattr(src, "_drill_hour") and self._filter_hour is not None:
             mask &= src._drill_hour == self._filter_hour
         if hasattr(src, "_drill_weekday") and self._filter_weekday is not None:
@@ -1210,7 +1241,9 @@ class TradesFilterProxy(QAbstractTableModel):
         if self._search_text:
             blobs = src._search_blobs
             needle = self._search_text
-            search_mask = np.fromiter((needle in b for b in blobs), dtype=bool, count=n)
+            # Phase 1 stabilization — faster search (AI-9)
+            # List comprehension is significantly faster than generator in fromiter
+            search_mask = np.array([needle in b for b in blobs], dtype=bool)
             if search_mask.size == n:
                 mask &= search_mask
 

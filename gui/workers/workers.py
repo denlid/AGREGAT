@@ -124,7 +124,12 @@ class ComputeWorker(QObject):
     def _do_run(self) -> None:
         # Pass the cancel flag to the callable iff it accepts a `cancel_token`
         # kwarg; otherwise call as-is.
+        import inspect
+        sig = inspect.signature(self._fn)
         kwargs = dict(self._kwargs)
+        if "cancel_token" in sig.parameters:
+            kwargs["cancel_token"] = self._cancel
+
         try:
             try:
                 result = self._fn(*self._args, **kwargs)

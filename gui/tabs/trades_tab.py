@@ -918,18 +918,22 @@ class TradesTab(QWidget):
                 idx = mw.tabs.indexOf(mw.chart_tab)
             except Exception:
                 idx = -1
-            mw.tabs.setCurrentIndex(idx if idx >= 0 else 0)
+            if idx >= 0:
+                mw.tabs.setCurrentIndex(idx)
+                # Force UI update to ensure chart is initialized/visible
+                QApplication.processEvents()
         except Exception as e:
             logger.warning(f"Failed to switch to chart tab: {e}")
             return
 
         # Safe focus_trade call
-        if not hasattr(mw, 'chart_tab') or mw.chart_tab is None:
+        if not hasattr(mw, "chart_tab") or mw.chart_tab is None:
             logger.warning("Chart tab not available")
             return
 
         try:
-            mw.chart_tab.focus_trade(trade, force=True)
+            # Phase 1 Stabilization Step 2: Delay focus to allow chart layout to stabilize
+            QTimer.singleShot(100, lambda: mw.chart_tab.focus_trade(trade, force=True))
         except Exception as e:
             logger.exception(f"focus_trade failed: {e}")
 

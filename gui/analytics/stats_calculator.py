@@ -19,6 +19,7 @@ from engine.analytics.risk_metrics import (
     ulcer_index as _eng_ulcer,
     value_at_risk as _eng_var,
 )
+from engine.analytics.trade_analytics import resolve_r_multiple
 from gui.shared_data_cache import _trade_cache_key
 
 logger = logging.getLogger("StrategyTester.gui.stats_calculator")
@@ -96,11 +97,8 @@ class StatsCalculator:
                 pnl_arr[i] = float(getattr(t, "pnl", 0.0) or 0.0)
             except Exception:
                 pnl_arr[i] = 0.0
-            rr_v = getattr(t, "rr", None)
-            try:
-                rr_arr[i] = float(rr_v) if rr_v is not None and np.isfinite(float(rr_v)) else np.nan
-            except Exception:
-                rr_arr[i] = np.nan
+            # Phase 1 stabilization — use centralized R-multiple resolver (AI-3)
+            rr_arr[i] = resolve_r_multiple(t)
             try:
                 dur_arr[i] = int(getattr(t, "duration_minutes", 0) or 0)
             except Exception:

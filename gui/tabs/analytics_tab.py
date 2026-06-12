@@ -40,6 +40,7 @@ from engine.analytics.risk_metrics import risk_of_ruin as _risk_of_ruin, time_un
 from engine.analytics.trade_analytics import (
     drawdown_durations,
     exit_reason_attribution,
+    filter_trades_by_period,
     hour_weekday_heatmap,
     mae_mfe_arrays,
     month_year_heatmap,
@@ -66,6 +67,7 @@ from gui.styling.theme import (
     unregister_theme_listener,
 )
 from gui.workers.workers import ComputeWorker, Spinner
+from gui.widgets.empty_state import EmptyState
 from gui.widgets.metric_card import MetricCard
 from gui.widgets.simple_table_model import SimpleTableModel
 from gui.shared_data_cache import SessionRow, _trade_cache_key
@@ -80,11 +82,20 @@ logger = logging.getLogger("StrategyTester.gui.analytics_tab")
 WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-def _compute_heatmaps(trades: list) -> dict:
-    """Worker-thread helper: aggregate hour×weekday and year×month PnL grids."""
+def _compute_heatmaps(trades: list, cancel_token=None) -> dict:
+    """Worker-thread helper: aggregate hour×weekday and year×month PnL grids.
+
+    Phase 1 Stabilization Step 4 — polling cancel_token for responsiveness.
+    """
+    if cancel_token and cancel_token.is_set():
+        return {}
+    hw = hour_weekday_heatmap(trades)
+    if cancel_token and cancel_token.is_set():
+        return {}
+    my = month_year_heatmap(trades)
     return {
-        "hw": hour_weekday_heatmap(trades),
-        "my": month_year_heatmap(trades),
+        "hw": hw,
+        "my": my,
     }
 
 
@@ -131,6 +142,30 @@ _ANALYTICS_CARD_HELP: dict[str, tuple[str, str]] = {
 }
 
 
+def _compute_r_multiples(trades: list, cancel_token=None) -> dict:
+    """Worker helper: compute R-multiples (AI-8)."""
+    if not trades:
+        return {}
+    res = r_multiples(trades)
+    return {"res": res}
+
+
+def _compute_attribution(trades: list, cancel_token=None) -> dict:
+    """Worker helper: compute attribution (AI-8)."""
+    if not trades:
+        return {}
+    rows = exit_reason_attribution(trades)
+    return {"rows": rows}
+
+
+def _compute_mae_mfe(trades: list, cancel_token=None) -> dict:
+    """Worker helper: compute MAE/MFE (AI-8)."""
+    if not trades:
+        return {}
+    res = mae_mfe_arrays(trades)
+    return {"res": res}
+
+
 class AnalyticsTab(QWidget):
     drill_down_requested = Signal(dict)
 
@@ -144,6 +179,10 @@ class AnalyticsTab(QWidget):
         self._period_kind: str = "ALL"
         self._period_start = None
         self._period_end = None
+
+        self._empty_analytics_widget: QWidget | None = None
+        self._empty_analytics_card: QLabel | None = None
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -177,6 +216,17 @@ class AnalyticsTab(QWidget):
         self.sub_tabs = QTabWidget()
         layout.addWidget(self.sub_tabs)
 
+        # Empty state placeholder — Phase 1 Stabilization Step 1
+        self._empty_state = EmptyState(
+            icon="\U0001F52E",
+            headline="The crystal ball is empty",
+            subtitle="Backtest a strategy or upload your journal to unlock deep quantitative insights",
+            cta_text="",
+            parent=self,
+        )
+        self._empty_state.hide()
+        layout.addWidget(self._empty_state)
+
         self._spinner = Spinner(self.sub_tabs, caption="Loading analytics…")
         self._spinner.cover(self.sub_tabs)
 
@@ -193,6 +243,18 @@ class AnalyticsTab(QWidget):
         self._heatmap_worker = None
         self._heatmap_gen = 0
         self._heatmap_lock = threading.Lock()
+
+        self._r_worker = None
+        self._r_gen = 0
+        self._r_lock = threading.Lock()
+
+        self._attr_worker = None
+        self._attr_gen = 0
+        self._attr_lock = threading.Lock()
+
+        self._mae_worker = None
+        self._mae_gen = 0
+        self._mae_lock = threading.Lock()
 
         # Lazy tab factories — only create heavy content on first activation
         self._tab_factories: dict = {}
@@ -1082,54 +1144,183 @@ class AnalyticsTab(QWidget):
             if self._spinner is not None:
                 self._spinner.stop()
 
+    def _resolve_period_window(self) -> tuple[np.datetime64 | None, np.datetime64 | None]:
+        """Phase 1 stabilization — use centralized period resolver (AI-1)."""
+        return resolve_period_window(self._period_kind, self._period_start, self._period_end)
+
     def _sorted_trades(self):
+        """Centralised access to engine trades, sorted and period-filtered (AI-1)."""
         cache = getattr(self.engine, "_shared_cache", None)
         if cache is not None:
-            return cache.get_sorted_trades()
-        trades = list(getattr(self.engine, "trades", []) or [])
-        if not trades:
-            return []
-        try:
-            ets = [getattr(t, "entry_time_np", None) or pd.to_datetime(t.entry_time) for t in trades]
-            order = np.argsort(ets)
-            return [trades[i] for i in order]
-        except Exception:
-            return sorted(trades, key=lambda t: str(getattr(t, "entry_time", "")))
+            trades = cache.get_sorted_trades()
+        else:
+            trades = list(getattr(self.engine, "trades", []) or [])
+            if not trades:
+                return []
+            try:
+                ets = [getattr(t, "entry_time_np", None) or pd.to_datetime(t.entry_time) for t in trades]
+                order = np.argsort(ets)
+                trades = [trades[i] for i in order]
+            except Exception:
+                trades = sorted(trades, key=lambda t: str(getattr(t, "entry_time", "")))
 
-    def _update_equity_curve(self):
-        if not self.engine.trades:
-            self.equity_curve.setData([], [])
-            self.equity_baseline.setData([], [])
-            self.peak_curve.setData([], [])
-            self.drawdown_curve.setData([], [])
-            self.drawdown_zero.setData([], [])
-            for lbl in getattr(self, "_eq_trade_labels", []):
-                try:
-                    self.equity_plot.removeItem(lbl)
-                except RuntimeError:
-                    pass
-            self._eq_trade_labels = []
-            if not hasattr(self, "_empty_eq_label"):
-                self._empty_eq_label = pg.TextItem(anchor=(0.5, 0.5))
-                self.equity_plot.addItem(self._empty_eq_label)
-            self._empty_eq_label.setHtml('<div style="text-align:center; font-size:12px;">No trades data</div>')
-            self._empty_eq_label.setPos(0.5, 0.0)
-            self._empty_eq_label.show()
-            for c in [self.eq_card_return, self.eq_card_equity, self.eq_card_maxdd,
-                       self.eq_card_sharpe, self.eq_card_calmar, self.eq_card_pf, self.eq_card_trades]:
-                c.set_value("—", "text")
-            self._eq_has_data = False
+        start, end = self._resolve_period_window()
+        return filter_trades_by_period(trades, start, end)
+
+    def _show_no_trades_state(self) -> None:
+        """Unify empty-state UX across analytics sub-panels.
+
+        Target UX text:
+          - Title: No trades yet
+          - Subtitle: Run a strategy or load a journal to populate this table
+        """
+        trades = list(getattr(self.engine, "trades", []) or [])
+        if trades:
+            self._empty_state.hide()
+            self.sub_tabs.show()
             return
 
+        self.sub_tabs.hide()
+        self._empty_state.show()
+
+        # Ensure all visible mini-cards are reset.
+        for c in [
+            getattr(self, "eq_card_return", None),
+            getattr(self, "eq_card_equity", None),
+            getattr(self, "eq_card_maxdd", None),
+            getattr(self, "eq_card_sharpe", None),
+            getattr(self, "eq_card_calmar", None),
+            getattr(self, "eq_card_pf", None),
+            getattr(self, "eq_card_trades", None),
+            getattr(self, "sess_card_best", None),
+            getattr(self, "sess_card_worst", None),
+            getattr(self, "sess_card_active", None),
+            getattr(self, "str_card_maxw", None),
+            getattr(self, "str_card_maxl", None),
+            getattr(self, "str_card_cur", None),
+            getattr(self, "str_card_avgw", None),
+            getattr(self, "str_card_avgl", None),
+        ]:
+            if c is not None:
+                try:
+                    c.set_value("No trades yet", "text")
+                except Exception:
+                    try:
+                        c.set_value("—", "text")
+                    except Exception:
+                        pass
+
+        # Reset plots.
+        for plot_attr in (
+            "equity_curve", "equity_baseline", "peak_curve",
+            "drawdown_curve", "drawdown_zero",
+            "session_plot", "roll_sharpe_plot", "roll_wr_plot",
+            "dist_plot", "duration_plot", "timeline_plot", "timeline_dur_plot",
+            "cal_plot", "mae_mfe_plot", "mae_hist", "r_hist", "r_cum",
+            "slip_plot",
+        ):
+            plot_or_item = getattr(self, plot_attr, None)
+            try:
+                if plot_or_item is not None and hasattr(plot_or_item, "clear"):
+                    plot_or_item.clear()
+                elif plot_or_item is not None and hasattr(plot_or_item, "setData"):
+                    plot_or_item.setData([], [])
+            except Exception:
+                pass
+
+        # Reset QTable models when present.
+        try:
+            if hasattr(self, "_dd_model"):
+                self._dd_model.set_rows([])
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_attr_model"):
+                self._attr_model.set_rows([])
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_session_model"):
+                self._session_model.set_rows([])
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_streak_model"):
+                self._streak_model.set_rows([])
+        except Exception:
+            pass
+
+        # Empty label overlay on equity plot (fallback if we cannot inject a widget).
+        if hasattr(self, "equity_plot"):
+            try:
+                if not hasattr(self, "_empty_eq_label"):
+                    self._empty_eq_label = pg.TextItem(anchor=(0.5, 0.5))
+                    self.equity_plot.addItem(self._empty_eq_label)
+                self._empty_eq_label.setHtml(
+                    "<div style='text-align:center'>"
+                    "<div style='font-size:12px;font-weight:700'>No trades yet</div>"
+                    "<div style='font-size:11px;color:#999'>"
+                    "Run a strategy or load a journal to populate this table"
+                    "</div>"
+                    "</div>"
+                )
+                self._empty_eq_label.setPos(0.5, 0.0)
+                self._empty_eq_label.show()
+            except Exception:
+                pass
+
+        # Reset heatmap widgets if already lazy-loaded.
+        for hm_attr in ("hw_heatmap", "my_heatmap"):
+            hm = getattr(self, hm_attr, None)
+            try:
+                if hm is not None and hasattr(hm, "set_grid"):
+                    # Provide empty grids (if widget supports it).
+                    hm.set_grid(
+                        np.zeros((0, 0), dtype=float),
+                        x_labels=[],
+                        y_labels=[],
+                        cmap="theme_div",
+                    )
+            except Exception:
+                pass
+
+        # Reset custom range label.
+        if getattr(self, "_range_result", None) is not None:
+            try:
+                self._range_result.setText("No trades yet")
+            except Exception:
+                pass
+
+        # Also hide drill-down UI.
+        if hasattr(self, "_drill_lbl") and self._drill_lbl is not None:
+            try:
+                self._drill_lbl.hide()
+            except Exception:
+                pass
+        if hasattr(self, "_btn_clear_drill") and self._btn_clear_drill is not None:
+            try:
+                self._btn_clear_drill.hide()
+            except Exception:
+                pass
+
+        self._eq_has_data = False
+
+    def _update_equity_curve(self):
+        self._show_no_trades_state()
+        sorted_trades = self._sorted_trades()
+        if not sorted_trades:
+            return
+
+        is_all = self._period_kind in ("ALL", "")
         cache = getattr(self.engine, "_shared_cache", None)
-        if cache is not None:
+
+        if is_all and cache is not None:
             eq_all, peak, dd_arr_abs, dd_arr_pct = cache.get_equity_curve_arrays()
             pnls = cache.get_pnl_array()
             stats = cache.get_stats_dict()
             n = len(pnls)
             init_eq = float(self.engine.initial_equity)
         else:
-            sorted_trades = self._sorted_trades()
             n = len(sorted_trades)
             pnls = np.empty(n, dtype=float)
             for i, t in enumerate(sorted_trades):
@@ -1283,7 +1474,7 @@ class AnalyticsTab(QWidget):
         self.session_plot.clear()
         trades = list(getattr(self.engine, "trades", []) or [])
         if not trades:
-            self._session_model.set_rows([])
+            self._show_no_trades_state()
             return
 
         session_names = [s[0] for s in SESSIONS]
@@ -1399,10 +1590,7 @@ class AnalyticsTab(QWidget):
     def _update_streak_tracker(self):
         trades = list(getattr(self.engine, "trades", []) or [])
         if not trades:
-            self._streak_model.set_rows([])
-            for c in [self.str_card_maxw, self.str_card_maxl, self.str_card_cur,
-                       self.str_card_avgw, self.str_card_avgl]:
-                c.set_value("\u2014", "text")
+            self._show_no_trades_state()
             return
 
         # Use shared cache if available
@@ -1550,10 +1738,14 @@ class AnalyticsTab(QWidget):
         if pnl_arr is None:
             trades = list(getattr(self.engine, "trades", []) or [])
             if not trades:
-                self.merged_text.setText("No trades for advanced stats.")
+                self._show_no_trades_state()
                 return
             pnls_orig = np.array([t.pnl for t in trades], dtype=float)
         else:
+            trades = list(getattr(self.engine, "trades", []) or [])
+            if not trades:
+                self._show_no_trades_state()
+                return
             pnls_orig = pnl_arr
         t = get_theme()
         unique = np.unique(pnls_orig)
@@ -1596,17 +1788,14 @@ class AnalyticsTab(QWidget):
         """Draw duration histogram and render merged analytics HTML."""
         self.duration_plot.clear()
 
+        trades = list(getattr(self.engine, "trades", []) or [])
+        if not trades:
+            self._show_no_trades_state()
+            return
+
         if pnl_arr is None:
-            trades = list(getattr(self.engine, "trades", []) or [])
-            if not trades:
-                self.merged_text.setText("No trades.")
-                return
             pnl_arr = np.array([t.pnl for t in trades], dtype="float64")
         else:
-            trades = list(getattr(self.engine, "trades", []) or [])
-            if not trades:
-                self.merged_text.setText("No trades.")
-                return
             pnl_arr = np.asarray(pnl_arr, dtype="float64")
 
         _eq_curve = _build_eq(trades, self.engine.initial_equity)
@@ -2085,6 +2274,7 @@ class AnalyticsTab(QWidget):
         self.timeline_dur_plot.clear()
         trades = list(getattr(self.engine, "trades", []) or [])
         if not trades:
+            self._show_no_trades_state()
             return
         t = get_theme()
         n = len(trades)
@@ -2386,18 +2576,52 @@ class AnalyticsTab(QWidget):
 
     # ---------------------------------------------------------- Update MAE/MFE
     def _update_mae_mfe(self) -> None:
+        trades = self._sorted_trades()
+        if not trades:
+            self._show_no_trades_state()
+            return
+        if not self.isVisible():
+            return
+
+        with self._mae_lock:
+            self._mae_gen += 1
+            gen = self._mae_gen
+
+        prev = getattr(self, "_mae_worker", None)
+        if prev is not None:
+            try:
+                prev.finished.disconnect()
+                prev.cancel()
+            except Exception:
+                pass
+            self._mae_worker = None
+
+        worker = ComputeWorker(_compute_mae_mfe, trades, parent=self)
+
+        def _done(payload, g=gen):
+            with self._mae_lock:
+                if g != self._mae_gen:
+                    return
+            self._finalize_mae_mfe(payload)
+
+        worker.finished.connect(_done)
+        worker.error.connect(lambda e: logger.error(f"MAE/MFE worker failed: {e}"))
+        self._mae_worker = worker
+        worker.start()
+
+    def _finalize_mae_mfe(self, payload: dict) -> None:
+        if not self.isVisible():
+            return
+        res = payload.get("res")
+        if res is None or res.mae_dollars.size == 0:
+            return
+
         self.mae_mfe_plot.clear()
         self.mae_hist.clear()
-        trades = list(getattr(self.engine, "trades", []) or [])
-        if not trades:
-            return
-        arrays = mae_mfe_arrays(trades)
-        if arrays.mae_dollars.size == 0:
-            return
-        win_mask = arrays.pnl_dollars > 0
+        win_mask = res.pnl_dollars > 0
         loss_mask = ~win_mask
         t = get_theme()
-        # Premium: low opacity (40%) for dense scatter — natural heatmap effect
+
         win_col = QColor(sh.c(t, "chart_win_marker"))
         win_col.setAlpha(100)
         loss_col = QColor(sh.c(t, "chart_loss_marker"))
@@ -2405,20 +2629,20 @@ class AnalyticsTab(QWidget):
 
         if win_mask.any():
             self.mae_mfe_plot.plot(
-                arrays.mae_dollars[win_mask], arrays.mfe_dollars[win_mask],
+                res.mae_dollars[win_mask], res.mfe_dollars[win_mask],
                 pen=None, symbol="o", symbolSize=6, symbolBrush=win_col,
             )
         if loss_mask.any():
             self.mae_mfe_plot.plot(
-                arrays.mae_dollars[loss_mask], arrays.mfe_dollars[loss_mask],
+                res.mae_dollars[loss_mask], res.mfe_dollars[loss_mask],
                 pen=None, symbol="x", symbolSize=6, symbolBrush=loss_col,
             )
-        t_ = get_theme()
-        zc = QColor(sh.c(t_, "text3"))
+        zc = QColor(sh.c(t, "text3"))
         zc.setAlpha(80)
         self.mae_mfe_plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(zc, width=1, style=Qt.PenStyle.DashLine)))
         self.mae_mfe_plot.addItem(pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen(zc, width=1, style=Qt.PenStyle.DashLine)))
-        finite_r = arrays.mae_r[np.isfinite(arrays.mae_r)]
+
+        finite_r = res.mae_r[np.isfinite(res.mae_r)]
         if finite_r.size > 0:
             hist_col = QColor(sh.c(t, "cyan"))
             hist_col.setAlpha(150)
@@ -2430,13 +2654,47 @@ class AnalyticsTab(QWidget):
         self.mae_hist.autoRange()
 
     def _update_r_multiples(self) -> None:
+        trades = self._sorted_trades()
+        if not trades:
+            self._show_no_trades_state()
+            return
+        if not self.isVisible():
+            return
+
+        with self._r_lock:
+            self._r_gen += 1
+            gen = self._r_gen
+
+        prev = getattr(self, "_r_worker", None)
+        if prev is not None:
+            try:
+                prev.finished.disconnect()
+                prev.cancel()
+            except Exception:
+                pass
+            self._r_worker = None
+
+        worker = ComputeWorker(_compute_r_multiples, trades, parent=self)
+
+        def _done(payload, g=gen):
+            with self._r_lock:
+                if g != self._r_gen:
+                    return
+            self._finalize_r_multiples(payload)
+
+        worker.finished.connect(_done)
+        worker.error.connect(lambda e: logger.error(f"R-multiples worker failed: {e}"))
+        self._r_worker = worker
+        worker.start()
+
+    def _finalize_r_multiples(self, payload: dict) -> None:
+        if not self.isVisible():
+            return
+        res = payload.get("res")
+        if res is None:
+            return
         self.r_hist.clear()
         self.r_cum.clear()
-        trades = list(getattr(self.engine, "trades", []) or [])
-        if not trades:
-            self.r_summary.setText("No trades.")
-            return
-        res = r_multiples(trades)
         finite = res.r_values[np.isfinite(res.r_values)]
         t = get_theme()
         if finite.size > 0:
@@ -2473,7 +2731,9 @@ class AnalyticsTab(QWidget):
         return slot
 
     def _update_heatmaps(self) -> None:
-        if not getattr(self.engine, "trades", None):
+        trades = self._sorted_trades()
+        if not trades:
+            self._show_no_trades_state()
             return
         if not self.isVisible():
             return
@@ -2497,7 +2757,7 @@ class AnalyticsTab(QWidget):
             except RuntimeError:
                 return
         self._heatmap_spinner.start()
-        worker = ComputeWorker(_compute_heatmaps, list(self.engine.trades), parent=self)
+        worker = ComputeWorker(_compute_heatmaps, trades, parent=self)
         slot = self._make_heatmap_slot(gen)
         worker.finished.connect(slot)
         worker._heatmap_slot = slot
@@ -2556,17 +2816,52 @@ class AnalyticsTab(QWidget):
 
     # ---------------------------------------------------------- Update Attribution
     def _update_attribution(self) -> None:
-        trades = list(getattr(self.engine, "trades", []) or [])
+        trades = self._sorted_trades()
         if not trades:
-            self._dd_model.set_rows([])
-            self._attr_model.set_rows([])
+            self._show_no_trades_state()
             return
+        if not self.isVisible():
+            return
+
+        with self._attr_lock:
+            self._attr_gen += 1
+            gen = self._attr_gen
+
+        prev = getattr(self, "_attr_worker", None)
+        if prev is not None:
+            try:
+                prev.finished.disconnect()
+                prev.cancel()
+            except Exception:
+                pass
+            self._attr_worker = None
+
+        worker = ComputeWorker(_compute_attribution, trades, parent=self)
+
+        def _done(payload, g=gen):
+            with self._attr_lock:
+                if g != self._attr_gen:
+                    return
+            self._finalize_attribution(payload, trades)
+
+        worker.finished.connect(_done)
+        worker.error.connect(lambda e: logger.error(f"Attribution worker failed: {e}"))
+        self._attr_worker = worker
+        worker.start()
+
+    def _finalize_attribution(self, payload: dict, trades: list) -> None:
+        if not self.isVisible():
+            return
+        rows = payload.get("rows")
+        if rows is None:
+            return
+
         eq = np.empty(len(trades) + 1, dtype=float)
         eq[0] = self.engine.initial_equity
-        eq[1:] = self.engine.initial_equity + np.cumsum(
-            np.asarray([t.pnl for t in trades], dtype=float)
-        )
+        np.cumsum([float(getattr(t, "pnl", 0.0) or 0.0) for t in trades], out=eq[1:])
+        eq[1:] += self.engine.initial_equity
         episodes = drawdown_durations(eq)
+
         dd_rows = []
         for r, e in enumerate(episodes):
             dd_rows.append([
@@ -2576,7 +2871,6 @@ class AnalyticsTab(QWidget):
             ])
         self._dd_model.set_rows(dd_rows)
 
-        rows = exit_reason_attribution(trades)
         attr_rows = [[
             row.reason, str(row.count), f"${row.sum_pnl:,.2f}",
             f"${row.avg_pnl:,.2f}", f"{row.win_rate * 100:.1f}%",
@@ -2588,7 +2882,7 @@ class AnalyticsTab(QWidget):
         self.slip_plot.clear()
         trades = list(getattr(self.engine, "trades", []) or [])
         if not trades:
-            self.slip_summary.setText("No trades.")
+            self._show_no_trades_state()
             return
         cost = float(self.slip_spin.value())
         res = simulate_slippage(trades, slip_per_trade_dollars=cost)

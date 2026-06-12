@@ -27,9 +27,10 @@ from engine.analytics.equity_curve import (
 from gui.analytics import sparkline_data as spk
 from gui.analytics.insights_engine import generate_insights
 from gui.analytics.milestone_tracker import MilestoneTracker
+from engine.analytics.trade_analytics import filter_trades_by_period, resolve_period_window
 from gui.analytics.stats_calculator import StatsCalculator
 from gui.components.toast import ToastLevel, ToastManager
-from gui.workers.workers import Spinner
+from gui.workers.workers import ComputeWorker, Spinner
 from gui.styling import style_helpers as sh
 from gui.styling.theme import (
     get_theme,
@@ -186,6 +187,7 @@ class StatsTab(QWidget):
         self._ui_built: bool = False
         self._has_data: bool = False
         self._stats_calc = StatsCalculator()
+        self._worker: ComputeWorker | None = None
         self._last_recalc_key = None
         self._last_sparkline_update_ts = 0.0
         # Phase 2 EPIC 2.2 — auto-insights state.
@@ -334,49 +336,11 @@ class StatsTab(QWidget):
             self._recalc()
 
     def _resolve_period_window(self) -> tuple[np.datetime64 | None, np.datetime64 | None]:
-        """Convert ``self._period_kind`` (and custom dates) to a [start, end) window.
-
-        Returns ``(None, None)`` for the ``ALL`` preset (no filtering).
-        """
-        kind = self._period_kind
-        if kind == "ALL" or kind not in (*PRESETS, "CUSTOM"):
-            return None, None
-        if kind == "CUSTOM":
-            if self._period_start is None or self._period_end is None:
-                return None, None
-            start = np.datetime64(pd.Timestamp(self._period_start).normalize())
-            end = np.datetime64(
-                pd.Timestamp(self._period_end).normalize() + pd.Timedelta(days=1)
-            )
-            return start, end
-
-        now = pd.Timestamp.utcnow().tz_localize(None)
-        if kind == "1D":
-            start = np.datetime64(now.normalize())
-            end = start + np.timedelta64(1, "D")
-        elif kind == "1W":
-            start = np.datetime64((now - pd.Timedelta(days=7)).normalize())
-            end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
-        elif kind == "1M":
-            start = np.datetime64((now - pd.Timedelta(days=30)).normalize())
-            end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
-        elif kind == "3M":
-            start = np.datetime64((now - pd.Timedelta(days=90)).normalize())
-            end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
-        elif kind == "6M":
-            start = np.datetime64((now - pd.Timedelta(days=180)).normalize())
-            end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
-        elif kind == "YTD":
-            start = np.datetime64(pd.Timestamp(now.year, 1, 1))
-            end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
-        elif kind == "1Y":
-            start = np.datetime64((now - pd.Timedelta(days=365)).normalize())
-            end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
-        else:
-            return None, None
-        return start, end
+        """Phase 1 stabilization — use centralized period resolver (AI-1)."""
+        return resolve_period_window(self._period_kind, self._period_start, self._period_end)
 
     def _get_filtered_trades(self):
+        """Phase 1 stabilization — use centralized period filter (AI-1)."""
         cache = getattr(self.engine, "_shared_cache", None)
         if cache is not None:
             trades = cache.get_sorted_trades()
@@ -386,46 +350,29 @@ class StatsTab(QWidget):
             return trades
 
         start, end = self._resolve_period_window()
-        if start is None or end is None:
-            return trades
-
-        n = len(trades)
-        et_arr = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
-        try:
-            for i, t in enumerate(trades):
-                v = getattr(t, "entry_time_np", None)
-                if v is not None:
-                    et_arr[i] = v
-        except Exception:
-            logger.exception("StatsTab entry_time_np preload failed")
-
-        valid = et_arr != np.datetime64("NaT")
-        if not valid.all():
-            try:
-                for i in np.where(~valid)[0]:
-                    v = getattr(trades[i], "entry_time", None)
-                    if v is not None:
-                        ts = pd.to_datetime(v, errors="coerce")
-                        if pd.notna(ts):
-                            et_arr[i] = ts
-                            valid[i] = True
-            except Exception:
-                logger.exception("StatsTab entry_time fallback parsing failed")
-
-        if not valid.any():
-            logger.warning(
-                "StatsTab date filter could not be applied: no valid trade entry timestamps for period %s",
-                self._period_kind,
-            )
-            return trades
-        mask = (et_arr >= start) & (et_arr < end) & valid
-        return [trades[i] for i in np.where(mask)[0]]
+        return filter_trades_by_period(trades, start, end)
 
     def _make_recalc_key(self, trades) -> tuple:
         return (len(trades), id(trades[-1]) if trades else None)
 
     def _recalc(self):
         try:
+            # Phase 1 Stabilization Step 3 — cancel and guard against stale results (AI-4)
+            if not hasattr(self, "_stats_gen"):
+                self._stats_gen = 0
+            self._stats_gen += 1
+            gen = self._stats_gen
+
+            if self._worker is not None:
+                try:
+                    # Explicitly disconnect to avoid callbacks from already cancelled worker
+                    self._worker.finished.disconnect()
+                    self._worker.error.disconnect()
+                    self._worker.cancel()
+                except Exception:
+                    pass
+                self._worker = None
+
             trades = self._get_filtered_trades()
             has_data = bool(trades)
             key = self._make_recalc_key(trades)
@@ -434,8 +381,11 @@ class StatsTab(QWidget):
             if first_compute:
                 self._show_spinner("Loading statistics…")
 
+            # Check if key changed OR if we are forcing a refresh (gen check)
             if hasattr(self, "_last_recalc_key") and key == self._last_recalc_key and not first_compute:
-                return
+                # We still might want to recalc if the period changed but result is the same
+                # But usually key check is enough. 
+                pass
 
             if has_data:
                 if (not self._ui_built) or (not self._has_data):
@@ -451,8 +401,43 @@ class StatsTab(QWidget):
                     self._has_data = False
                 return
 
+            self._show_spinner("Calculating statistics…")
             cache = getattr(self.engine, "_shared_cache", None)
-            m = self._stats_calc.compute(trades, self.engine.initial_equity, shared_cache=cache)
+
+            # Off-thread computation to prevent UI jank on large windows
+            self._worker = ComputeWorker(
+                self._stats_calc.compute,
+                trades,
+                self.engine.initial_equity,
+                shared_cache=cache
+            )
+            
+            def _done(m, g=gen):
+                if g != self._stats_gen:
+                    return
+                self._on_compute_finished(m, trades, key)
+                
+            def _err(exc, g=gen):
+                if g != self._stats_gen:
+                    return
+                self._on_compute_error(exc)
+
+            self._worker.finished.connect(_done)
+            self._worker.error.connect(_err)
+            self._worker.start()
+
+        except Exception:
+            logger.exception("StatsTab._recalc initialization failed")
+            self._destroy_layout()
+            self._show_empty_state(error=True)
+            self._ui_built = True
+            self._has_data = False
+            self._hide_spinner()
+
+    def _on_compute_finished(self, m: dict, trades, key):
+        self._worker = None
+        self._hide_spinner()
+        try:
             self._avg_rr_breakdown = m.get("avg_rr_breakdown", {})
             G, R, A, W = "green", "red", "amber", "text"
             self._update_cards(m, G=G, R=R, A=A, W=W)
@@ -462,13 +447,14 @@ class StatsTab(QWidget):
             self._update_insights(m, trades)
             self._check_milestones(trades)
         except Exception:
-            logger.exception("StatsTab._recalc failed")
-            self._destroy_layout()
+            logger.exception("StatsTab._on_compute_finished failed")
             self._show_empty_state(error=True)
-            self._ui_built = True
-            self._has_data = False
-        finally:
-            self._hide_spinner()
+
+    def _on_compute_error(self, exc):
+        self._worker = None
+        self._hide_spinner()
+        logger.error(f"Stats compute error: {exc}")
+        self._show_empty_state(error=True)
 
     # ------------------------------------------------------------------
     # Loading spinner helpers (Polish pass)

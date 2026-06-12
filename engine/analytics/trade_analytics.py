@@ -54,6 +54,128 @@ def _parse_time(s: str) -> Optional[datetime]:
     return None
 
 
+def resolve_r_multiple(trade: Any) -> float:
+    """Consolidated R-multiple resolver (AI-3).
+    Prioritises pre-computed 'rr' from engine; falls back to manual pnl_points / risk_distance.
+    Returns np.nan if risk is zero or unknown.
+    """
+    rr = getattr(trade, "rr", None)
+    if rr is not None:
+        try:
+            val = float(rr)
+            if np.isfinite(val):
+                return val
+        except (TypeError, ValueError):
+            pass
+
+    risk = _risk_distance(trade)
+    if risk > 1e-9:
+        try:
+            pnl_points = float(getattr(trade, "pnl_points", 0.0) or 0.0)
+            return pnl_points / risk
+        except (TypeError, ValueError):
+            pass
+
+    return np.nan
+
+
+def resolve_period_window(
+    kind: str,
+    custom_start: Optional[Any] = None,
+    custom_end: Optional[Any] = None,
+) -> tuple[Optional[np.datetime64], Optional[np.datetime64]]:
+    """Convert period kind and custom dates to np.datetime64 window (AI-1)."""
+    if kind == "ALL" or not kind:
+        return None, None
+
+    if kind == "CUSTOM":
+        if custom_start is None or custom_end is None:
+            return None, None
+        try:
+            import pandas as pd
+
+            start = np.datetime64(pd.Timestamp(custom_start).normalize())
+            end = np.datetime64(
+                pd.Timestamp(custom_end).normalize() + pd.Timedelta(days=1)
+            )
+            return start, end
+        except Exception:
+            return None, None
+
+    import pandas as pd
+
+    now = pd.Timestamp.utcnow().tz_localize(None)
+    if kind == "1D":
+        start = np.datetime64(now.normalize())
+        end = start + np.timedelta64(1, "D")
+    elif kind == "1W":
+        start = np.datetime64((now - pd.Timedelta(days=7)).normalize())
+        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+    elif kind == "1M":
+        start = np.datetime64((now - pd.Timedelta(days=30)).normalize())
+        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+    elif kind == "3M":
+        start = np.datetime64((now - pd.Timedelta(days=90)).normalize())
+        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+    elif kind == "6M":
+        start = np.datetime64((now - pd.Timedelta(days=180)).normalize())
+        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+    elif kind == "YTD":
+        start = np.datetime64(pd.Timestamp(now.year, 1, 1))
+        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+    elif kind == "1Y":
+        start = np.datetime64((now - pd.Timedelta(days=365)).normalize())
+        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+    else:
+        return None, None
+    return start, end
+
+
+def filter_trades_by_period(
+    trades: List[Any],
+    start: Optional[np.datetime64] = None,
+    end: Optional[np.datetime64] = None,
+) -> List[Any]:
+    """Universal period filter using vectorized NumPy masks (AI-1)."""
+    if not trades or (start is None and end is None):
+        return trades
+
+    n = len(trades)
+    et_arr = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
+
+    # Try fast path first (entry_time_np)
+    for i, t in enumerate(trades):
+        v = getattr(t, "entry_time_np", None)
+        if v is not None:
+            et_arr[i] = v
+
+    # Fallback for NaT (parse entry_time strings)
+    missing = np.where(et_arr == np.datetime64("NaT"))[0]
+    if missing.size > 0:
+        import pandas as pd
+        for i in missing:
+            v = getattr(trades[i], "entry_time", None)
+            if v:
+                try:
+                    ts = pd.to_datetime(v, errors="coerce")
+                    if pd.notna(ts):
+                        et_arr[i] = ts.to_datetime64()
+                except Exception:
+                    pass
+
+    mask = np.ones(n, dtype=bool)
+    if start is not None:
+        mask &= et_arr >= start
+    if end is not None:
+        mask &= et_arr < end
+
+    # Exclude NaT if we are filtering by a specific window
+    if start is not None or end is not None:
+        mask &= et_arr != np.datetime64("NaT")
+
+    return [trades[i] for i in np.where(mask)[0]]
+
+
 # ----------------------------------------------------------------------------
 # MAE / MFE
 # ----------------------------------------------------------------------------
@@ -162,37 +284,24 @@ class RMultipleArrays:
 def r_multiples(trades: Iterable[Any]) -> RMultipleArrays:
     """Compute the signed R-multiple per trade.
 
-    Prefers ``Trade.rr`` (already computed by the engine as
-    ``pnl_points / |entry_price - initial_sl|``) so the result matches
-    what users see in the Trades-tab without any unit-conversion guesswork.
-    Falls back to a manual recomputation from ``pnl_points`` /
-    ``risk_distance`` for trades that pre-date that field; final fallback
-    treats ``initial_sl × volume`` as a $-risk for synthetic test fixtures.
+    Uses resolve_r_multiple() (AI-3) for consistent logic across Stats/Trades.
     """
     rs: List[float] = []
     for t in trades:
-        rr = getattr(t, "rr", None)
-        if rr is not None:
-            try:
-                rs.append(float(rr))
-                continue
-            except (TypeError, ValueError):
-                pass
-
-        risk_pts = _risk_distance(t)
-        if risk_pts > 0:
-            pnl_points = float(getattr(t, "pnl_points", 0.0) or 0.0)
-            rs.append(pnl_points / risk_pts)
-            continue
-
-        # Legacy fallback for FakeTrade-style fixtures (initial_sl already in $).
-        vol = float(getattr(t, "volume", 1.0) or 1.0)
-        risk_dollars = abs(float(getattr(t, "initial_sl", 0.0) or 0.0)) * vol
-        pnl = float(getattr(t, "pnl", 0.0) or 0.0)
-        if risk_dollars > 0:
-            rs.append(pnl / risk_dollars)
+        val = resolve_r_multiple(t)
+        if np.isnan(val):
+            # Legacy fallback for FakeTrade-style fixtures where initial_sl
+            # was already recorded as dollar risk.
+            vol = float(getattr(t, "volume", 1.0) or 1.0)
+            risk_dollars = abs(float(getattr(t, "initial_sl", 0.0) or 0.0)) * vol
+            pnl = float(getattr(t, "pnl", 0.0) or 0.0)
+            if risk_dollars > 0:
+                rs.append(pnl / risk_dollars)
+            else:
+                rs.append(float("nan"))
         else:
-            rs.append(float("nan"))
+            rs.append(val)
+
     arr = np.asarray(rs, dtype=float)
     if arr.size == 0:
         return RMultipleArrays(arr, arr, 0.0)
@@ -214,21 +323,26 @@ class HourWeekdayHeatmap:
     net_pnl: np.ndarray  # shape (24, 7) float
 
 
-def hour_weekday_heatmap(trades: Iterable[Any]) -> HourWeekdayHeatmap:
-    """Aggregate trade entry-times into a 24×7 grid."""
+def hour_weekday_heatmap(
+    trades: Iterable[Any], cancel_token: Optional[Any] = None
+) -> HourWeekdayHeatmap:
+    """Aggregate trade entry-times into a 24×7 grid (AI-11)."""
     counts = np.zeros((24, 7), dtype=int)
     wins = np.zeros((24, 7), dtype=int)
     pnl = np.zeros((24, 7), dtype=float)
-    for t in trades:
+    for i, t in enumerate(trades):
+        if i % 1000 == 0 and cancel_token and cancel_token.is_set():
+            break
         dt = _parse_time(getattr(t, "entry_time", "") or "")
         if dt is None:
             continue
         h = dt.hour
         wd = dt.weekday()
         counts[h, wd] += 1
-        if float(getattr(t, "pnl", 0.0) or 0.0) > 0:
+        val = float(getattr(t, "pnl", 0.0) or 0.0)
+        if val > 0:
             wins[h, wd] += 1
-        pnl[h, wd] += float(getattr(t, "pnl", 0.0) or 0.0)
+        pnl[h, wd] += val
     with np.errstate(divide="ignore", invalid="ignore"):
         win_rate = np.where(counts > 0, wins / np.maximum(counts, 1), np.nan)
     return HourWeekdayHeatmap(counts=counts, win_rate=win_rate, net_pnl=pnl)
@@ -246,21 +360,28 @@ class MonthYearHeatmap:
     counts: np.ndarray  # shape (n_years, 12) int
 
 
-def month_year_heatmap(trades: Iterable[Any]) -> MonthYearHeatmap:
-    """Aggregate trade entry-times into a (year × month) grid."""
+def month_year_heatmap(
+    trades: Iterable[Any], cancel_token: Optional[Any] = None
+) -> MonthYearHeatmap:
+    """Aggregate trade entry-times into a (year × month) grid (AI-11)."""
     by_year: Dict[int, np.ndarray] = {}
     by_year_n: Dict[int, np.ndarray] = {}
-    for t in trades:
+    for i, t in enumerate(trades):
+        if i % 1000 == 0 and cancel_token and cancel_token.is_set():
+            break
         dt = _parse_time(getattr(t, "entry_time", "") or "")
         if dt is None:
             continue
         if dt.year not in by_year:
             by_year[dt.year] = np.zeros(12, dtype=float)
             by_year_n[dt.year] = np.zeros(12, dtype=int)
-        by_year[dt.year][dt.month - 1] += float(getattr(t, "pnl", 0.0) or 0.0)
+        val = float(getattr(t, "pnl", 0.0) or 0.0)
+        by_year[dt.year][dt.month - 1] += val
         by_year_n[dt.year][dt.month - 1] += 1
     if not by_year:
-        return MonthYearHeatmap([], np.empty((0, 12), dtype=float), np.empty((0, 12), dtype=int))
+        return MonthYearHeatmap(
+            [], np.empty((0, 12), dtype=float), np.empty((0, 12), dtype=int)
+        )
     years = sorted(by_year.keys())
     pnl_grid = np.stack([by_year[y] for y in years])
     n_grid = np.stack([by_year_n[y] for y in years])
@@ -492,6 +613,9 @@ def compare_runs(
 
 
 __all__ = [
+    "resolve_r_multiple",
+    "resolve_period_window",
+    "filter_trades_by_period",
     "MAEMFEArrays",
     "mae_mfe_arrays",
     "RMultipleArrays",

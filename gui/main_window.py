@@ -251,12 +251,18 @@ class MainWindow(QMainWindow):
         e.position_changed.connect(self.chart_tab.on_position_changed)
         e.simulation_finished.connect(self._replay_ctrl.on_simulation_finished)
         e.simulation_finished.connect(self._on_simulation_finished)
-        # Invalidate shared cache on data/trade changes
-        self._on_trade_for_cache = lambda *_: self.shared_cache.invalidate()
-        self._on_data_for_cache = lambda *_: self.shared_cache.invalidate()
+
+        # Invalidate caches on data/trade changes (AI-5)
+        def _invalidate_all(*_):
+            self.shared_cache.invalidate()
+            if hasattr(self, "stats_tab") and self.stats_tab:
+                calc = getattr(self.stats_tab, "_stats_calc", None)
+                if calc:
+                    calc.invalidate()
+
         try:
-            e.trade_completed.connect(self._on_trade_for_cache)
-            e.data_loaded.connect(self._on_data_for_cache)
+            e.trade_completed.connect(_invalidate_all)
+            e.data_loaded.connect(_invalidate_all)
         except Exception:
             pass
         # Heatmap → Trades drill-down (heatmap clicks)
@@ -469,17 +475,18 @@ class MainWindow(QMainWindow):
     def _refresh_tabs_after_sim(self) -> None:
         if hasattr(self, "trades_tab") and self.trades_tab is not None:
             try:
-                self.trades_tab._apply_filter()
+                self.trades_tab._apply_filter(force=True)
             except Exception:
                 logger.exception("trades_tab refresh failed")
         if hasattr(self, "stats_tab") and self.stats_tab is not None:
             try:
+                # _recalc handles key change internally
                 self.stats_tab._recalc()
             except Exception:
                 logger.exception("stats_tab refresh failed")
         if hasattr(self, "analytics_tab") and self.analytics_tab is not None:
             try:
-                self.analytics_tab.refresh_all()
+                self.analytics_tab.refresh_all(force=True)
             except Exception:
                 logger.exception("analytics_tab refresh failed")
 
