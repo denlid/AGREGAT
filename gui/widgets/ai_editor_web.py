@@ -1,18 +1,24 @@
 import json
 import os
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QUrl, Signal, Slot
+from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 
 from gui.styling.theme import get_theme, get_theme_name, register_theme_listener, unregister_theme_listener
 
-_WEB_APP_HTML_NAME = "ai_editor_web_app.html"
+_WEB_APP_RELATIVE_PATH = ("..", "web", "ai_editor", "index.html")
 
 
 def _load_web_app_html() -> str:
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), _WEB_APP_HTML_NAME)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), *_WEB_APP_RELATIVE_PATH)
     with open(path, encoding="utf-8") as f:
         return f.read()
+
+
+def _web_app_base_url() -> QUrl:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), *_WEB_APP_RELATIVE_PATH)
+    return QUrl.fromLocalFile(os.path.dirname(path) + os.sep)
 
 
 class UnifiedBridge(QObject):
@@ -91,8 +97,12 @@ class AIAssistantEditor(QWebEngineView):
         self.page().setWebChannel(self.channel)
         self._mirror_panel: 'AIAssistantEditor | None' = None
 
-        # Load bundled HTML next to this module
-        self.setHtml(_load_web_app_html())
+        settings = self.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+
+        # Load bundled WebEngine app.
+        self.setHtml(_load_web_app_html(), _web_app_base_url())
         self.bridge.ready.connect(self.apply_theme_to_web)
         register_theme_listener(self.apply_theme_to_web)
         self._theme_registered = True
