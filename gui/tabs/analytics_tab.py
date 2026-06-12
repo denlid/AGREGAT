@@ -83,21 +83,13 @@ logger = logging.getLogger("StrategyTester.gui.analytics_tab")
 WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-def _compute_heatmaps(trades: list, cancel_token=None) -> dict:
-    """Worker-thread helper: aggregate hour×weekday and year×month PnL grids.
-
-    Phase 1 Stabilization Step 4 — polling cancel_token for responsiveness.
-    """
-    if cancel_token and cancel_token.is_set():
-        return {}
-    hw = hour_weekday_heatmap(trades)
-    if cancel_token and cancel_token.is_set():
-        return {}
-    my = month_year_heatmap(trades)
-    return {
-        "hw": hw,
-        "my": my,
-    }
+def _compute_heatmaps(data, cancel_token=None) -> dict:
+    """Worker-thread helper: aggregate hour×weekday and year×month PnL grids."""
+    if hasattr(data, "get_heatmaps"): # Is SharedTradesCache
+        return data.get_heatmaps()
+    hw = hour_weekday_heatmap(data, cancel_token=cancel_token)
+    my = month_year_heatmap(data, cancel_token=cancel_token)
+    return {"hw": hw, "my": my}
 
 
 
@@ -143,27 +135,30 @@ _ANALYTICS_CARD_HELP: dict[str, tuple[str, str]] = {
 }
 
 
-def _compute_r_multiples(trades: list, cancel_token=None) -> dict:
+def _compute_r_multiples(data, cancel_token=None) -> dict:
     """Worker helper: compute R-multiples (AI-8)."""
-    if not trades:
-        return {}
-    res = r_multiples(trades)
+    if hasattr(data, "get_r_multiples"):
+        res = data.get_r_multiples()
+    else:
+        res = r_multiples(data)
     return {"res": res}
 
 
-def _compute_attribution(trades: list, cancel_token=None) -> dict:
+def _compute_attribution(data, cancel_token=None) -> dict:
     """Worker helper: compute attribution (AI-8)."""
-    if not trades:
-        return {}
-    rows = exit_reason_attribution(trades)
+    if hasattr(data, "get_attribution"):
+        rows = data.get_attribution()
+    else:
+        rows = exit_reason_attribution(data)
     return {"rows": rows}
 
 
-def _compute_mae_mfe(trades: list, cancel_token=None) -> dict:
+def _compute_mae_mfe(data, cancel_token=None) -> dict:
     """Worker helper: compute MAE/MFE (AI-8)."""
-    if not trades:
-        return {}
-    res = mae_mfe_arrays(trades)
+    if hasattr(data, "get_mae_mfe"):
+        res = data.get_mae_mfe()
+    else:
+        res = mae_mfe_arrays(data)
     return {"res": res}
 
 
@@ -1760,18 +1755,24 @@ class AnalyticsTab(QWidget):
     def _update_advanced_stats(self, pnl_arr=None):
         """Draw PnL histogram with green/red bins and skew/kurtosis annotation."""
         self.dist_plot.clear()
+        
+        is_all = self._period_kind in ("ALL", "")
+        cache = getattr(self.engine, "_shared_cache", None)
+        
         if pnl_arr is None:
-            trades = list(getattr(self.engine, "trades", []) or [])
-            if not trades:
-                self._show_no_trades_state()
-                return
-            pnls_orig = np.array([t.pnl for t in trades], dtype=float)
+            if is_all and cache:
+                pnls_orig = cache.get_pnl_array()
+            else:
+                trades = self._sorted_trades()
+                if not trades:
+                    self._show_no_trades_state()
+                    return
+                pnls_orig = np.array([t.pnl for t in trades], dtype=float)
         else:
-            trades = list(getattr(self.engine, "trades", []) or [])
-            if not trades:
-                self._show_no_trades_state()
-                return
-            pnls_orig = pnl_arr
+            pnls_orig = np.asarray(pnl_arr, dtype=float)
+        
+        if pnls_orig.size == 0:
+            return
         t = get_theme()
         unique = np.unique(pnls_orig)
         if unique.size > 1:
@@ -1813,86 +1814,111 @@ class AnalyticsTab(QWidget):
         """Draw duration histogram and render merged analytics HTML."""
         self.duration_plot.clear()
 
-        trades = list(getattr(self.engine, "trades", []) or [])
-        if not trades:
-            self._show_no_trades_state()
-            return
+        is_all = self._period_kind in ("ALL", "")
+        cache = getattr(self.engine, "_shared_cache", None)
 
-        if pnl_arr is None:
-            pnl_arr = np.array([t.pnl for t in trades], dtype="float64")
+        if is_all and cache:
+            stats = cache.get_stats_dict()
+            pnl_arr = cache.get_pnl_array()
+            durations = cache.get_dur_array()
+            # Map cached stats to legacy context for HTML renderer
+            ctx = {
+                "calmar": stats["calmar"],
+                "sortino": stats["sortino"],
+                "omega": stats["omega"],
+                "ulcer": stats["ulcer"],
+                "var_95": stats["var95"],
+                "cvar_95": stats["cvar95"],
+                "mo": stats["mo"],
+                "kelly": stats["kelly"] / 100.0,
+                "tuw": type("TUW", (), {
+                    "pct_bars_underwater": stats["pain_index"], 
+                    "max_run_bars": stats["max_tuw"],
+                    "avg_run_bars": stats["avg_tuw"],
+                    "n_runs": int(stats["total"] * 0.1) # estimate
+                })(),
+                "dur_stats": {"mean_duration": stats["avg_dur"], "std_duration": 0.0},
+                "streak_stats": {"max_win_streak": stats["max_ws"], "max_loss_streak": stats["max_ls"]},
+                "ror": stats.get("ror", 0.0),
+            }
         else:
-            pnl_arr = np.asarray(pnl_arr, dtype="float64")
+            trades = self._sorted_trades()
+            if not trades:
+                self._show_no_trades_state()
+                return
+            if pnl_arr is None:
+                pnl_arr = np.array([t.pnl for t in trades], dtype="float64")
+            else:
+                pnl_arr = np.asarray(pnl_arr, dtype="float64")
+            
+            durations = np.array([getattr(t, "duration_minutes", 0) for t in trades], dtype=float)
+            
+            _eq_curve = _build_eq(trades, self.engine.initial_equity)
+            _pnl_arr = pnl_arr
+            calmar = calculate_calmar_ratio(trades, self.engine.initial_equity, equity_curve=_eq_curve)
+            sortino = calculate_sortino_ratio(trades, self.engine.initial_equity, equity_curve=_eq_curve)
+            var_95 = calculate_var(trades, 0.95, pnl_array=_pnl_arr)
+            cvar_95 = calculate_cvar(trades, 0.95, pnl_array=_pnl_arr)
+            omega = calculate_omega_ratio(trades, pnl_array=_pnl_arr)
+            ulcer = calculate_ulcer_index(trades, self.engine.initial_equity, equity_curve=_eq_curve)
 
-        _eq_curve = _build_eq(trades, self.engine.initial_equity)
-        _pnl_arr = pnl_arr
-        calmar = calculate_calmar_ratio(trades, self.engine.initial_equity, equity_curve=_eq_curve)
-        sortino = calculate_sortino_ratio(trades, self.engine.initial_equity, equity_curve=_eq_curve)
-        var_95 = calculate_var(trades, 0.95, pnl_array=_pnl_arr)
-        cvar_95 = calculate_cvar(trades, 0.95, pnl_array=_pnl_arr)
-        omega = calculate_omega_ratio(trades, pnl_array=_pnl_arr)
-        ulcer = calculate_ulcer_index(trades, self.engine.initial_equity, equity_curve=_eq_curve)
+            wins = pnl_arr[pnl_arr > 0]
+            losses = -pnl_arr[pnl_arr < 0]
+            total = len(pnl_arr)
+            wr = len(wins) / total if total > 0 else 0
+            if wins.size > 0 and losses.size > 0:
+                avg_w = wins.mean()
+                avg_l = losses.mean()
+                risk_pct = max(0.01, (avg_l / max(1.0, self.engine.initial_equity)) * 100.0)
+                ror = _risk_of_ruin(wr, avg_w, avg_l, risk_per_trade_pct=risk_pct, ruin_pct=0.5)
+            else:
+                ror = float("nan")
 
-        wins = [t.pnl for t in trades if t.pnl > 0]
-        losses = [-t.pnl for t in trades if t.pnl < 0]
-        total = len(trades)
-        wr = len(wins) / total if total > 0 else 0
-        if wins and losses:
-            avg_w = sum(wins) / len(wins)
-            avg_l = sum(losses) / len(losses)
-            risk_pct = max(0.01, (avg_l / max(1.0, self.engine.initial_equity)) * 100.0)
-            ror = _risk_of_ruin(wr, avg_w, avg_l, risk_per_trade_pct=risk_pct, ruin_pct=0.5)
-        else:
-            avg_w = 0
-            avg_l = 0
-            ror = float("nan")
+            mo = float((wr * wins.mean() if wins.size else 0) - ((1 - wr) * losses.mean() if losses.size else 0))
+            kelly = wr - ((1 - wr) / (wins.mean() / losses.mean())) if wins.size and losses.size else 0.0
 
-        mo = float((wr * avg_w) - ((1 - wr) * avg_l))
-        kelly = wr - ((1 - wr) / (avg_w / avg_l)) if avg_w > 0 and avg_l > 0 else 0.0
+            eq_arr = self.engine.initial_equity + np.cumsum(pnl_arr)
+            tuw = _time_under_water(np.concatenate([[self.engine.initial_equity], eq_arr]))
+            dur_stats = analyze_trade_duration(trades)
+            streak_stats = calculate_consecutive_wins_losses(trades)
+            
+            ctx = locals()
 
-        pnl_arr = _pnl_arr
-        eq_arr = np.empty(len(trades) + 1, dtype=float)
-        eq_arr[0] = self.engine.initial_equity
-        np.cumsum(pnl_arr, out=eq_arr[1:])
-        eq_arr[1:] += self.engine.initial_equity
-        tuw = _time_under_water(eq_arr)
-
-        dur_stats = analyze_trade_duration(trades)
-        streak_stats = calculate_consecutive_wins_losses(trades)
-
-        durations = [t.duration_minutes for t in trades]
         t_dur = get_theme()
-        if len(set(durations)) > 1:
-            y, x = np.histogram(durations, bins=min(20, len(set(durations))))
+        if durations.size > 1:
+            y, x = np.histogram(durations, bins=min(20, len(np.unique(durations))))
             c_dur = QColor(sh.c(t_dur, "cyan"))
             c_dur.setAlpha(160)
             bg = pg.BarGraphItem(x0=x[:-1], x1=x[1:], height=y, brush=c_dur)
             self.duration_plot.addItem(bg)
 
-        mean_dur = dur_stats.get("mean_duration", 0)
+        mean_dur = ctx["dur_stats"].get("mean_duration", 0)
         if mean_dur > 0:
             pen = QColor(sh.c(t_dur, "green_bright"))
             pen.setAlpha(230)
-            mean_line = pg.InfiniteLine(
-                pos=mean_dur, angle=90, pen=pg.mkPen(pen, width=2, style=Qt.PenStyle.DashLine)
-            )
+            mean_line = pg.InfiniteLine(pos=mean_dur, angle=90, pen=pg.mkPen(pen, width=2, style=Qt.PenStyle.DashLine))
             self.duration_plot.addItem(mean_line)
-        zc_dur = QColor(sh.c(t_dur, "text3"))
+        
+        self.duration_plot.autoRange()
+        
+        t = get_theme()
+        zc_dur = QColor(sh.c(t, "text3"))
         zc_dur.setAlpha(60)
         self.duration_plot.addItem(pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen(zc_dur, width=1, style=Qt.PenStyle.DotLine)))
-        self.duration_plot.autoRange()
+        
         # Duration annotation
         vb = self.duration_plot.getViewBox()
         if vb and mean_dur > 0:
             xr, yr = vb.viewRange()
             dur_txt = pg.TextItem(
-                text=f"μ={mean_dur:.0f}m  σ={dur_stats.get('std_duration',0):.0f}m",
-                color=QColor(sh.c(t_dur, "text3")),
+                text=f"μ={mean_dur:.0f}m  σ={ctx['dur_stats'].get('std_duration',0):.0f}m",
+                color=QColor(sh.c(t, "text3")),
                 anchor=(1, 1)
             )
             dur_txt.setPos(xr[1], yr[1])
             self.duration_plot.addItem(dur_txt)
 
-        self._render_merged_html(locals())
+        self._render_merged_html(ctx)
 
     def _render_merged_html(self, ctx: dict) -> None:
         tt = get_theme()
@@ -2621,7 +2647,11 @@ class AnalyticsTab(QWidget):
                 pass
             self._mae_worker = None
 
-        worker = ComputeWorker(_compute_mae_mfe, trades, parent=self)
+        is_all = self._period_kind in ("ALL", "")
+        cache = getattr(self.engine, "_shared_cache", None)
+        data = cache if (is_all and cache) else trades
+
+        worker = ComputeWorker(_compute_mae_mfe, data, parent=self)
 
         def _done(payload, g=gen):
             with self._mae_lock:
@@ -2699,7 +2729,15 @@ class AnalyticsTab(QWidget):
                 pass
             self._r_worker = None
 
-        worker = ComputeWorker(_compute_r_multiples, trades, parent=self)
+        is_all = self._period_kind in ("ALL", "")
+        cache = getattr(self.engine, "_shared_cache", None)
+        data = cache if (is_all and cache) else trades
+
+        is_all = self._period_kind in ("ALL", "")
+        cache = getattr(self.engine, "_shared_cache", None)
+        data = cache if (is_all and cache) else trades
+
+        worker = ComputeWorker(_compute_r_multiples, data, parent=self)
 
         def _done(payload, g=gen):
             with self._r_lock:
@@ -2782,7 +2820,11 @@ class AnalyticsTab(QWidget):
             except RuntimeError:
                 return
         self._heatmap_spinner.start()
-        worker = ComputeWorker(_compute_heatmaps, trades, parent=self)
+        is_all = self._period_kind in ("ALL", "")
+        cache = getattr(self.engine, "_shared_cache", None)
+        data = cache if (is_all and cache) else trades
+
+        worker = ComputeWorker(_compute_heatmaps, data, parent=self)
         slot = self._make_heatmap_slot(gen)
         worker.finished.connect(slot)
         worker._heatmap_slot = slot
@@ -2861,7 +2903,11 @@ class AnalyticsTab(QWidget):
                 pass
             self._attr_worker = None
 
-        worker = ComputeWorker(_compute_attribution, trades, parent=self)
+        is_all = self._period_kind in ("ALL", "")
+        cache = getattr(self.engine, "_shared_cache", None)
+        data = cache if (is_all and cache) else trades
+
+        worker = ComputeWorker(_compute_attribution, data, parent=self)
 
         def _done(payload, g=gen):
             with self._attr_lock:

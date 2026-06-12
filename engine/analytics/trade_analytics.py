@@ -76,6 +76,27 @@ def resolve_r_multiple(trade: Any) -> float:
         except (TypeError, ValueError):
             pass
 
+    # Phase 1 stabilization — legacy $ fallback moved inside resolver for consistency (AI-19)
+    # FIX: Ensure initial_sl is treated as distance only if it's reasonably small
+    # compared to entry price, otherwise it's an absolute price and this fallback
+    # is mathematically invalid for R-multiple.
+    try:
+        entry = float(getattr(trade, "entry_price", 0.0) or 0.0)
+        sl_val = abs(float(getattr(trade, "initial_sl", 0.0) or 0.0))
+        vol = float(getattr(trade, "volume", 1.0) or 1.0)
+        
+        # If sl_val > 10% of entry, it's almost certainly an absolute price, not a distance.
+        # In that case, we cannot derive risk without the distance.
+        if entry > 0 and sl_val > entry * 0.1:
+            return np.nan
+
+        risk_dollars = sl_val * vol
+        pnl = float(getattr(trade, "pnl", 0.0) or 0.0)
+        if risk_dollars > 1e-9:
+            return pnl / risk_dollars
+    except (TypeError, ValueError):
+        pass
+
     return np.nan
 
 
@@ -83,17 +104,22 @@ def resolve_period_window(
     kind: str,
     custom_start: Optional[Any] = None,
     custom_end: Optional[Any] = None,
+    *,
+    anchor: Optional[np.datetime64] = None,
 ) -> tuple[Optional[np.datetime64], Optional[np.datetime64]]:
-    """Convert period kind and custom dates to np.datetime64 window (AI-1)."""
+    """Convert period kind and custom dates to np.datetime64 window (AI-1).
+
+    Phase 1 stabilization — use anchor (max entry_time) for historical relative presets (AI-16).
+    """
     if kind == "ALL" or not kind:
         return None, None
+
+    import pandas as pd
 
     if kind == "CUSTOM":
         if custom_start is None or custom_end is None:
             return None, None
         try:
-            import pandas as pd
-
             start = np.datetime64(pd.Timestamp(custom_start).normalize())
             end = np.datetime64(
                 pd.Timestamp(custom_end).normalize() + pd.Timedelta(days=1)
@@ -102,30 +128,33 @@ def resolve_period_window(
         except Exception:
             return None, None
 
-    import pandas as pd
+    # Use anchor if provided; fallback to utcnow
+    if anchor is not None:
+        now_ts = pd.Timestamp(anchor)
+    else:
+        now_ts = pd.Timestamp.utcnow().tz_localize(None)
 
-    now = pd.Timestamp.utcnow().tz_localize(None)
     if kind == "1D":
-        start = np.datetime64(now.normalize())
+        start = np.datetime64(now_ts.normalize())
         end = start + np.timedelta64(1, "D")
     elif kind == "1W":
-        start = np.datetime64((now - pd.Timedelta(days=7)).normalize())
-        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+        start = np.datetime64((now_ts - pd.Timedelta(days=7)).normalize())
+        end = np.datetime64(now_ts.normalize() + pd.Timedelta(days=1))
     elif kind == "1M":
-        start = np.datetime64((now - pd.Timedelta(days=30)).normalize())
-        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+        start = np.datetime64((now_ts - pd.Timedelta(days=30)).normalize())
+        end = np.datetime64(now_ts.normalize() + pd.Timedelta(days=1))
     elif kind == "3M":
-        start = np.datetime64((now - pd.Timedelta(days=90)).normalize())
-        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+        start = np.datetime64((now_ts - pd.Timedelta(days=90)).normalize())
+        end = np.datetime64(now_ts.normalize() + pd.Timedelta(days=1))
     elif kind == "6M":
-        start = np.datetime64((now - pd.Timedelta(days=180)).normalize())
-        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+        start = np.datetime64((now_ts - pd.Timedelta(days=180)).normalize())
+        end = np.datetime64(now_ts.normalize() + pd.Timedelta(days=1))
     elif kind == "YTD":
-        start = np.datetime64(pd.Timestamp(now.year, 1, 1))
-        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+        start = np.datetime64(pd.Timestamp(now_ts.year, 1, 1))
+        end = np.datetime64(now_ts.normalize() + pd.Timedelta(days=1))
     elif kind == "1Y":
-        start = np.datetime64((now - pd.Timedelta(days=365)).normalize())
-        end = np.datetime64(now.normalize() + pd.Timedelta(days=1))
+        start = np.datetime64((now_ts - pd.Timedelta(days=365)).normalize())
+        end = np.datetime64(now_ts.normalize() + pd.Timedelta(days=1))
     else:
         return None, None
     return start, end
@@ -332,7 +361,7 @@ def hour_weekday_heatmap(
     pnl = np.zeros((24, 7), dtype=float)
     EPS = 1e-9
     for i, t in enumerate(trades):
-        if i % 1024 == 0 and cancel_token and cancel_token.is_set():
+        if i % 128 == 0 and cancel_token and cancel_token.is_set():
             return HourWeekdayHeatmap(counts=counts, win_rate=np.nan * counts, net_pnl=pnl)
         dt = _parse_time(getattr(t, "entry_time", "") or "")
         if dt is None:
@@ -368,8 +397,13 @@ def month_year_heatmap(
     by_year: Dict[int, np.ndarray] = {}
     by_year_n: Dict[int, np.ndarray] = {}
     for i, t in enumerate(trades):
-        if i % 1000 == 0 and cancel_token and cancel_token.is_set():
-            break
+        if i % 128 == 0 and cancel_token and cancel_token.is_set():
+            if not by_year:
+                return MonthYearHeatmap([], np.empty((0, 12), dtype=float), np.empty((0, 12), dtype=int))
+            years = sorted(by_year.keys())
+            pnl_grid = np.stack([by_year[y] for y in years])
+            n_grid = np.stack([by_year_n[y] for y in years])
+            return MonthYearHeatmap(years=years, net_pnl=pnl_grid, counts=n_grid)
         dt = _parse_time(getattr(t, "entry_time", "") or "")
         if dt is None:
             continue
@@ -624,18 +658,6 @@ __all__ = [
     "HourWeekdayHeatmap",
     "hour_weekday_heatmap",
     "MonthYearHeatmap",
-    "month_year_heatmap",
-    "DrawdownEpisode",
-    "drawdown_durations",
-    "AttributionRow",
-    "exit_reason_attribution",
-    "SlippageSimulationResult",
-    "simulate_slippage",
-    "StrategySummary",
-    "summarise_run",
-    "compare_runs",
-]
-earHeatmap",
     "month_year_heatmap",
     "DrawdownEpisode",
     "drawdown_durations",

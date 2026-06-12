@@ -457,6 +457,22 @@ class TradesTableModel(QAbstractTableModel):
             self._drill_year = np.zeros(n, dtype=np.int16)
             self._drill_month = np.zeros(n, dtype=np.int8)
 
+        # "Grail" Anomaly Detection — Z-score > 3.0 for PnL outliers
+        pnls = self._numeric_keys.get(COL_PNL_DOLLARS, np.array([]))
+        if n >= 10 and pnls.size > 0:
+            try:
+                mu = pnls.mean()
+                std = pnls.std()
+                if std > 1e-9:
+                    z = (pnls - mu) / std
+                    self._is_anomaly = np.abs(z) > 3.0
+                else:
+                    self._is_anomaly = np.zeros(n, dtype=bool)
+            except Exception:
+                self._is_anomaly = np.zeros(n, dtype=bool)
+        else:
+            self._is_anomaly = np.zeros(n, dtype=bool)
+
         # Phase 6.3 — precompute direction booleans for fast filter mask (🟡16)
         directions = self._string_keys.get(COL_DIRECTION, [])
         if directions:
