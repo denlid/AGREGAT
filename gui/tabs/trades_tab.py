@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from engine.analytics.trade_analytics import resolve_period_window
 from gui.styling import style_helpers as sh
 from gui.styling.theme import get_theme, register_theme_listener, unregister_theme_listener
 from gui.widgets.empty_state import EmptyState
@@ -1012,8 +1013,16 @@ class TradesTab(QWidget):
             d_from = self.d_from.date()
             d_to = self.d_to.date()
         elif self._period_kind not in ("ALL", ""):
-            d_from = QDate(self._period_start.year, self._period_start.month, self._period_start.day) if self._period_start is not None else QDate(2000, 1, 1)
-            d_to = QDate(self._period_end.year, self._period_end.month, self._period_end.day) if self._period_end is not None else QDate.currentDate()
+            start, end = resolve_period_window(
+                self._period_kind, self._period_start, self._period_end
+            )
+            if start is not None:
+                ts = pd.Timestamp(start)
+                d_from = QDate(ts.year, ts.month, ts.day)
+            if end is not None:
+                # end is exclusive [start, end) — map to inclusive calendar day for proxy
+                last = pd.Timestamp(end) - pd.Timedelta(nanoseconds=1)
+                d_to = QDate(last.year, last.month, last.day)
         p = self._drilldown_payload or {}
         if hasattr(self._proxy, "apply_all_filters"):
             self._proxy.apply_all_filters(
@@ -1122,9 +1131,9 @@ class TradesTab(QWidget):
         def _rr(t, idx):
             if rr_cache is not None and 0 <= idx < rr_cache.size:
                 v = float(rr_cache[idx])
-                return f"{v:+.2f}R" if np.isfinite(v) and v != 0 else "N/A"
+                return f"{v:+.2f}R" if np.isfinite(v) else "—"
             rv = _calc_rr(t)
-            return f"{rv:+.2f}R" if np.isfinite(rv) and rv != 0 else "N/A"
+            return f"{rv:+.2f}R" if np.isfinite(rv) else "—"
         try:
             if fmt == "excel":
                 try:

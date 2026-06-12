@@ -42,6 +42,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor
 
+from engine.analytics.trade_analytics import resolve_r_multiple
 from gui.styling import style_helpers as sh
 from gui.styling.theme import get_theme
 
@@ -167,27 +168,8 @@ COL_RR = 18
 
 
 def _calc_rr(trade: Any) -> float:
-    """Risk/Reward ratio (R-multiple). 0 when SL was zero / unknown."""
-    # Phase 1 Stabilization Step 5 — prioritise pre-computed RR from engine
-    rr = getattr(trade, "rr", None)
-    if rr is not None:
-        try:
-            return float(rr)
-        except (TypeError, ValueError):
-            pass
-
-    try:
-        initial_sl = getattr(trade, "initial_sl", None)
-        if initial_sl is None or initial_sl == 0:
-            return 0.0
-        entry_price = float(getattr(trade, "entry_price", 0.0) or 0.0)
-        risk = abs(entry_price - float(initial_sl))
-        if risk > 0:
-            pnl_points = float(getattr(trade, "pnl_points", 0.0) or 0.0)
-            return pnl_points / risk
-    except (TypeError, ValueError, AttributeError):
-        pass
-    return 0.0
+    """R-multiple for table sort/display — delegates to shared resolver (AI-3)."""
+    return float(resolve_r_multiple(trade))
 
 
 def _format_duration(minutes: int) -> str:
@@ -740,7 +722,9 @@ class TradesTableModel(QAbstractTableModel):
             return str(trade.session)
         if col == COL_RR:
             rr = _calc_rr(trade)
-            return f"{rr:+.2f}R" if rr != 0 else "N/A"
+            if not np.isfinite(rr):
+                return "—"
+            return f"{rr:+.2f}R"
         return ""
 
     def _raw(self, trade: Any, col: int) -> Any:
@@ -821,7 +805,7 @@ class TradesTableModel(QAbstractTableModel):
             return self._c_text3
         if col == COL_RR:
             rr = _calc_rr(trade)
-            if rr == 0:
+            if not np.isfinite(rr):
                 return None
             if rr > 1.0:
                 return self._c_green

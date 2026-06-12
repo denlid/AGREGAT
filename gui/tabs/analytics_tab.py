@@ -44,6 +44,7 @@ from engine.analytics.trade_analytics import (
     hour_weekday_heatmap,
     mae_mfe_arrays,
     month_year_heatmap,
+    resolve_period_window,
     r_multiples,
     simulate_slippage,
 )
@@ -1145,8 +1146,21 @@ class AnalyticsTab(QWidget):
                 self._spinner.stop()
 
     def _resolve_period_window(self) -> tuple[np.datetime64 | None, np.datetime64 | None]:
-        """Phase 1 stabilization — use centralized period resolver (AI-1)."""
-        return resolve_period_window(self._period_kind, self._period_start, self._period_end)
+        """Phase 1 stabilization — use centralized period resolver with historical anchoring (AI-1, AI-16)."""
+        trades = list(getattr(self.engine, "trades", []) or [])
+        anchor = None
+        if trades:
+            try:
+                # Use max entry time as anchor for historical relative presets
+                ets = [getattr(t, "entry_time_np", None) or pd.to_datetime(t.entry_time) for t in trades]
+                anchor = np.max(ets)
+                if pd.isna(anchor):
+                    anchor = None
+                else:
+                    anchor = np.datetime64(anchor)
+            except Exception:
+                pass
+        return resolve_period_window(self._period_kind, self._period_start, self._period_end, anchor=anchor)
 
     def _sorted_trades(self):
         """Centralised access to engine trades, sorted and period-filtered (AI-1)."""
@@ -1328,7 +1342,18 @@ class AnalyticsTab(QWidget):
                     pnls[i] = float(getattr(t, "pnl", 0.0) or 0.0)
                 except Exception:
                     pnls[i] = 0.0
-            init_eq = float(self.engine.initial_equity)
+            
+            # AI-18: Sub-period equity baseline.
+            # Start from equity at period_start, not initial_equity.
+            full_sorted = cache.get_sorted_trades() if cache else []
+            start_dt, _ = self._resolve_period_window()
+            if start_dt is not None and full_sorted:
+                prior_pnl = sum(float(getattr(t, "pnl", 0.0) or 0.0) for t in full_sorted 
+                                if (getattr(t, "entry_time_np", None) or pd.to_datetime(t.entry_time)) < start_dt)
+                init_eq = float(self.engine.initial_equity) + prior_pnl
+            else:
+                init_eq = float(self.engine.initial_equity)
+
             eq_all = np.empty(n + 1, dtype=float)
             eq_all[0] = init_eq
             np.cumsum(pnls, out=eq_all[1:])

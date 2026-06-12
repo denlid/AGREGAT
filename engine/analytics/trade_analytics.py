@@ -330,9 +330,10 @@ def hour_weekday_heatmap(
     counts = np.zeros((24, 7), dtype=int)
     wins = np.zeros((24, 7), dtype=int)
     pnl = np.zeros((24, 7), dtype=float)
+    EPS = 1e-9
     for i, t in enumerate(trades):
-        if i % 1000 == 0 and cancel_token and cancel_token.is_set():
-            break
+        if i % 1024 == 0 and cancel_token and cancel_token.is_set():
+            return HourWeekdayHeatmap(counts=counts, win_rate=np.nan * counts, net_pnl=pnl)
         dt = _parse_time(getattr(t, "entry_time", "") or "")
         if dt is None:
             continue
@@ -340,7 +341,7 @@ def hour_weekday_heatmap(
         wd = dt.weekday()
         counts[h, wd] += 1
         val = float(getattr(t, "pnl", 0.0) or 0.0)
-        if val > 0:
+        if val > EPS:
             wins[h, wd] += 1
         pnl[h, wd] += val
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -623,6 +624,18 @@ __all__ = [
     "HourWeekdayHeatmap",
     "hour_weekday_heatmap",
     "MonthYearHeatmap",
+    "month_year_heatmap",
+    "DrawdownEpisode",
+    "drawdown_durations",
+    "AttributionRow",
+    "exit_reason_attribution",
+    "SlippageSimulationResult",
+    "simulate_slippage",
+    "StrategySummary",
+    "summarise_run",
+    "compare_runs",
+]
+earHeatmap",
     "month_year_heatmap",
     "DrawdownEpisode",
     "drawdown_durations",
