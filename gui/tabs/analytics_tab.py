@@ -2934,6 +2934,15 @@ class AnalyticsTab(QWidget):
         self._period_kind = kind
         self._period_start = start
         self._period_end = end
+
+        # AI-26: Update period badge
+        if hasattr(self, "lbl_period"):
+            if kind in ("ALL", ""):
+                self.lbl_period.hide()
+            else:
+                self.lbl_period.setText(f"Period: {kind}")
+                self.lbl_period.show()
+
         try:
             self.refresh_all(force=True)
         except Exception:

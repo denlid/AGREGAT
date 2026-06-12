@@ -1225,9 +1225,14 @@ class TradesFilterProxy(QAbstractTableModel):
         if self._search_text:
             blobs = src._search_blobs
             needle = self._search_text
-            # Phase 1 stabilization — faster search (AI-9)
-            # List comprehension is significantly faster than generator in fromiter
-            search_mask = np.array([needle in b for b in blobs], dtype=bool)
+            # Phase 1 stabilization — faster vectorized search (AI-24)
+            if isinstance(blobs, np.ndarray):
+                # np.char.find is significantly faster on large arrays
+                search_mask = np.char.find(blobs.astype(str), needle) != -1
+            else:
+                # Fallback for unexpected types
+                search_mask = np.array([needle in b for b in blobs], dtype=bool)
+
             if search_mask.size == n:
                 mask &= search_mask
 

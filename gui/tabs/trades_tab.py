@@ -1013,8 +1013,22 @@ class TradesTab(QWidget):
             d_from = self.d_from.date()
             d_to = self.d_to.date()
         elif self._period_kind not in ("ALL", ""):
+            # AI-16: Historical anchoring for relative presets
+            trades = list(getattr(self.engine, "trades", []) or [])
+            anchor = None
+            if trades:
+                try:
+                    ets = [getattr(t, "entry_time_np", None) or pd.to_datetime(t.entry_time) for t in trades]
+                    anchor = np.max(ets)
+                    if not pd.isna(anchor):
+                        anchor = np.datetime64(anchor)
+                    else:
+                        anchor = None
+                except Exception:
+                    pass
+            
             start, end = resolve_period_window(
-                self._period_kind, self._period_start, self._period_end
+                self._period_kind, self._period_start, self._period_end, anchor=anchor
             )
             if start is not None:
                 ts = pd.Timestamp(start)

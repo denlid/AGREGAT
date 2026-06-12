@@ -105,9 +105,10 @@ class StatsCalculator:
                 dur_arr[i] = 0
             dir_arr[i] = str(getattr(t, "direction", "") or "").lower()
 
-        win_mask = pnl_arr > 0
-        loss_mask = pnl_arr < 0
-        be_mask = pnl_arr == 0
+        EPS = 1e-9
+        win_mask = pnl_arr > EPS
+        loss_mask = pnl_arr < -EPS
+        be_mask = np.abs(pnl_arr) <= EPS
         n_w = int(win_mask.sum())
         n_l = int(loss_mask.sum())
         n_be = int(be_mask.sum())

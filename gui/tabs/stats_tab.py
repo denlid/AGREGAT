@@ -336,8 +336,21 @@ class StatsTab(QWidget):
             self._recalc()
 
     def _resolve_period_window(self) -> tuple[np.datetime64 | None, np.datetime64 | None]:
-        """Phase 1 stabilization — use centralized period resolver (AI-1)."""
-        return resolve_period_window(self._period_kind, self._period_start, self._period_end)
+        """Phase 1 stabilization — use centralized period resolver with historical anchoring (AI-1, AI-16)."""
+        trades = list(getattr(self.engine, "trades", []) or [])
+        anchor = None
+        if trades:
+            try:
+                # Use max entry time as anchor for historical relative presets
+                ets = [getattr(t, "entry_time_np", None) or pd.to_datetime(t.entry_time) for t in trades]
+                anchor = np.max(ets)
+                if pd.isna(anchor):
+                    anchor = None
+                else:
+                    anchor = np.datetime64(anchor)
+            except Exception:
+                pass
+        return resolve_period_window(self._period_kind, self._period_start, self._period_end, anchor=anchor)
 
     def _get_filtered_trades(self):
         """Phase 1 stabilization — use centralized period filter (AI-1)."""
@@ -353,7 +366,14 @@ class StatsTab(QWidget):
         return filter_trades_by_period(trades, start, end)
 
     def _make_recalc_key(self, trades) -> tuple:
-        return (len(trades), id(trades[-1]) if trades else None)
+        """AI-25: Recalc key includes period info to detect filter changes."""
+        return (
+            self._period_kind,
+            str(self._period_start),
+            str(self._period_end),
+            len(trades),
+            id(trades[-1]) if trades else None
+        )
 
     def _recalc(self):
         try:
