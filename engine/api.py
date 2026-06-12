@@ -302,6 +302,10 @@ class Strategy:
         strategy.draw_line(...)               — drawing
         strategy.draw_rect(...)
         strategy.draw_text(...)
+        strategy.remove_drawing(id)           — remove one drawing by id
+        strategy.update_drawing(id, updates)  — update one drawing by id
+        strategy.remove_drawings_by_tag(tag)  — remove all drawings in a tag group
+        strategy.update_drawings_by_tag(...)  — update all drawings in a tag group
     
     Data (via ``c`` argument in callbacks):
         c.close, c.high, c.low, c.open_, c.volume, c.time
@@ -599,6 +603,20 @@ class Strategy:
         ctx = _current_ctx
         if ctx is not None:
             ctx.update_drawing(drawing_id, updates)
+
+    @staticmethod
+    def remove_drawings_by_tag(tag: str) -> int:
+        ctx = _current_ctx
+        if ctx is not None:
+            return ctx.remove_drawings_by_tag(tag)
+        return 0
+
+    @staticmethod
+    def update_drawings_by_tag(tag: str, updates: Dict[str, Any]) -> int:
+        ctx = _current_ctx
+        if ctx is not None:
+            return ctx.update_drawings_by_tag(tag, updates)
+        return 0
 
     # ------------------------------------------------------------------
     # Compile to engine-compatible Strategy class

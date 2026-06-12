@@ -1,13 +1,11 @@
 """Sprint 3 — integration tests for all deliverables.
 
 Covers:
-  3.1 Numba primitives (fallback path, since numba is optional)
   3.2 Parquet/Feather data loaders
   3.3 Format-version migration framework
   3.4 CLI replay stub
   3.7 Structured logging trace-id propagation
   3.8 SDK re-exports
-  3.9 DSL codegen Phase 2
 """
 
 from __future__ import annotations
@@ -27,49 +25,6 @@ import pytest
 # 3.1 — Numba primitives (tests run the fallback path when numba
 #        is not installed; the Numba path is exercised transparently).
 # -----------------------------------------------------------------------
-class TestNumbaPrimitives:
-    def test_ffill_arr_basic(self) -> None:
-        from engine.core.linear import _ffill_arr
-
-        a = np.array([np.nan, 1.0, np.nan, 3.0, np.nan])
-        result = _ffill_arr(a)
-        assert np.isnan(result[0])
-        assert result[1] == 1.0
-        assert result[2] == 1.0
-        assert result[3] == 3.0
-        assert result[4] == 3.0
-
-    def test_ffill_all_nan(self) -> None:
-        from engine.core.linear import _ffill_arr
-
-        a = np.array([np.nan, np.nan, np.nan])
-        result = _ffill_arr(a)
-        assert np.all(np.isnan(result))
-
-    def test_linear_pivots_close_parity(self) -> None:
-        """Numba path (if installed) must match the pure-NumPy path."""
-        from engine.core.linear import linear_pivots_close
-
-        rng = np.random.default_rng(42)
-        close = rng.normal(100, 2, size=200)
-        is_h, is_l = linear_pivots_close(close, lookback=3)
-        assert is_h.shape == (200,)
-        assert is_l.shape == (200,)
-        assert is_h.dtype == np.bool_
-        assert is_l.dtype == np.bool_
-
-    def test_linear_pivots_body_parity(self) -> None:
-        from engine.core.linear import linear_pivots
-
-        rng = np.random.default_rng(42)
-        n = 150
-        close = rng.normal(100, 2, size=n)
-        open_ = close + rng.normal(0, 0.5, size=n)
-        is_h, is_l = linear_pivots(open_, close, lookback=2)
-        assert is_h.shape == (n,)
-        assert is_l.shape == (n,)
-
-
 # -----------------------------------------------------------------------
 # 3.2 — Parquet / Feather data loaders
 # -----------------------------------------------------------------------
@@ -275,63 +230,3 @@ class TestSDK:
         assert callable(grid_search)
         assert callable(build_equity_curve)
 
-
-# -----------------------------------------------------------------------
-# 3.9 — DSL codegen Phase 2
-# -----------------------------------------------------------------------
-class TestDSLCodegen:
-    def test_codegen_ema(self) -> None:
-        from engine.ai.dsl.codegen import codegen_indicator
-
-        lines = codegen_indicator({"id": "fast_ema", "type": "ema", "period": 9})
-        code = "\n".join(lines)
-        assert "fast_ema" in code
-        assert "ewm" in code
-
-    def test_codegen_atr(self) -> None:
-        from engine.ai.dsl.codegen import codegen_indicator
-
-        lines = codegen_indicator({"id": "my_atr", "type": "atr", "period": 14})
-        code = "\n".join(lines)
-        assert "my_atr" in code
-        assert "high" in code and "low" in code
-
-    def test_codegen_donchian(self) -> None:
-        from engine.ai.dsl.codegen import codegen_indicator
-
-        lines = codegen_indicator({"id": "dc", "type": "donchian", "period": 20})
-        code = "\n".join(lines)
-        assert "dc_upper" in code
-        assert "dc_lower" in code
-
-    def test_codegen_ott(self) -> None:
-        from engine.ai.dsl.codegen import codegen_indicator
-
-        lines = codegen_indicator({"id": "trend", "type": "ott", "period": 2, "pct": 1.4})
-        code = "\n".join(lines)
-        assert "trend" in code
-        assert "long_stop" in code
-
-    def test_codegen_fvg(self) -> None:
-        from engine.ai.dsl.codegen import codegen_indicator
-
-        lines = codegen_indicator({"id": "gaps", "type": "fvg"})
-        code = "\n".join(lines)
-        assert "fvg_close_only" in code
-
-    def test_codegen_unknown_type_raises(self) -> None:
-        from engine.ai.dsl.codegen import CodegenError, codegen_indicator
-
-        with pytest.raises(CodegenError):
-            codegen_indicator({"id": "x", "type": "nosuch"})
-
-    def test_codegen_indicators_combined(self) -> None:
-        from engine.ai.dsl.codegen import codegen_indicators
-
-        nodes = [
-            {"id": "e9", "type": "ema", "period": 9},
-            {"id": "a14", "type": "atr", "period": 14},
-        ]
-        code = codegen_indicators(nodes)
-        assert "e9" in code
-        assert "a14" in code

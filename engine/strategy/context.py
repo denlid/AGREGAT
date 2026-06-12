@@ -294,6 +294,7 @@ class Context:
         get_session(time=) / is_trading_hours() — session helpers
         calculate_lot(sl_pts, risk_pct=)        — risk-based lot sizing (clamped)
         draw_line/rect/text/remove/update       — drawing API
+        remove/update_drawings_by_tag           — batch drawing API by layer tag
         register_layer(tag, label, default_on)  — add a toggleable UI layer
     """
 
@@ -746,6 +747,12 @@ class Context:
 
     def update_drawing(self, d_id: int, updates: Dict[str, Any]) -> None:
         self._engine.update_drawing(d_id, updates)
+
+    def remove_drawings_by_tag(self, tag: str) -> int:
+        return self._engine.remove_drawings_by_tag(tag)
+
+    def update_drawings_by_tag(self, tag: str, updates: Dict[str, Any]) -> int:
+        return self._engine.update_drawings_by_tag(tag, updates)
 
     # --- Internal ---
     def _format_time(self) -> str:

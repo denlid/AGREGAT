@@ -5,8 +5,6 @@ paths the rest of the roadmap depends on:
 
 | Bench script             | Targets                                                |
 |--------------------------|---------------------------------------------------------|
-| `bench_lsf.py`           | `linear_pivots_close`, `linear_cisd_series_close`, full LinearStructureFVG vectorised run |
-| `bench_llc.py`           | `linear_pivots`, `linear_cisd_series`, full LinearLogicCore vectorised run |
 | `bench_grid.py`          | `optimizer.grid_search` — both single-threaded and `n_workers=4` (Sprint 2.6) |
 | `bench_vectorized_reuse.py` | repeated `run_vectorized` with and without `PreparedDataset` reuse |
 

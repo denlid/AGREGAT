@@ -27,6 +27,46 @@ def _(c):
 
 ---
 
+## AI output template
+
+When generating a new strategy, use this shape unless the user explicitly asks
+for the legacy class-based API:
+
+```python
+from engine.api import Strategy, Param, crossover, crossunder
+from engine.core.indicators import ema, sma, atr
+
+strategy = Strategy(
+    name="My Strategy",
+    period=Param(name="period", label="Period", kind="int", default=20, min=2, max=400, step=1),
+    risk_pct=Param(name="risk_pct", label="Risk %", kind="float", default=1.0, min=0.1, max=10.0, step=0.1),
+    sl_points=Param(name="sl_points", label="SL Points", kind="float", default=50.0, min=1.0, max=10000.0, step=1.0),
+    tp_points=Param(name="tp_points", label="TP Points", kind="float", default=100.0, min=1.0, max=10000.0, step=1.0),
+)
+
+@strategy.on_candle()
+def _(c):
+    if len(c.close_arr) < strategy.period + 2:
+        return
+
+    # Use arrays for indicators.
+    fast = ema(c.close_arr, strategy.period)
+
+    # Entry SL/TP are absolute prices.
+    sl = c.close - strategy.sl_points * c.asset.tick_size
+    tp = c.close + strategy.tp_points * c.asset.tick_size
+    strategy.long(sl=sl, tp=tp, risk=strategy.risk_pct, tag="LONG")
+```
+
+Before returning code, verify:
+- imports use `engine.api`, not `engine.strategy.context`;
+- there is no `class`, no `self`, no `ctx`;
+- every indicator receives an array ending in `_arr`;
+- every `[-2]` access has a length guard;
+- `strategy.long()` / `strategy.short()` receive absolute SL/TP prices.
+
+---
+
 ## Strategy object — parameters
 
 ```python
@@ -202,11 +242,19 @@ strategy.move_sl_to_be(offset_points=2.0)
 ### Drawing (text is centered on the candle)
 
 ```python
-strategy.draw_line(t1, p1, t2, p2, color="yellow", width=1, tag="")
-strategy.draw_rect(t1, p1, t2, p2, color="yellow", fill=True, opacity=0.3, tag="")
-strategy.draw_text(t, p, "Label", color="white", tag="")
-strategy.remove_drawing(drawing_id)
-strategy.update_drawing(drawing_id, {"color": "red"})
+line_id = strategy.draw_line(t1, p1, t2, p2, color="yellow", width=1, tag="levels")
+rect_id = strategy.draw_rect(t1, p1, t2, p2, color="yellow", fill=True, opacity=0.3, tag="fvg")
+text_id = strategy.draw_text(t, p, "Label", color="white", tag="labels")
+
+# Single drawing operations use the returned id.
+strategy.remove_drawing(line_id)
+strategy.update_drawing(rect_id, {"color": "red"})
+
+# Batch operations use tag as a layer/group label.
+strategy.remove_drawings_by_tag("fvg")
+strategy.update_drawings_by_tag("labels", {"color": "white"})
+
+# tag is a group/layer label, not a unique drawing name.
 ```
 
 t/t1/t2 are timestamps — use `c.time`, `c.time_arr[-2]`, etc.
@@ -311,6 +359,8 @@ def _(c):
 | Cancel order | `strategy.cancel()` |
 | Move SL/TP | `strategy.update_sl(97)`, `strategy.update_tp(110)` |
 | SL to breakeven | `strategy.move_sl_to_be()` |
+| Drawing by id | `strategy.update_drawing(id, updates)`, `strategy.remove_drawing(id)` |
+| Drawings by tag | `strategy.update_drawings_by_tag(tag, updates)`, `strategy.remove_drawings_by_tag(tag)` |
 | Last 1m close | `c.close` (float) |
 | Last 1m high | `c.high` (float) |
 | Previous close | `c.close_arr[-2]` |
@@ -323,6 +373,58 @@ def _(c):
 | Equity | `c.equity` |
 | SMA, EMA, RSI, ATR | `sma(c.close_arr, 20)`, `ema(c.close_arr, 20)` |
 | Param access | `strategy.period` (auto-cast) |
+
+---
+
+## Runtime caveats
+
+- Compiled `@strategy.on_candle()` callbacks are entry callbacks. They are not
+  called while a position is already open.
+- Use `on_candle` to detect and queue new entries. Do not rely on it for
+  trailing stops, manual exits, or other per-bar open-position management.
+- Management actions such as `strategy.close()`, `strategy.update_sl()`,
+  `strategy.update_tp()`, and `strategy.move_sl_to_be()` are available only when
+  the callback itself is invoked. In declarative `engine.api` strategies, use
+  HTF callbacks (`on_15m_close`, `on_1h_close`, `on_1d_close`) for these actions,
+  or use the class-based `engine.strategy.context.Strategy` API when management
+  must run every bar while a position is open.
+
+---
+
+## Common invalid patterns
+
+Do not generate these:
+
+```python
+# Wrong for the declarative API: class-based strategy.
+from engine.strategy.context import Strategy
+
+class MyStrategy(Strategy):
+    ...
+```
+
+```python
+# Wrong: declarative callbacks receive `c`, not `ctx`.
+@strategy.on_candle()
+def _(ctx):
+    strategy.long(sl=ctx.close - 50)
+```
+
+```python
+# Wrong: indicators need arrays, not scalar floats.
+ema(c.close, 20)
+```
+
+```python
+# Wrong: SL/TP passed to entry actions are absolute prices, not point distances.
+strategy.long(sl=50, tp=100)
+```
+
+```python
+# Wrong: unsafe previous-bar access without a length guard.
+if c.close_arr[-1] > c.close_arr[-2]:
+    strategy.long(...)
+```
 
 ---
 

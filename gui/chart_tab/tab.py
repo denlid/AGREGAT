@@ -189,6 +189,8 @@ class ChartTab(QWidget):
         # Override wheel event for smooth independent axis zoom
         self._orig_wheelEvent = vb.wheelEvent
         vb.wheelEvent = self._smooth_wheel_zoom
+        self._orig_vb_mouseDragEvent = vb.mouseDragEvent
+        vb.mouseDragEvent = self._viewbox_mouseDragEvent
 
         # Override plot_widget mouse events for precise drawing (Brush, etc)
         self.plot_widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -331,7 +333,7 @@ class ChartTab(QWidget):
         # State
         self.current_tool = "None"  # kept as proxy for external callers; drawing_ctrl is authoritative
         self._last_hovered_drawing = None  # track last hovered drawing for RMB context menu
-        self.strategy_graphic_items = {}
+        self.strategy_graphic_items = []
         self.trade_graphic_items = []
         self.res_times = np.array([])
         self._need_autorange = True
@@ -339,6 +341,8 @@ class ChartTab(QWidget):
         self._tracked_xrange = None  # Our own X-range tracking (bypasses pyqtgraph)
         self._cache_key = None
         self._cached_res_df = None
+        self._x_offset = 0
+        self._cached_x_offset = 0
         self._color_scheme = "Classic"
         self._last_click_pos = None
         self.autofit_y = True
@@ -348,6 +352,7 @@ class ChartTab(QWidget):
         self._selection_mask_items = []
         self._selection_rect_data = None
         self._redraw_pending = False
+        self._chart_pan_cursor_active = False
         self._redraw_timer = QTimer()
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(60)
@@ -370,7 +375,10 @@ class ChartTab(QWidget):
             # Fit X to data bounds only — avoids being influenced by
             # drawing items that may have out-of-range coordinates.
             x_pad = max(5.0, n * 0.02)  # 2% padding, at least 5 bars
-            vb.setRange(xRange=[-x_pad, n - 1 + x_pad], padding=0)
+            vb.setRange(
+                xRange=[self._x_offset - x_pad, self._x_offset + n - 1 + x_pad],
+                padding=0,
+            )
             if self.autofit_y and self._cached_res_df is not None:
                 self._autofit_y(vb, self._cached_res_df, n)
         vb.enableAutoRange(x=False, y=False)
@@ -536,6 +544,19 @@ class ChartTab(QWidget):
         self.cancel_btn.hide()
         self.plot_widget.unsetCursor()
 
+    def _set_chart_pan_cursor(self, active: bool) -> None:
+        if active:
+            if not self._chart_pan_cursor_active:
+                self.plot_widget.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+                self.plot_widget.viewport().setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+                self._chart_pan_cursor_active = True
+            return
+
+        if self._chart_pan_cursor_active:
+            self.plot_widget.unsetCursor()
+            self.plot_widget.viewport().unsetCursor()
+            self._chart_pan_cursor_active = False
+
     def _create_selection_mask(self):
         self._clear_selection_mask()
         for _ in range(4):
@@ -609,6 +630,20 @@ class ChartTab(QWidget):
         self._tracked_xrange = list(vr[0])
         ev.accept()
 
+    def _viewbox_mouseDragEvent(self, ev, axis=None):
+        pan_drag = (
+            self.drawing_ctrl.current_tool == "None"
+            and not self._selection_mode
+            and ev.button() == Qt.MouseButton.LeftButton
+        )
+        if pan_drag and ev.isStart():
+            self._set_chart_pan_cursor(True)
+        try:
+            return self._orig_vb_mouseDragEvent(ev, axis=axis)
+        finally:
+            if pan_drag and ev.isFinish():
+                self._set_chart_pan_cursor(False)
+
     def zoom_chart(self, factor):
         """Zoom in/out. factor>1 = zoom in, <1 = zoom out."""
         vb = self.plot_widget.getViewBox()
@@ -629,7 +664,8 @@ class ChartTab(QWidget):
         self.hline.setPos(mp.y())
 
         idx = int(round(mp.x()))
-        if 0 <= idx < len(self.res_times):
+        local_idx = idx - self._x_offset
+        if 0 <= local_idx < len(self.res_times):
             _ = self.candlestick_item.get_ohlc_at(idx)
 
         # Price label on right side of crosshair
@@ -652,7 +688,10 @@ class ChartTab(QWidget):
         x, y = pos.x(), pos.y()
 
         if self._selection_mode and evt.button() == Qt.MouseButton.LeftButton:
-            sx = max(0, min(int(round(x)), max(0, len(self.res_times) - 1)))
+            sx = max(
+                self._x_offset,
+                min(int(round(x)), self._x_offset + max(0, len(self.res_times) - 1)),
+            )
             self._selection_start = (sx, y)
             if self._selection_overlay is None:
                 self._selection_overlay = QGraphicsRectItem()
@@ -691,9 +730,10 @@ class ChartTab(QWidget):
 
             idx = int(round(x))
             ts = ""
-            if 0 <= idx < len(self.res_times):
+            local_idx = idx - self._x_offset
+            if 0 <= local_idx < len(self.res_times):
                 try:
-                    ts = pd.to_datetime(self.res_times[idx]).strftime("%Y-%m-%d %H:%M")
+                    ts = pd.to_datetime(self.res_times[local_idx]).strftime("%Y-%m-%d %H:%M")
                 except Exception:
                     pass
             menu = QMenu()
@@ -716,10 +756,14 @@ class ChartTab(QWidget):
 
         # Delegate drawing to DrawingController
         if self.drawing_ctrl.current_tool != "None":
+            self.drawing_ctrl.x_offset = self._x_offset
             if self.drawing_ctrl.handle_mouse_press(scene_pos, evt.button(), self.res_times):
                 self._draw_user_items(self.res_times)
                 evt.accept()
                 return
+
+        if self.drawing_ctrl.current_tool == "None" and evt.button() == Qt.MouseButton.LeftButton:
+            self._set_chart_pan_cursor(True)
 
         return self._orig_plot_mousePressEvent(evt)
 
@@ -741,7 +785,13 @@ class ChartTab(QWidget):
             )
             pos = self.plot_widget.plotItem.vb.mapSceneToView(scene_pos)
             sx, sy = self._selection_start
-            ex = max(0, min(int(round(pos.x())), max(0, len(self.res_times) - 1)))
+            ex = max(
+                self._x_offset,
+                min(
+                    int(round(pos.x())),
+                    self._x_offset + max(0, len(self.res_times) - 1),
+                ),
+            )
             ey = pos.y()
             if self._selection_overlay is not None:
                 self._selection_overlay.setRect(
@@ -753,6 +803,7 @@ class ChartTab(QWidget):
         scene_pos = (
             evt.scenePos() if hasattr(evt, "scenePos") else self.plot_widget.mapToScene(evt.pos())
         )
+        self.drawing_ctrl.x_offset = self._x_offset
         if self.drawing_ctrl.handle_mouse_move(scene_pos, self.res_times):
             evt.accept()
             return
@@ -765,6 +816,8 @@ class ChartTab(QWidget):
         self._orig_plot_mouseMoveEvent(evt)
 
     def _plot_mouseReleaseEvent(self, evt):
+        self._set_chart_pan_cursor(False)
+
         if self._selection_mode and self._selection_start is not None:
             scene_pos = (
                 evt.scenePos()
@@ -773,7 +826,13 @@ class ChartTab(QWidget):
             )
             pos = self.plot_widget.plotItem.vb.mapSceneToView(scene_pos)
             sx, sy = self._selection_start
-            ex = max(0, min(int(round(pos.x())), max(0, len(self.res_times) - 1)))
+            ex = max(
+                self._x_offset,
+                min(
+                    int(round(pos.x())),
+                    self._x_offset + max(0, len(self.res_times) - 1),
+                ),
+            )
             ey = pos.y()
             rect_data = {
                 "x1": float(min(sx, ex)),
@@ -796,6 +855,7 @@ class ChartTab(QWidget):
         scene_pos = (
             evt.scenePos() if hasattr(evt, "scenePos") else self.plot_widget.mapToScene(evt.pos())
         )
+        self.drawing_ctrl.x_offset = self._x_offset
         if self.drawing_ctrl.handle_mouse_release(scene_pos, self.res_times):
             self._draw_user_items(self.res_times)
             evt.accept()
@@ -812,14 +872,26 @@ class ChartTab(QWidget):
     def _build_selection_payload(self, rect_data):
         if self.engine.df is None or len(self.res_times) == 0:
             return {"selection_rect": rect_data}
-        idx1 = int(max(0, min(rect_data["x1"], len(self.res_times) - 1)))
-        idx2 = int(max(0, min(rect_data["x2"], len(self.res_times) - 1)))
+        idx1 = int(
+            max(
+                self._x_offset,
+                min(rect_data["x1"], self._x_offset + len(self.res_times) - 1),
+            )
+        )
+        idx2 = int(
+            max(
+                self._x_offset,
+                min(rect_data["x2"], self._x_offset + len(self.res_times) - 1),
+            )
+        )
         if idx2 < idx1:
             idx1, idx2 = idx2, idx1
+        local1 = idx1 - self._x_offset
+        local2 = idx2 - self._x_offset
         res_df = self._cached_res_df if self._cached_res_df is not None else pd.DataFrame()
         candles = []
         if not res_df.empty:
-            for i in range(idx1, min(idx2 + 1, len(res_df))):
+            for i in range(local1, min(local2 + 1, len(res_df))):
                 row = res_df.iloc[i]
                 candles.append(
                     {
@@ -830,8 +902,8 @@ class ChartTab(QWidget):
                         "close": float(row["close"]),
                     }
                 )
-        t_start = pd.to_datetime(self.res_times[idx1]).to_datetime64()
-        t_end = pd.to_datetime(self.res_times[idx2]).to_datetime64()
+        t_start = pd.to_datetime(self.res_times[local1]).to_datetime64()
+        t_end = pd.to_datetime(self.res_times[local2]).to_datetime64()
         trades = []
         for tr in self.engine.trades:
             try:
@@ -855,8 +927,8 @@ class ChartTab(QWidget):
         return {
             "selection_rect": rect_data,
             "selection_time": {
-                "from": str(pd.to_datetime(self.res_times[idx1])),
-                "to": str(pd.to_datetime(self.res_times[idx2])),
+                "from": str(pd.to_datetime(self.res_times[local1])),
+                "to": str(pd.to_datetime(self.res_times[local2])),
             },
             "candles": candles,
             "trades": trades,
@@ -874,7 +946,7 @@ class ChartTab(QWidget):
 
     def _clear_strategy_drawings(self):
         """Clear all strategy-generated drawings from engine."""
-        for item in self.strategy_graphic_items.values():
+        for item in self.strategy_graphic_items:
             self.plot_widget.removeItem(item)
             if hasattr(item, "deleteLater"):
                 item.deleteLater()
@@ -885,6 +957,7 @@ class ChartTab(QWidget):
 
     def _draw_user_items(self, rt):
         """Delegate user drawing render to DrawingController."""
+        self.drawing_ctrl.x_offset = self._x_offset
         self.drawing_ctrl.render(rt)
 
     def on_position_changed(self):
@@ -908,12 +981,29 @@ class ChartTab(QWidget):
             item.setVisible(conn_vis)
 
     def on_mode_changed(self, mode):
-        if "Line" in mode:
-            self.price_curve.show()
-            self.candlestick_item.hide()
-        else:
+        mode_text = str(mode or "").lower()
+        if "candle" in mode_text:
             self.price_curve.hide()
             self.candlestick_item.show()
+            self._refresh_candle_layer()
+        else:
+            self.price_curve.show()
+            self.candlestick_item.hide()
+
+    def _refresh_candle_layer(self) -> None:
+        """Rebuild candle geometry against the current ViewBox range."""
+        try:
+            arr = getattr(self.candlestick_item, "_arr", None)
+            if arr is None or arr.shape[0] == 0:
+                self.candlestick_item.update()
+                return
+            repaint = getattr(self.candlestick_item, "_do_range_repaint", None)
+            if callable(repaint):
+                repaint()
+            else:
+                self.candlestick_item.update()
+        except Exception:
+            logger.debug("candlestick refresh failed", exc_info=True)
 
     def on_data_loaded(self, total):
         symbol = getattr(self.engine.asset_config, "name", "default")
@@ -930,12 +1020,11 @@ class ChartTab(QWidget):
         ]:
             p.setData([], [])
         self.candlestick_item.set_data([])
-        # Phase 2 (GPU plan) — rebuild the LOD pyramid from the engine's
-        # base-TF frame so subsequent zoom-outs hit the M5/M15/H1/D1
-        # buckets instead of redrawing millions of M1 bars. Skipped
-        # silently when no data is loaded (cold start) and on any
-        # construction failure — chart still renders, just without LOD.
-        self._attach_pyramid()
+        # ChartTab owns the visual timeframe/window. Keep the candle item
+        # passive so ViewBox range changes cannot swap candle data behind
+        # ChartTab's axis, markers, and drawing mappings.
+        if hasattr(self.candlestick_item, "set_pyramid"):
+            self.candlestick_item.set_pyramid(None)
         self.price_hline.hide()
         self.ohlc_label.hide()
         self._clear_trade_lines()
@@ -945,33 +1034,9 @@ class ChartTab(QWidget):
         self._prev_res_times = None
 
     def _attach_pyramid(self) -> None:
-        """Build (or rebuild) the LOD pyramid from ``engine.df`` and
-        hand it to :attr:`candlestick_item`. Called from
-        :py:meth:`on_data_loaded` so a fresh CSV / .agbk load picks
-        up the pyramid; safe to call repeatedly — the candle item's
-        ``set_pyramid`` swaps in the new pyramid and resets the active
-        TF to base on each call.
-        """
-        try:
-            df = getattr(self.engine, "df", None)
-            if df is None or len(df) == 0:
-                self.candlestick_item.set_pyramid(None)
-                return
-            from engine.data.lod_pyramid import LodPyramid
-
-            pyramid = LodPyramid.from_base(df, base_tf="1m")
-            self.candlestick_item.set_pyramid(pyramid)
-            logger.info(
-                "LOD pyramid attached (levels=%s, base=%d bars)",
-                pyramid.list_levels(),
-                len(df),
-            )
-        except Exception:
-            logger.exception("LOD pyramid construction failed; chart still renders")
-            try:
-                self.candlestick_item.set_pyramid(None)
-            except Exception:
-                pass
+        """Compatibility hook: keep candle item detached from LOD pyramid."""
+        if hasattr(self.candlestick_item, "set_pyramid"):
+            self.candlestick_item.set_pyramid(None)
 
     def on_tf_changed(self, tf):
         self._cache_key = None
@@ -983,6 +1048,8 @@ class ChartTab(QWidget):
         # Reset autorange so the viewport adapts to the new TF's bar count
         # (e.g. switching 1m→5m: 400 bars → ~80 bars on X axis).
         self._need_autorange = True
+        self._tracked_xrange = None
+        self._user_zoom_width = None
         self.redraw_chart()
 
     def on_step_completed(self, idx, candle):
@@ -1001,6 +1068,40 @@ class ChartTab(QWidget):
     def _get_tf_minutes(self):
         m = {"1m": 1, "2m": 2, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}
         return m.get(self.visual_tf_cb.currentText().lower(), 1)
+
+    def _build_forming_tf_from_df(self, tf: str, idx: int):
+        """Build the current visual HTF candle directly from loaded 1m data.
+
+        This is a chart-only fallback for moments when the runtime
+        aggregator has no completed/forming candle yet, such as switching
+        to a higher timeframe before the next replay step.
+        """
+        df = self.engine.df
+        if df is None or idx < 0 or idx >= len(df):
+            return None
+        minutes = self._get_tf_minutes()
+        if minutes <= 1:
+            return None
+        try:
+            time_col = pd.to_datetime(df["time"])
+            bucket_start = pd.Timestamp(time_col.iloc[idx]).floor(f"{minutes}min")
+            start = int(time_col.searchsorted(bucket_start, side="left"))
+            start = max(0, min(start, idx))
+            bucket = df.iloc[start : idx + 1]
+            if bucket.empty:
+                return None
+            result = {
+                "time": bucket_start.to_datetime64(),
+                "open": float(bucket["open"].iloc[0]),
+                "high": float(bucket["high"].max()),
+                "low": float(bucket["low"].min()),
+                "close": float(bucket["close"].iloc[-1]),
+                "volume": float(bucket["volume"].sum()) if "volume" in bucket else 0.0,
+            }
+            return result
+        except Exception:
+            logger.exception("Failed to build chart forming candle fallback for %s", tf)
+            return None
 
     # ==============================
     # Main redraw
@@ -1026,7 +1127,9 @@ class ChartTab(QWidget):
         ck = (idx, tf, id(self.engine.df))
         if ck == self._cache_key and self._cached_res_df is not None:
             res_df = self._cached_res_df
+            x_offset = self._cached_x_offset
         else:
+            x_offset = 0
             if tf != "1m" and hasattr(self.engine, "tf_aggregator"):
                 # Sync tf_aggregator to the current 1m index so forming
                 # candles are visible even before the engine has stepped
@@ -1035,6 +1138,10 @@ class ChartTab(QWidget):
                 comp = self.engine.tf_aggregator.get_completed_tail(tf, 9999999)
                 form = self.engine.tf_aggregator.get_forming(tf)
                 agg = comp + ([form] if form else [])
+                if not agg:
+                    fallback_form = self._build_forming_tf_from_df(tf, idx)
+                    if fallback_form is not None:
+                        agg = [fallback_form]
                 if agg:
                     res_df = pd.DataFrame(agg)
                 else:
@@ -1049,25 +1156,38 @@ class ChartTab(QWidget):
             # We keep a generous buffer beyond the visible area for smooth
             # scrolling, but never the full history.
             if len(res_df) > 5_000:
+                x_offset = len(res_df) - 5_000
                 tail = res_df.iloc[-5_000:].reset_index(drop=True)
                 res_df = tail
 
             if len(res_df) == 0:
+                self._cached_res_df = None
+                self._cached_x_offset = 0
+                self._x_offset = 0
+                self.price_curve.setData([], [])
+                self.current_marker.setData([], [])
+                self.candlestick_item.set_data([])
+                self.price_hline.hide()
                 return
             self._cache_key = ck
             self._cached_res_df = res_df
+            self._cached_x_offset = x_offset
         t_data = _time.perf_counter() - t0
+        self._x_offset = int(x_offset)
+        self.drawing_ctrl.x_offset = self._x_offset
 
         rt = res_df["time"].values
 
         shift = 0
         prev_rt = getattr(self, "_prev_res_times", None)
+        prev_x_offset = int(getattr(self, "_prev_x_offset", 0))
         if prev_rt is not None and len(prev_rt) > 0 and len(rt) > 0:
             prev_t = prev_rt[-1]
             new_i = int(np.searchsorted(rt, prev_t))
             if new_i < len(rt) and rt[new_i] == prev_t:
-                shift = (len(prev_rt) - 1) - new_i
+                shift = (prev_x_offset + len(prev_rt) - 1) - (self._x_offset + new_i)
         self._prev_res_times = rt
+        self._prev_x_offset = self._x_offset
 
         self.res_times = rt
         # Cache floating point timestamps for instant O(1) lookups during mouse scrolling
@@ -1076,10 +1196,10 @@ class ChartTab(QWidget):
         except Exception:
             self._res_ts = np.array([pd.to_datetime(t).timestamp() for t in rt])
             
-        self.time_axis.set_times(rt)
+        self.time_axis.set_times(rt, self._x_offset)
 
         n = len(res_df)
-        x = np.arange(n)
+        x = np.arange(self._x_offset, self._x_offset + n)
         cl = res_df["close"].values
 
         vb = self.plot_widget.getViewBox()
@@ -1087,7 +1207,7 @@ class ChartTab(QWidget):
 
         t0 = _time.perf_counter()
         self.price_curve.setData(x, cl)
-        self.current_marker.setData([n - 1], [cl[-1]])
+        self.current_marker.setData([self._x_offset + n - 1], [cl[-1]])
         self.price_hline.setPos(cl[-1])
         self.price_hline.show()
 
@@ -1113,7 +1233,7 @@ class ChartTab(QWidget):
 
         t0 = _time.perf_counter()
         # ── Camera control ──
-        cur_x = n - 1
+        cur_x = self._x_offset + n - 1
         default_window = 150.0  # Sensible default zoom (number of bars)
         
         if self._need_autorange or self._tracked_xrange is None:
@@ -1122,7 +1242,7 @@ class ChartTab(QWidget):
             # Instead of auto-ranging everything, set a sensible default window
             # focused on the current (latest) candle.
             new_right = cur_x + 5.0
-            new_left = max(-0.5, new_right - default_window)
+            new_left = max(self._x_offset - 0.5, new_right - default_window)
             new_xrange = [new_left, new_right]
             
             vb.setRange(xRange=new_xrange, padding=0)
@@ -1154,6 +1274,7 @@ class ChartTab(QWidget):
             if self.autofit_y:
                 self._autofit_y(vb, res_df, n)
         t_camera = _time.perf_counter() - t0
+        self.on_mode_changed(self.chart_mode_cb.currentText())
 
         t_all = _time.perf_counter() - t_total
         if t_all > 0.030:  # Only log when redraw takes > 30ms
@@ -1171,8 +1292,8 @@ class ChartTab(QWidget):
     def _autofit_y(self, vb, res_df, n):
         """Auto-fit Y axis to the high/low range of visible candles."""
         vr = vb.viewRect()
-        x_left = max(0, int(vr.left()))
-        x_right = min(n - 1, int(vr.right()))
+        x_left = max(0, int(vr.left()) - self._x_offset)
+        x_right = min(n - 1, int(vr.right()) - self._x_offset)
         if x_right < x_left:
             return
         visible_h = res_df["high"].values[x_left : x_right + 1]
@@ -1191,6 +1312,14 @@ class ChartTab(QWidget):
         """Interpolate timestamp for a fractional index."""
         if len(self.res_times) == 0:
             return 0.0
+        idx = idx - self._x_offset
+        if len(self._res_ts) >= 2:
+            dt = float(self._res_ts[-1] - self._res_ts[-2])
+            if dt != 0:
+                if idx < 0:
+                    return float(self._res_ts[0]) + float(idx) * dt
+                if idx > len(self._res_ts) - 1:
+                    return float(self._res_ts[-1]) + float(idx - (len(self._res_ts) - 1)) * dt
         idx = max(0, min(idx, len(self.res_times) - 1))
         i = int(idx)
         frac = idx - i
@@ -1206,12 +1335,19 @@ class ChartTab(QWidget):
             return 0.0
         # Use the pre-computed _res_ts array for searchsorted
         i = max(0, int(np.searchsorted(self._res_ts, ts, side="right")) - 1)
+        if len(self._res_ts) >= 2:
+            dt = float(self._res_ts[-1] - self._res_ts[-2])
+            if dt != 0:
+                if ts < self._res_ts[0]:
+                    return float(self._x_offset + (ts - self._res_ts[0]) / dt)
+                if ts > self._res_ts[-1]:
+                    return float(self._x_offset + len(self._res_ts) - 1 + (ts - self._res_ts[-1]) / dt)
         if i + 1 < len(self._res_ts):
             t1 = float(self._res_ts[i])
             t2 = float(self._res_ts[i + 1])
             if t2 > t1 and ts >= t1:
-                return i + min(1.0, (ts - t1) / (t2 - t1))
-        return float(i)
+                return self._x_offset + i + min(1.0, (ts - t1) / (t2 - t1))
+        return float(self._x_offset + i)
 
     def _on_my_range_changed(self, _, range_tuple):
         if self._is_syncing or len(self.res_times) == 0:
@@ -1375,6 +1511,7 @@ class ChartTab(QWidget):
             position=pos,
             position_close_price=cp,
             show_connections=show_l,
+            x_offset=self._x_offset,
         )
 
         # Open-position SL line is the only piece of per-position graphics
@@ -1407,7 +1544,7 @@ class ChartTab(QWidget):
     # Strategy drawings
     # ==============================
     def _draw_strategy(self, rt):
-        for item in self.strategy_graphic_items.values():
+        for item in self.strategy_graphic_items:
             self.plot_widget.removeItem(item)
         self.strategy_graphic_items.clear()
         hidden = {tag for tag, act in self.layer_cbs.items() if not act.isChecked()}
@@ -1439,7 +1576,7 @@ class ChartTab(QWidget):
                 else:
                     if t1 < vmin or t1 > vmax:
                         continue
-                i1 = max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
+                i1 = self._x_offset + max(0, int(np.searchsorted(rt, t1, side="right")) - 1)
                 p1 = d.get("p", d.get("p1"))
                 rc = d.get("color", "white")
                 if isinstance(rc, str) and rc.startswith("rgba"):
@@ -1460,7 +1597,7 @@ class ChartTab(QWidget):
                     t2 = d.get("_t2_np")
                     if t2 is None:
                         t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
+                    i2 = self._x_offset + max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
                     it = pg.PlotDataItem(
                         [i1, i2], [p1, d["p2"]], pen=pg.mkPen(color, width=d.get("width", 1))
                     )
@@ -1470,7 +1607,7 @@ class ChartTab(QWidget):
                     t2 = d.get("_t2_np")
                     if t2 is None:
                         t2 = pd.to_datetime(d["t2"]).to_datetime64()
-                    i2 = max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
+                    i2 = self._x_offset + max(0, int(np.searchsorted(rt, t2, side="right")) - 1)
                     p2 = d["p2"]
                     mnx, mxx = min(i1, i2), max(i1, i2)
                     mny, mxy = min(p1, p2), max(p1, p2)
@@ -1565,14 +1702,14 @@ class ChartTab(QWidget):
 
             # Safe searchsorted with bounds checking
             try:
-                ie = int(np.clip(np.searchsorted(rt, et, side="right") - 1, 0, len(rt) - 1))
-                ix = int(np.clip(np.searchsorted(rt, xt, side="right") - 1, 0, len(rt) - 1))
+                ie = self._x_offset + int(np.clip(np.searchsorted(rt, et, side="right") - 1, 0, len(rt) - 1))
+                ix = self._x_offset + int(np.clip(np.searchsorted(rt, xt, side="right") - 1, 0, len(rt) - 1))
             except (ValueError, IndexError, TypeError) as e:
                 logger.debug(f"focus_trade: searchsorted failed: {e}")
                 return
 
-            x1 = max(0, min(ie, ix) - int(pad_bars))
-            x2 = min(len(rt) - 1, max(ie, ix) + int(pad_bars))
+            x1 = max(self._x_offset, min(ie, ix) - int(pad_bars))
+            x2 = min(self._x_offset + len(rt) - 1, max(ie, ix) + int(pad_bars))
             if x2 <= x1:
                 logger.debug("focus_trade: invalid x range")
                 return

@@ -61,13 +61,18 @@ class ReplayController:
         except Exception:
             pass
         # Очищаем пользовательские рисунки при ресете
-        h.chart_tab.drawing_ctrl.clear_all()
+        chart_tabs = [h.chart_tab]
+        chart_tab_2 = getattr(h, "chart_tab_2", None)
+        if chart_tab_2 is not None:
+            chart_tabs.append(chart_tab_2)
         # Очищаем стратегические рисунки (FVG, линии и т.д.)
-        for item in h.chart_tab.strategy_graphic_items.values():
-            h.chart_tab.plot_widget.removeItem(item)
-            if hasattr(item, "deleteLater"):
-                item.deleteLater()
-        h.chart_tab.strategy_graphic_items.clear()
+        for chart in chart_tabs:
+            chart.drawing_ctrl.clear_all()
+            for item in chart.strategy_graphic_items:
+                chart.plot_widget.removeItem(item)
+                if hasattr(item, "deleteLater"):
+                    item.deleteLater()
+            chart.strategy_graphic_items.clear()
         h.engine.drawings.clear()
         h.trades_tab._clear()
         h.analytics_tab.refresh_all(force=True)
@@ -90,8 +95,11 @@ class ReplayController:
         price = c.get("close", "-")
         if isinstance(price, float):
             price = f"{price:.2f}"
-        sn = h.engine.strategy.__class__.__name__
-        if sn == "_Empty":
+        sn = (
+            getattr(h.engine.strategy, "name", "Strategy without name")
+            or "Strategy without name"
+        ).strip()
+        if h.engine.strategy.__class__.__name__ == "_Empty":
             sn = "Browse"
         ts = ""
         t = c.get("time")
@@ -166,13 +174,9 @@ class ReplayController:
             return
         h.chart_tab._cache_key = None
         h.chart_tab._cached_snapshot = None
-        h.chart_tab._cached_chart_arrays_key = None
-        h.chart_tab._cached_chart_arrays = None
         if h.chart_tab_2 is not None and h.chart_tab_2.isVisible():
             h.chart_tab_2._cache_key = None
             h.chart_tab_2._cached_snapshot = None
-            h.chart_tab_2._cached_chart_arrays_key = None
-            h.chart_tab_2._cached_chart_arrays = None
         h.engine.reset()
         # Suppress autorange — we want to keep the user's zoom (_user_zoom_width)
         h.chart_tab._need_autorange = False

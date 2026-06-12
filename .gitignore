@@ -12,6 +12,7 @@ saves/
 dist/
 strategies/*
 !strategies/15_1.py
+!strategies/ema_crossover_cached.py
 fclaude.bat
 CLAUDE.md
 .claude/

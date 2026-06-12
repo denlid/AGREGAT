@@ -709,13 +709,6 @@
                         d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z" />
                 </svg>
             </button>
-            <button class="btn" onclick="saveStrategy()" aria-label="Save Strategy">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-                    <path
-                        d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z" />
-                </svg>
-                Save Strategy
-            </button>
         </div>
     </div>
 
@@ -815,6 +808,7 @@
                 let lastFlushTime = 0;
                 const FLUSH_THROTTLE_MS = 100;
                 let _suppressEditorDirty = false;
+                let _editorDiagnosticsTimer = 0;
                 let _panelCollapsed = null; // null = none, 'editor' = editor hidden, 'chat' = chat hidden
                 const EDITOR_MIN = 200;
                 const CHAT_MIN = 250;
@@ -1210,6 +1204,30 @@
 
                 function getEditorValue() {
                     return isEditorReady() ? editor.getValue() : '';
+                }
+
+                function applyEditorDiagnostics(diagnostics) {
+                    if (!isEditorReady() || !window.monaco) return;
+                    const model = editor.getModel();
+                    if (!model) return;
+
+                    const markers = Array.isArray(diagnostics) ? diagnostics.map(function (item) {
+                        const severityName = String(item.severity || 'error').toLowerCase();
+                        const severity = severityName === 'warning'
+                            ? monaco.MarkerSeverity.Warning
+                            : monaco.MarkerSeverity.Error;
+                        return {
+                            severity: severity,
+                            message: String(item.message || 'Syntax error'),
+                            startLineNumber: Math.max(Number(item.startLineNumber || 1), 1),
+                            startColumn: Math.max(Number(item.startColumn || 1), 1),
+                            endLineNumber: Math.max(Number(item.endLineNumber || item.startLineNumber || 1), 1),
+                            endColumn: Math.max(Number(item.endColumn || item.startColumn || 2), 1),
+                            source: 'AGREGAT'
+                        };
+                    }) : [];
+
+                    monaco.editor.setModelMarkers(model, 'agregat-python-syntax', markers);
                 }
 
                 // ============= VIEW ZONES MANAGEMENT =============
@@ -2194,6 +2212,10 @@
                     }
                 };
 
+                window.set_editor_diagnostics = function (diagnostics) {
+                    applyEditorDiagnostics(diagnostics);
+                };
+
                 window.apply_app_theme = function (theme) {
                     if (!theme) return;
                     const root = document.documentElement;
@@ -2223,6 +2245,17 @@
 
                 function notifyEditorDirty() {
                     if (_suppressEditorDirty) return;
+                    if (_editorDiagnosticsTimer) {
+                        clearTimeout(_editorDiagnosticsTimer);
+                    }
+                    _editorDiagnosticsTimer = setTimeout(function () {
+                        _editorDiagnosticsTimer = 0;
+                        if (pyBridge && typeof pyBridge.receive_editor_code_changed === 'function') {
+                            pyBridge.receive_editor_code_changed(getEditorValue());
+                        } else if (pyBridge && typeof pyBridge.receive_editor_dirty === 'function') {
+                            pyBridge.receive_editor_dirty();
+                        }
+                    }, 250);
                     if (pyBridge && typeof pyBridge.receive_editor_dirty === 'function') {
                         pyBridge.receive_editor_dirty();
                     }
@@ -2418,9 +2451,7 @@
                 };
 
                 window.saveStrategy = function () {
-                    if (safeBridgeCall('receive_save_strategy', getEditorValue())) {
-                        appendSystemMessage('Strategy saved.');
-                    }
+                    safeBridgeCall('receive_save_strategy', getEditorValue());
                 };
 
                 window.applyCodeToEditor = function (btn) {

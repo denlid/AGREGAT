@@ -10,7 +10,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from gui.chart_tab.items import CandlestickItem
-from gui.chart_tab.tab import ChartTab
+from gui.chart_tab.markers import build_trade_marker_arrays
 
 
 class _Signal:
@@ -97,9 +97,9 @@ def test_candlestick_visible_slice_uses_viewport_cache(qapp) -> None:
     assert item._paint_stats["viewport_cache_hit"] is True
 
 
-def test_chart_trade_marker_payload_caches_by_rt_identity(qapp) -> None:
-    tab = ChartTab(_Engine(_df()))
-    rt = tab.engine.df["time"].values
+def test_trade_marker_arrays_build_from_visible_rt_window(qapp) -> None:
+    engine = _Engine(_df())
+    rt = engine.df["time"].values
     trade = type(
         "Trade",
         (),
@@ -112,17 +112,14 @@ def test_chart_trade_marker_payload_caches_by_rt_identity(qapp) -> None:
             "side": "long",
         },
     )()
-    tab.engine.trades = [trade]
+    arrays = build_trade_marker_arrays(
+        rt=rt,
+        trades=[trade],
+        df_len=len(engine.df),
+        show_connections=True,
+    )
 
-    payload1, hit1 = tab._build_trade_marker_payload(rt)
-    payload2, hit2 = tab._build_trade_marker_payload(rt)
-
-    assert hit1 is False
-    assert hit2 is True
-    assert payload1 is payload2
-    assert payload1["buy_x"].tolist() == [2.0]
-    assert payload1["close_x"].tolist() == [5.0]
-    assert payload1["win_x"].shape == (3,)
-    assert payload1["win_x"][0] == 2.0
-    assert payload1["win_x"][1] == 5.0
-    assert np.isnan(payload1["win_x"][2])
+    assert arrays.bx == [2]
+    assert arrays.cx == [5]
+    assert arrays.win_x[:2] == [2.0, 5.0]
+    assert np.isnan(arrays.win_x[2])

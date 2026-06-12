@@ -58,6 +58,35 @@ def _round_to_step(value: float, step: float) -> float:
     return round(round(value / step) * step, 10)
 
 
+def _drawing_time_to_datetime64(value: Any) -> np.datetime64:
+    """Convert drawing time values to numpy datetime64.
+
+    Strategy code may hand in normal datetime strings, pandas/numpy datetime
+    objects, or epoch timestamps. Numeric epoch values sometimes arrive as
+    strings after passing through the public drawing API; parse those by unit
+    instead of letting pandas treat the digits as a calendar date.
+    """
+    try:
+        return pd.to_datetime(value).to_datetime64()
+    except (OverflowError, ValueError, TypeError, pd.errors.OutOfBoundsDatetime):
+        if isinstance(value, str):
+            raw = value.strip()
+            signless = raw.lstrip("+-")
+            if signless.isdigit():
+                numeric = int(raw)
+                magnitude = abs(numeric)
+                if magnitude >= 10**17:
+                    unit = "ns"
+                elif magnitude >= 10**14:
+                    unit = "us"
+                elif magnitude >= 10**11:
+                    unit = "ms"
+                else:
+                    unit = "s"
+                return pd.to_datetime(numeric, unit=unit).to_datetime64()
+        raise
+
+
 class BacktestCore:
     """Pure-Python backtest core.
 
@@ -312,6 +341,7 @@ class BacktestCore:
         self.on_position_changed: List[Callable[[], None]] = []
         self.on_layer_registered: List[Callable[[str, str, bool], None]] = []
         self.on_drawing_changed: List[Callable[[int], None]] = []
+        self.last_run_error: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Internal: callback dispatch
@@ -568,7 +598,11 @@ class BacktestCore:
     def load_strategy(self, strategy: Strategy) -> None:
         self.strategy = strategy
         self._strategy_class = strategy.__class__
-        logger.info(f"Loaded strategy: {strategy.__class__.__name__}")
+        strategy_name = (
+            getattr(strategy, "name", "Strategy without name")
+            or "Strategy without name"
+        ).strip()
+        logger.info("Loaded strategy: %s", strategy_name)
 
     # ------------------------------------------------------------------
     # Phase 0.2 (A3) — runtime forming-TF management
@@ -591,6 +625,7 @@ class BacktestCore:
     def reset(self) -> None:
         logger.info("🔄 Resetting simulation...")
         self.current_idx = -1
+        self.last_run_error = None
         self.equity = self.initial_equity
         self.equity_track = [self.initial_equity]
         self.max_equity = self.initial_equity
@@ -624,13 +659,15 @@ class BacktestCore:
         if self._strategy_class is not None:
             try:
                 self.strategy = self._strategy_class()
-                logger.info(
-                    f"✅ Strategy re-instantiated: {self._strategy_class.__name__}"
-                )
+                strategy_name = (
+                    getattr(self.strategy, "name", "Strategy without name")
+                    or "Strategy without name"
+                ).strip()
+                logger.info("Strategy re-instantiated: %s", strategy_name)
             except TypeError:
                 logger.warning(
-                    f"⚠️ Strategy {self._strategy_class.__name__} cannot be re-instantiated "
-                    f"(requires arguments). Keeping existing instance."
+                    "Strategy cannot be re-instantiated "
+                    "(requires arguments). Keeping existing instance."
                 )
             except Exception as e:
                 logger.error(
@@ -719,15 +756,20 @@ class BacktestCore:
                     if hook is not None:
                         hook(self.ctx)
             except Exception as e:
+                msg = f"Strategy HTF hook error at candle #{next_idx}: {e}"
+                self.last_run_error = msg
                 logger.error(
                     f"Strategy HTF hook error at step {next_idx}: {e!r}", exc_info=True
                 )
+                self._fire(self.on_error, msg)
                 return False
             try:
                 self.strategy.on_candle(self.ctx)
             except Exception as e:
+                msg = f"Strategy error at candle #{next_idx}: {e}"
+                self.last_run_error = msg
                 logger.error(f"Strategy Error at step {next_idx}: {e!r}", exc_info=True)
-                self._fire(self.on_error, f"Strategy error at candle #{next_idx}: {e}")
+                self._fire(self.on_error, msg)
                 return False
 
         # 7. Phase 1.1 — record realised + unrealised equity at bar close.
@@ -1343,11 +1385,11 @@ class BacktestCore:
         kwargs["_id"] = self._next_drawing_id
         # Cache numpy datetime64 for fast rendering
         if "t" in kwargs:
-            kwargs["_t_np"] = pd.to_datetime(kwargs["t"]).to_datetime64()
+            kwargs["_t_np"] = _drawing_time_to_datetime64(kwargs["t"])
         if "t1" in kwargs:
-            kwargs["_t1_np"] = pd.to_datetime(kwargs["t1"]).to_datetime64()
+            kwargs["_t1_np"] = _drawing_time_to_datetime64(kwargs["t1"])
         if "t2" in kwargs:
-            kwargs["_t2_np"] = pd.to_datetime(kwargs["t2"]).to_datetime64()
+            kwargs["_t2_np"] = _drawing_time_to_datetime64(kwargs["t2"])
         self.drawings.append(kwargs)
         if not self._suppress_drawings and not self._suppress_signals:
             self._fire(self.on_drawing_changed, self._next_drawing_id)
@@ -1366,6 +1408,34 @@ class BacktestCore:
                 if not self._suppress_signals:
                     self._fire(self.on_drawing_changed, d_id)
                 break
+
+    def remove_drawings_by_tag(self, tag: str) -> int:
+        before = len(self.drawings)
+        removed_ids = [d.get("_id") for d in self.drawings if d.get("tag") == tag]
+        if not removed_ids:
+            return 0
+        self.drawings = [d for d in self.drawings if d.get("tag") != tag]
+        removed = before - len(self.drawings)
+        if not self._suppress_signals:
+            for d_id in removed_ids:
+                if d_id is not None:
+                    self._fire(self.on_drawing_changed, d_id)
+        return removed
+
+    def update_drawings_by_tag(self, tag: str, updates: Dict[str, Any]) -> int:
+        changed_ids: List[int] = []
+        changed = 0
+        for d in self.drawings:
+            if d.get("tag") == tag:
+                d.update(updates)
+                changed += 1
+                d_id = d.get("_id")
+                if d_id is not None:
+                    changed_ids.append(d_id)
+        if changed_ids and not self._suppress_signals:
+            for d_id in changed_ids:
+                self._fire(self.on_drawing_changed, d_id)
+        return changed
 
     def register_layer(self, tag: str, label: str, default_on: bool = True) -> None:
         """Register a layer for UI toggle. Idempotent."""
@@ -1524,7 +1594,7 @@ class BacktestCore:
                 break
             ok = self._process_one_candle(i)
             if not ok:
-                break
+                raise RuntimeError(self.last_run_error or f"Strategy run failed at candle #{i}")
 
         # DO NOT restore flags here — they will be restored by the caller
         # on the main thread. Also do NOT emit any Qt signals from this

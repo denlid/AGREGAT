@@ -4,6 +4,7 @@ Entry Point
 """
 
 import sys
+import logging
 
 # CRITICAL: Import pandas BEFORE PySide6 to avoid shiboken/dateutil/six conflict
 import numpy  # noqa: F401
@@ -16,27 +17,7 @@ from engine.security.license_manager import verify_license
 from gui.components.splash_screen import create_agregat_splash
 from gui.dialogs.activation_dialog import show_activation_dialog
 from gui.main_window import MainWindow
-from gui.persistence.settings_persist import load as load_settings
-from gui.styling.theme import apply_theme
-
-
-def _resolve_theme(app: QApplication) -> str:
-    """Resolve theme choice: persisted → system auto → dark."""
-    theme_choice = "dark"
-    try:
-        s = load_settings() or {}
-        theme_choice = str(s.get("theme", "dark"))
-    except Exception:
-        pass
-    if theme_choice == "auto":
-        try:
-            scheme = app.styleHints().colorScheme()
-            theme_choice = "light" if scheme == Qt.ColorScheme.Light else "dark"
-        except Exception:
-            theme_choice = "dark"
-    if theme_choice not in ("dark", "light"):
-        theme_choice = "dark"
-    return theme_choice
+from gui.styling.theme import apply_theme, resolve_theme
 
 
 def _enable_gpu_if_available() -> None:
@@ -45,7 +26,7 @@ def _enable_gpu_if_available() -> None:
         from gui.chart_tab.gpu_config import configure_gpu_acceleration
         configure_gpu_acceleration()
     except Exception:
-        pass  # Gracefully fall back to software rendering.
+        pass
 
 
 def _bg_license_check() -> None:
@@ -90,16 +71,18 @@ def main() -> int:
             sys.exit(0)
 
     # --- Theme ---
-    theme_choice = _resolve_theme(app)
-    apply_theme(app, theme_choice)
-
+    theme_choice = resolve_theme(app)
+    
     # --- Splash Screen ---
     splash = create_agregat_splash(theme_choice)
     splash.show()
     app.processEvents()
 
+    apply_theme(app, theme_choice)
+
     # Create Main Window
     window = MainWindow()
+
 
     # --- Background License Validation ---
     _timer = QTimer(window)

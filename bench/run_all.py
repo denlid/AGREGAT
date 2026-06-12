@@ -18,7 +18,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bench import bench_grid, bench_llc, bench_lsf, bench_vectorized_reuse
+from bench import bench_grid, bench_vectorized_reuse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASELINE_PATH = REPO_ROOT / "bench" / "baseline.json"
@@ -62,8 +62,6 @@ def main() -> int:
         "schema_version": 2,
         "quick_mode": bool(args.quick),
         "env": _env_block(),
-        "lsf": bench_lsf.measure(n_bars=n_bars, repeats=args.repeats),
-        "llc": bench_llc.measure(n_bars=n_bars, repeats=args.repeats),
         "grid": bench_grid.measure(grid_n=grid_n, repeats=args.repeats),
         "vectorized_reuse": bench_vectorized_reuse.measure(
             n_bars=n_bars,

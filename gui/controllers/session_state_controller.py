@@ -76,14 +76,16 @@ class SessionStateController:
 
             logger.info("restore last strategy")
             self._restore_last_strategy()
-            logger.info("after strategy: %s", type(h.engine.strategy).__name__)
+            strategy_name = (
+                getattr(h.engine.strategy, "name", "Strategy without name")
+                or "Strategy without name"
+            ).strip()
+            logger.info("after strategy: %s", strategy_name)
 
-            for key, setter in (
-                ("timeframe", h.chart_tab.visual_tf_cb.setCurrentText),
-                ("chart_mode", h.chart_tab.chart_mode_cb.setCurrentText),
-            ):
-                if key in self.state:
-                    setter(self.state[key])
+            if "timeframe" in self.state:
+                h.chart_tab.visual_tf_cb.setCurrentText(self.state["timeframe"])
+            if "chart_mode" in self.state:
+                self._restore_chart_mode(self.state["chart_mode"])
             if "show_markers" in self.state:
                 h.chart_tab.show_markers_cb.setChecked(self.state["show_markers"])
             scheme = self.state.get("chart_scheme")
@@ -101,6 +103,17 @@ class SessionStateController:
             logger.info("=== SessionStateController.restore() END ===")
         except Exception as exc:
             logger.warning("Session state restore failed: %s", exc, exc_info=True)
+
+    def _restore_chart_mode(self, mode: Any) -> None:
+        chart = self._host.chart_tab
+        mode_text = str(mode or "").lower()
+        if "candle" in mode_text:
+            chart.chart_mode_cb.setCurrentIndex(1)
+        elif "line" in mode_text:
+            chart.chart_mode_cb.setCurrentIndex(0)
+        else:
+            chart.chart_mode_cb.setCurrentText(str(mode))
+        chart.on_mode_changed(chart.chart_mode_cb.currentText())
 
     def _restore_last_csv(self) -> None:
         h = self._host

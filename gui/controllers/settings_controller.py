@@ -23,6 +23,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger("StrategyTester.gui.settings")
 
 
+def strategy_display_name(strategy) -> str:
+    """Human-facing strategy name."""
+    if strategy is None:
+        return "Strategy without name"
+    return (getattr(strategy, "name", "Strategy without name") or "Strategy without name").strip()
+
+
+def strategy_settings_key(strategy) -> str:
+    """Stable bucket key for persisted strategy-specific settings."""
+    if strategy is None:
+        return ""
+    return strategy_display_name(strategy)
+
+
 class SettingsController:
     """Owns SettingsTab state, Apply/Reject flow, and preference JSON."""
 
@@ -71,6 +85,10 @@ class SettingsController:
             state["chart_scheme"] = state["chart_colors"]
         self.strategy_params = dict(state.get("strategy_params", {}) or {})
         self.load_to_ui(state)
+        if self.strategy_params:
+            tab.load_strategy_params_to_ui(
+                self.strategy_params_for(getattr(tab.engine, "strategy", None))
+            )
         self.load_to_vars()
         self.applied_state = self.capture_ui_settings()
         self.draft_state = dict(self.applied_state)
@@ -100,6 +118,7 @@ class SettingsController:
             if key in PREFERENCE_KEYS
         }
         self.load_to_ui(state)
+        tab.load_strategy_params_to_ui(self._strategy_params_from_state(state))
         self.draft_state = dict(self.applied_state)
         self._set_dirty(False)
         logger.info("Settings changes rejected")
@@ -113,6 +132,7 @@ class SettingsController:
             if key in PREFERENCE_KEYS
         }
         self.load_to_ui(defaults)
+        tab.reset_strategy_params_to_defaults()
         self.draft_state = self.capture_ui_settings()
         self._set_dirty(True)
         logger.info("Settings defaults loaded into draft")
@@ -128,11 +148,25 @@ class SettingsController:
         self._set_dirty(False)
 
     def strategy_params_for(self, strategy) -> dict[str, Any]:
+        if strategy is None:
+            return {}
         state = self.draft_state or self.applied_state or self.settings
         strategy_params = self.strategy_params
         if isinstance(state, dict) and state.get("strategy_params"):
             strategy_params = state.get("strategy_params", {})
-        return dict((strategy_params.get(type(strategy).__name__, {}) or {}))
+        return dict((strategy_params.get(strategy_settings_key(strategy), {}) or {}))
+
+    def _strategy_params_from_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        tab = self._tab()
+        if tab is None:
+            return {}
+        strategy = getattr(tab.engine, "strategy", None)
+        if strategy is None:
+            return {}
+        params = (state or {}).get("strategy_params", {})
+        if not isinstance(params, dict):
+            return {}
+        return dict((params.get(strategy_settings_key(strategy), {}) or {}))
 
     def _normalize_loaded_ai_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         tab = self._tab()
@@ -205,7 +239,7 @@ class SettingsController:
         snapshot.update(tab._bind.capture_all())
         strategy = getattr(tab.engine, "strategy", None)
         if strategy is not None and getattr(tab, "_strategy_widgets", None):
-            self.strategy_params[type(strategy).__name__] = tab._strategy_form_values()
+            self.strategy_params[strategy_settings_key(strategy)] = tab._strategy_form_values()
             snapshot["strategy_params"] = dict(self.strategy_params)
         elif self.strategy_params:
             snapshot["strategy_params"] = dict(self.strategy_params)

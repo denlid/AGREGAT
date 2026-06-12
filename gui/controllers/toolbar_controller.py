@@ -355,7 +355,7 @@ class ToolbarController:
                 continue
             vb = ct.plot_widget.getViewBox()
             vr = vb.viewRect()
-            cur_x = len(ct.res_times) - 1
+            cur_x = int(getattr(ct, "_x_offset", 0)) + len(ct.res_times) - 1
             vb.setRange(xRange=[cur_x - vr.width() + 5, cur_x + 5], padding=0)
 
 

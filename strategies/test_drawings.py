@@ -5,13 +5,17 @@ strategy = Strategy(
     risk=1.0,                     # not used, kept for form
     line_color="yellow",
     rect_color="blue",
+    next_rect_color="green",
     text_color="white"
 )
 
+lastid = None
+
 @strategy.on_candle()
 def _(c):
+    global lastid
     # 1. Draw a vertical line through the bar (low to high)
-    strategy.draw_line(
+    line_id = strategy.draw_line(
         c.time, c.low+10,
         c.time, c.high,
         color=strategy.line_color,
@@ -20,13 +24,15 @@ def _(c):
     )
 
     # 2. Draw an unfilled rectangle around the bar
-    strategy.draw_rect(
+    rect_id = strategy.draw_rect(
         c.time, c.open_,
         c.time, c.close,
         color=strategy.rect_color,
         fill=True,
         tag="rect"
     )
+
+    
 
     # 3. Draw text "X" at the close price level
     strategy.draw_text(
@@ -37,9 +43,9 @@ def _(c):
     )
 
     # 4. Update the rectangle: make it filled and green
-    strategy.update_drawing("rect", {"fill": True, "color": "green"})
-
+    strategy.update_drawing(lastid, {"fill": True, "color": strategy.next_rect_color})
+    lastid = rect_id
     # 5. Remove the vertical line immediately (it won't appear)
-    strategy.remove_drawing("vline")
+    strategy.remove_drawing(line_id)
 
-    strategy.log("Drawing test: line removed, rect updated, text kept")
+    strategy.log("Drawing test: line removed by id, rect updated by id, text kept")

@@ -63,29 +63,29 @@ def _df(n: int = 32) -> pd.DataFrame:
     return df
 
 
-def test_build_chart_arrays_caches_by_res_df_identity(qapp) -> None:
+def test_redraw_chart_caches_resolved_dataframe_by_engine_state(qapp) -> None:
     tab = ChartTab(_Engine(_df()))
-    res_df = tab.engine.df.copy()
+    tab.redraw_chart()
+    cached = tab._cached_res_df
+    key = tab._cache_key
 
-    arr1, hit1 = tab._build_chart_arrays(res_df)
-    arr2, hit2 = tab._build_chart_arrays(res_df)
+    tab.redraw_chart()
 
-    assert hit1 is False
-    assert hit2 is True
-    assert arr1 is arr2
-    assert arr1["candle_arr"].shape == (len(res_df), 5)
-    assert arr1["candle_arr"].flags.writeable is False
+    assert cached is not None
+    assert tab._cached_res_df is cached
+    assert tab._cache_key == key
 
 
-def test_on_tf_changed_invalidates_chart_arrays_cache(qapp) -> None:
+def test_on_tf_changed_invalidates_resolved_dataframe_cache(qapp) -> None:
     tab = ChartTab(_Engine(_df()))
-    res_df = tab.engine.df.copy()
-    _, _ = tab._build_chart_arrays(res_df)
+    tab.redraw_chart()
 
-    assert tab._cached_chart_arrays is not None
+    assert tab._cached_res_df is not None
+    tab.visual_tf_cb.setCurrentText("5m")
     tab.on_tf_changed("5m")
-    assert tab._cached_chart_arrays is None
-    assert tab._cached_chart_arrays_key is None
+    assert tab._cache_key is not None
+    assert tab._cache_key[1] == "5m"
+    assert tab._cached_res_df is not None
 
 
 def test_candlestick_item_skips_rebuild_for_same_readonly_numpy_array(qapp) -> None:

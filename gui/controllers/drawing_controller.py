@@ -340,6 +340,7 @@ class DrawingController(QObject):
         self.user_drawings: List[dict] = []
         self._history: List[List[dict]] = []
         self._redo: List[List[dict]] = []
+        self.x_offset: int = 0
 
         # Rendered Qt items (parallel to user_drawings order not guaranteed)
         self._graphic_items: list = []
@@ -347,6 +348,7 @@ class DrawingController(QObject):
         # Dirty flag — render() skips rebuild when False (set True on any mutation)
         self._dirty: bool = True
         self._last_rt: Optional[np.ndarray] = None
+        self._last_x_offset: int = 0
         self._ts_cache: dict = {}
 
         # Drag-in-progress state
@@ -489,7 +491,7 @@ class DrawingController(QObject):
         self._redo.clear()
         self._dirty = False  # items already cleared, no rebuild needed
         self._last_rt = None
-        drawings_persist.save(self.user_drawings)
+        drawings_persist.save(self.user_drawings, self._persist_key)
         self.drawings_changed.emit()
         logger.info("User drawings cleared")
 
@@ -497,9 +499,12 @@ class DrawingController(QObject):
     # Coordinate helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _snap(x: float, y: float, rt: np.ndarray):
-        sx = max(0, min(int(round(x)), len(rt) - 1)) if len(rt) else 0
+    def _snap(self, x: float, y: float, rt: np.ndarray):
+        if len(rt):
+            x_offset = int(getattr(self, "x_offset", 0))
+            sx = max(x_offset, min(int(round(x)), x_offset + len(rt) - 1))
+        else:
+            sx = int(getattr(self, "x_offset", 0))
         return sx, y
 
     @staticmethod
@@ -537,6 +542,7 @@ class DrawingController(QObject):
     def _idx_to_time(self, idx: int, rt: np.ndarray) -> str:
         if len(rt) == 0:
             return "1970-01-01"
+        idx = int(round(idx)) - int(getattr(self, "x_offset", 0))
         if len(rt) >= 2:
             if idx >= len(rt) or idx < 0:
                 try:
@@ -571,6 +577,7 @@ class DrawingController(QObject):
     def _time_to_idx(self, t_str: str, rt: np.ndarray) -> int:
         if len(rt) == 0:
             return 0
+        x_offset = int(getattr(self, "x_offset", 0))
         try:
             t_ts = self._get_ts(t_str)
             if hasattr(self, "_cached_rt") and self._cached_rt is rt and hasattr(self, "_cached_rt_ts"):
@@ -593,18 +600,18 @@ class DrawingController(QObject):
                 if dt_sec != 0:
                     if t_ts > ts_last:
                         delta_idx = (t_ts - ts_last) / dt_sec
-                        return len(rt) - 1 + int(round(delta_idx))
+                        return x_offset + len(rt) - 1 + int(round(delta_idx))
                     elif t_ts < ts_first:
                         delta_idx = (ts_first - t_ts) / dt_sec
-                        return -int(round(delta_idx))
+                        return x_offset - int(round(delta_idx))
 
-            return max(0, int(np.searchsorted(rt_ts, t_ts, side="right")) - 1)
+            return x_offset + max(0, int(np.searchsorted(rt_ts, t_ts, side="right")) - 1)
         except Exception:
             try:
                 t = pd.to_datetime(t_str).to_datetime64()
-                return max(0, int(np.searchsorted(rt, t, side="right")) - 1)
+                return x_offset + max(0, int(np.searchsorted(rt, t, side="right")) - 1)
             except Exception:
-                return 0
+                return x_offset
 
     def _scene_to_view(self, pos) -> QPointF:
         return self._pw.plotItem.vb.mapSceneToView(pos)
@@ -684,8 +691,7 @@ class DrawingController(QObject):
             return False
 
         pos = self._scene_to_view(scene_pos)
-        sx_curr = max(0, min(int(round(pos.x())), max(0, len(rt) - 1)))
-        sy_curr = pos.y()
+        sx_curr, sy_curr = self._snap(pos.x(), pos.y(), rt)
 
         if self._drawing_active == "Brush" and self._brush_path is not None:
             self._brush_path.lineTo(pos.x(), pos.y())
@@ -709,8 +715,7 @@ class DrawingController(QObject):
         self._finish_drag(cancelled=False)
 
         pos = self._scene_to_view(scene_pos)
-        sx_curr = max(0, min(int(round(pos.x())), max(0, len(rt) - 1)))
-        sy_curr = pos.y()
+        sx_curr, sy_curr = self._snap(pos.x(), pos.y(), rt)
         t2_str = self._idx_to_time(sx_curr, rt)
         color = self._draw_color.name()
         w = self._draw_width
@@ -818,12 +823,17 @@ class DrawingController(QObject):
 
     def render(self, rt: np.ndarray) -> None:
         # Skip full rebuild when nothing changed and rt is the same object
-        if not self._dirty and self._last_rt is rt:
+        if (
+            not self._dirty
+            and self._last_rt is rt
+            and self._last_x_offset == int(getattr(self, "x_offset", 0))
+        ):
             return
 
         self._clear_items()
         self._dirty = False
         self._last_rt = rt
+        self._last_x_offset = int(getattr(self, "x_offset", 0))
 
         if len(rt) == 0:
             return
@@ -832,9 +842,38 @@ class DrawingController(QObject):
 
         for d in self.user_drawings:
             try:
+                if not self._drawing_overlaps_rt(d, rt):
+                    continue
                 self._render_one(d, rt, vb)
             except Exception as e:
                 logger.error("UserDraw render: %s", e)
+
+    def _drawing_overlaps_rt(self, d: dict, rt: np.ndarray) -> bool:
+        dtype = d.get("type")
+        if dtype == "hline" or len(rt) == 0:
+            return True
+        try:
+            t0 = pd.to_datetime(rt[0])
+            t1 = pd.to_datetime(rt[-1])
+            if dtype in ("marker", "text"):
+                t = pd.to_datetime(d.get("t"))
+                return t0 <= t <= t1
+            if dtype in ("line", "rect"):
+                a = pd.to_datetime(d.get("t1"))
+                b = pd.to_datetime(d.get("t2"))
+                lo, hi = min(a, b), max(a, b)
+                return not (hi < t0 or lo > t1)
+            if dtype == "brush":
+                pts = d.get("points", [])
+                if not pts:
+                    return False
+                times = [pd.to_datetime(p.get("t")) for p in pts if p.get("t") is not None]
+                if not times:
+                    return False
+                return not (max(times) < t0 or min(times) > t1)
+        except Exception:
+            return True
+        return True
 
     def _render_one(self, d: dict, rt: np.ndarray, vb) -> None:
         color = QColor(d.get("color", "#FFFFFF"))
@@ -1038,7 +1077,9 @@ class DrawingController(QObject):
             else:
                 item.unsetCursor()
 
-            if orig_hover is not None:
+            if orig_hover is not None and (
+                hasattr(ev, "acceptDrags") or hasattr(ev, "acceptClicks")
+            ):
                 orig_hover(ev)
         item.hoverEvent = _he
 
@@ -1054,7 +1095,8 @@ class DrawingController(QObject):
         orig_hover = roi.hoverEvent
 
         def _hover(ev, _orig=orig_hover):
-            _orig(ev)
+            if hasattr(ev, "acceptDrags") or hasattr(ev, "acceptClicks"):
+                _orig(ev)
             visible = not ev.isExit()
             
             roi.mouseHovering = visible
@@ -1343,6 +1385,3 @@ class DrawingController(QObject):
                 new_p = pt["p"] + y_offset
                 new_pts.append({"t": new_t, "p": new_p})
             d["points"] = new_pts
-
-
-

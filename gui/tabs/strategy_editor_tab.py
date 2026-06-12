@@ -1,4 +1,5 @@
 import ast
+import logging
 import os
 import importlib.util
 import json
@@ -11,6 +12,7 @@ from gui.workers.ai_worker import AIAssistantWorker
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TEMP_STRAT_PATH = os.path.join(_APP_DIR, "strategies", "temp_ai_strategy.py")
+logger = logging.getLogger("StrategyTester.gui.strategy_editor")
 
 
 def _validate_code_syntax(code: str) -> tuple[bool, str]:
@@ -22,6 +24,33 @@ def _validate_code_syntax(code: str) -> tuple[bool, str]:
         line_info = f"line {e.lineno}" if e.lineno else "unknown line"
         text_info = f"\n{e.text}" if e.text else ""
         return False, f"Syntax error at {line_info}: {e.msg}{text_info}"
+
+
+def _syntax_diagnostics_for_code(code: str) -> list[dict]:
+    """Return Monaco-compatible diagnostics for Python syntax errors."""
+    if not code.strip():
+        return []
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        line = max(int(e.lineno or 1), 1)
+        column = max(int(e.offset or 1), 1)
+        end_line = max(int(getattr(e, "end_lineno", None) or line), line)
+        end_column = int(getattr(e, "end_offset", None) or column + 1)
+        if end_line == line and end_column <= column:
+            problem_text = e.text.rstrip("\n") if e.text else ""
+            end_column = len(problem_text) + 1 if problem_text else column + 1
+        return [
+            {
+                "message": e.msg,
+                "startLineNumber": line,
+                "startColumn": column,
+                "endLineNumber": end_line,
+                "endColumn": max(end_column, 1),
+                "severity": "error",
+            }
+        ]
+    return []
 
 
 def _validate_strategy_structure(code: str) -> list[str]:
@@ -87,11 +116,15 @@ class StrategyEditorTab(QWidget):
         self.editor.bridge.attachment_requested.connect(self.on_attachment_requested)
         self.editor.bridge.ready.connect(self._on_editor_web_ready)
         self.editor.bridge.editor_model_changed.connect(self._on_editor_model_changed)
+        self.editor.bridge.editor_code_changed.connect(self._on_editor_code_changed)
         self.editor.bridge.rename_strategy_requested.connect(self.on_rename_strategy)
 
     def _on_editor_model_changed(self) -> None:
         self._editor_dirty = True
         self._refresh_header_title()
+
+    def _on_editor_code_changed(self, code: str) -> None:
+        self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(code))
 
     def should_sync_editor_to_engine(self) -> bool:
         return self._editor_dirty
@@ -100,6 +133,7 @@ class StrategyEditorTab(QWidget):
         self._editor_web_ready = True
         if self._queued_editor_source is not None:
             self.editor.set_editor_value(self._queued_editor_source)
+            self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(self._queued_editor_source))
             self._queued_editor_source = None
         self._refresh_header_title()
         # Restore persisted chat tabs from disk into Editor panel
@@ -128,6 +162,7 @@ class StrategyEditorTab(QWidget):
         self._strategy_file_path = fp
         if self._editor_web_ready:
             self.editor.set_editor_value(src)
+            self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(src))
         else:
             self._queued_editor_source = src
         self._refresh_header_title()
@@ -379,6 +414,7 @@ class StrategyEditorTab(QWidget):
 
     def on_run_backtest(self, code):
         try:
+            self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(code))
             self._apply_compiled_code_to_engine(code)
 
             # 5. Run the backtest
@@ -406,6 +442,11 @@ class StrategyEditorTab(QWidget):
     def handle_backtest_error(self, traceback_str):
         """Show error in the editor. Does NOT auto-trigger AI."""
         self.latest_error = traceback_str
+        logger.error("Backtest error from strategy editor:\n%s", traceback_str)
+        try:
+            self.pw.show_error(traceback_str)
+        except Exception:
+            logger.debug("Failed to show strategy backtest error toast", exc_info=True)
         self.editor.show_system_message(f"⚠️ Backtest error:\n{traceback_str}", is_error=True)
 
     def on_stop_ai(self):
@@ -414,7 +455,12 @@ class StrategyEditorTab(QWidget):
         # Signal the JS that generation was stopped by user (not an error)
         self.editor.finish_generation("__stopped__")
 
+    def save_current_strategy(self) -> None:
+        """Save the current Monaco editor contents through the existing JS bridge."""
+        self.editor.page().runJavaScript("saveStrategy();")
+
     def on_save_strategy(self, code):
+        self.editor.set_editor_diagnostics(_syntax_diagnostics_for_code(code))
         bound = self._strategy_file_path
         if bound and os.path.isfile(bound):
             try:
@@ -426,8 +472,14 @@ class StrategyEditorTab(QWidget):
             try:
                 self._apply_compiled_code_to_engine(code)
             except Exception as e:
+                logger.exception("Saved strategy file, but strategy did not load: %s", bound)
                 self.pw.show_error(f"Saved file, but strategy did not load:\n{e}")
-            self.editor.show_system_message(f"Saved {os.path.basename(bound)}")
+                self.editor.show_system_message(
+                    f"Saved {os.path.basename(bound)}, but strategy did not load:\n{e}",
+                    is_error=True,
+                )
+            else:
+                self.editor.show_system_message(f"Saved {os.path.basename(bound)}")
             self._editor_dirty = False
             self._refresh_header_title()
             return
@@ -449,8 +501,14 @@ class StrategyEditorTab(QWidget):
             try:
                 self._apply_compiled_code_to_engine(code)
             except Exception as e:
+                logger.exception("Saved strategy file, but strategy did not load: %s", path)
                 self.pw.show_error(f"Saved file, but strategy did not load:\n{e}")
-            self.editor.show_system_message(f"Saved to {os.path.basename(path)}")
+                self.editor.show_system_message(
+                    f"Saved to {os.path.basename(path)}, but strategy did not load:\n{e}",
+                    is_error=True,
+                )
+            else:
+                self.editor.show_system_message(f"Saved to {os.path.basename(path)}")
             self._editor_dirty = False
             self._refresh_header_title()
 

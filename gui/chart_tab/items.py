@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QLineF, QRectF, QTimer
-from PySide6.QtGui import QColor, QPainter, QPicture
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPainterPathStroker, QPicture
 
 from gui.chart_tab.lod import DEFAULT_MAX_BARS, downsample_ohlc
 
@@ -585,6 +585,15 @@ class FilledRectROI(pg.RectROI):
     def hoverEvent(self, ev) -> None:
         super().hoverEvent(ev)
         self._set_handles_visible(not ev.isExit())
+
+    def shape(self) -> QPainterPath:
+        rect = self.boundingRect()
+        path = QPainterPath()
+        path.addRect(rect)
+
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(8.0, float(self.currentPen.widthF()) + 6.0))
+        return stroker.createStroke(path)
 
     def paint(self, p, opt, widget) -> None:  # type: ignore[no-untyped-def]
         if self.brush:

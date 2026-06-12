@@ -271,14 +271,14 @@ class GLCandlestickItem(CandlestickItem):
         self._rebuild_gl_vertices()
 
     def _do_range_repaint(self) -> None:
-        is_gl = getattr(self.getViewWidget(), "useOpenGL", False)
-        if not is_gl:
-            super()._do_range_repaint()
-
         if self._arr.shape[0] == 0:
             return
 
-        self._update_width()
+        # Keep the inherited QPicture path current as a reliable fallback.
+        # The GL paint path can still fail at runtime when the widget has no
+        # active native GL context; in that case paint() falls back to
+        # CandlestickItem.paint(), which must not contain stale/empty geometry.
+        super()._do_range_repaint()
         self.update()
 
     def set_colors(self, bull: str, bear: str) -> None:  # type: ignore[override]

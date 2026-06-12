@@ -379,7 +379,10 @@ def run_vectorized(
 
     if summary_only:
         materialize_trades = False
-    strategy_name = getattr(strategy, "__class__", type(strategy)).__name__
+    strategy_name = (
+        getattr(strategy, "name", "Strategy without name")
+        or "Strategy without name"
+    ).strip()
     prepared_reused = prepared is not None
 
     if df is None or len(df) == 0:

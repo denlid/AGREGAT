@@ -20,6 +20,7 @@ import json
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QHBoxLayout,
     QMainWindow,
@@ -237,7 +238,7 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self._on_tab)
         root.addWidget(self.tabs)
 
-        self._strategy_editor_tab_index = self.tabs.indexOf(self.strategy_editor_tab)
+        self._strategy_editor_tab_index = self.tabs.indexOf(self._tab_boundaries["Editor"])
         self._prev_tab_idx = self.tabs.currentIndex()
 
         self.setStatusBar(self._status_bar_ctrl.status_bar)
@@ -316,14 +317,20 @@ class MainWindow(QMainWindow):
 
     def _is_editor_tab_active(self) -> bool:
         """Check if the Editor tab or AI panel has focus, blocking chart shortcuts."""
-        current_idx = self.tabs.currentIndex()
-        # 6 = Editor tab
-        if current_idx == 6:
+        if self.tabs.currentIndex() == self._strategy_editor_tab_index:
             return True
-        # Also check if AI panel is visible and might have focus
-        if self.global_ai_panel.isVisible():
+        focus = QApplication.focusWidget()
+        if (
+            self.global_ai_panel.isVisible()
+            and focus is not None
+            and (focus is self.global_ai_panel or self.global_ai_panel.isAncestorOf(focus))
+        ):
             return True
         return False
+
+    def _sync_shortcut_context(self) -> None:
+        for shortcut in getattr(self, "_chart_shortcuts", []):
+            shortcut.setEnabled(not self._is_editor_tab_active())
 
     def _on_save_ctrl_s(self) -> None:
         """Context-aware Ctrl+S: save strategy if in Editor, otherwise save session."""
@@ -335,29 +342,37 @@ class MainWindow(QMainWindow):
             self._session_ctrl.save_session()
 
     def _wire_shortcuts(self) -> None:
-        sc = lambda k, fn: QShortcut(QKeySequence(k), self, fn)  # noqa: E731
+        self._chart_shortcuts: list[QShortcut] = []
+
+        def sc(k, fn):
+            return QShortcut(QKeySequence(k), self, fn)
+
+        def chart_sc(k, fn):
+            shortcut = sc(k, fn)
+            self._chart_shortcuts.append(shortcut)
+            return shortcut
+
         rc, mc = self._replay_ctrl, self._menu_ctrl
         
-        # Wrap chart-related shortcuts to check if editor is active
-        sc(Qt.Key.Key_Right, lambda: not self._is_editor_tab_active() and self.chart_tab.scroll_chart(1))
-        sc(Qt.Key.Key_Left, lambda: not self._is_editor_tab_active() and self.chart_tab.scroll_chart(-1))
-        sc("Shift+Right", lambda: not self._is_editor_tab_active() and rc.step_visual_candle())
-        sc("Shift+Left", lambda: not self._is_editor_tab_active() and rc.step_back_visual_candle())
-        sc(Qt.Key.Key_Space, lambda: not self._is_editor_tab_active() and self.bar_replay.toggle_play())
-        sc(Qt.Key.Key_Home, lambda: not self._is_editor_tab_active() and self.chart_tab._fit_all())
-        sc(Qt.Key.Key_Escape, lambda: not self._is_editor_tab_active() and self.chart_tab._cancel_active_mode())
-        sc("Ctrl+=", lambda: not self._is_editor_tab_active() and self.chart_tab.zoom_chart(1.15))
-        sc("Ctrl+-", lambda: not self._is_editor_tab_active() and self.chart_tab.zoom_chart(1 / 1.15))
-        sc("Ctrl+Shift+=", lambda: not self._is_editor_tab_active() and self._zoom_y(1.15))
-        sc("Ctrl+Shift+-", lambda: not self._is_editor_tab_active() and self._zoom_y(1 / 1.15))
-        sc("Ctrl+Z", lambda: not self._is_editor_tab_active() and rc.undo_drawing())
-        sc("Ctrl+Shift+Z", lambda: not self._is_editor_tab_active() and rc.redo_drawing())
-        sc("Ctrl+Alt+R", lambda: not self._is_editor_tab_active() and self.bar_replay.run_to_end())
-        # These can be used in editor too, but still check
-        sc("Ctrl+/", mc.show_cheat_sheet)
-        sc("Ctrl+Shift+P", mc.show_command_palette)
+        chart_sc(Qt.Key.Key_Right, lambda: self.chart_tab.scroll_chart(1))
+        chart_sc(Qt.Key.Key_Left, lambda: self.chart_tab.scroll_chart(-1))
+        chart_sc("Shift+Right", rc.step_visual_candle)
+        chart_sc("Shift+Left", rc.step_back_visual_candle)
+        chart_sc(Qt.Key.Key_Space, self.bar_replay.toggle_play)
+        chart_sc(Qt.Key.Key_Home, self.chart_tab._fit_all)
+        chart_sc(Qt.Key.Key_Escape, self.chart_tab._cancel_active_mode)
+        chart_sc("Ctrl+=", lambda: self.chart_tab.zoom_chart(1.15))
+        chart_sc("Ctrl+-", lambda: self.chart_tab.zoom_chart(1 / 1.15))
+        chart_sc("Ctrl+Shift+=", lambda: self._zoom_y(1.15))
+        chart_sc("Ctrl+Shift+-", lambda: self._zoom_y(1 / 1.15))
+        chart_sc("Ctrl+Z", rc.undo_drawing)
+        chart_sc("Ctrl+Shift+Z", rc.redo_drawing)
+        chart_sc("Ctrl+Alt+R", self.bar_replay.run_to_end)
+        chart_sc("Ctrl+/", mc.show_cheat_sheet)
+        chart_sc("Ctrl+Shift+P", mc.show_command_palette)
         # Ctrl+S: Save Strategy (Editor) OR Save Session (Chart)
         sc("Ctrl+S", self._on_save_ctrl_s)
+        self._sync_shortcut_context()
 
     def _restore_persisted_settings_tab(self) -> None:
         from gui.persistence import settings_persist
@@ -437,6 +452,7 @@ class MainWindow(QMainWindow):
     def _on_tab(self, idx: int) -> None:
         prev = self._prev_tab_idx
         self._prev_tab_idx = idx
+        self._sync_shortcut_context()
         # Leaving Editor → Chart: push Monaco code into engine (see StrategyEditorTab.sync_engine_from_editor).
         if idx == 0 and prev == self._strategy_editor_tab_index and self.strategy_editor_tab.should_sync_editor_to_engine():
             try:
@@ -538,14 +554,14 @@ class MainWindow(QMainWindow):
 
     # -- Qt event hooks -----------------------------------------------
     def keyPressEvent(self, e) -> None:  # type: ignore[no-untyped-def]
-        if e.key() == Qt.Key.Key_Control:
+        if not self._is_editor_tab_active() and e.key() == Qt.Key.Key_Control:
             import pyqtgraph as pg
 
             self.chart_tab.plot_widget.getViewBox().setMouseMode(pg.ViewBox.RectMode)
         super().keyPressEvent(e)
 
     def keyReleaseEvent(self, e) -> None:  # type: ignore[no-untyped-def]
-        if e.key() == Qt.Key.Key_Control:
+        if not self._is_editor_tab_active() and e.key() == Qt.Key.Key_Control:
             import pyqtgraph as pg
 
             self.chart_tab.plot_widget.getViewBox().setMouseMode(pg.ViewBox.PanMode)
@@ -573,32 +589,16 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
     def show_error(self, m: str) -> None:
-        """Display an error message. Shows toast on chart."""
-        # Show non-blocking toast notification on chart instead of modal dialog
+        """Display an error message through the shared toast system."""
         try:
-            from PySide6.QtCore import QTimer
-            from PySide6.QtWidgets import QLabel
-            from PySide6.QtGui import QColor
+            from gui.components.toast import ToastManager
 
-            # Remove old toast if exists
-            if hasattr(self, "_error_toast") and self._error_toast is not None:
-                self._error_toast.deleteLater()
-                self._error_toast = None
-
-            toast = QLabel(self.chart_tab)
-            toast.setText(f"⚠️ Strategy error — check Logs tab")
+            mgr = getattr(self, "_toast_manager", None)
+            if mgr is None:
+                mgr = ToastManager(self)
+                self._toast_manager = mgr
+            toast = mgr.error("Strategy error - check Logs tab", duration_ms=5000)
             toast.setToolTip(m)
-            toast.setStyleSheet(
-                "background: rgba(200, 50, 50, 180); color: white; "
-                "padding: 8px 16px; border-radius: 6px; font-weight: bold; font-size: 13px;"
-            )
-            toast.adjustSize()
-            toast.move(10, 10)
-            toast.show()
-            self._error_toast = toast
-
-            # Auto-hide after 5 seconds
-            QTimer.singleShot(5000, lambda: (toast.deleteLater(), setattr(self, '_error_toast', None) if hasattr(self, '_error_toast') else None))
         except Exception:
             pass
 
