@@ -19,6 +19,7 @@ from engine.analytics.risk_metrics import (
     ulcer_index as _eng_ulcer,
     value_at_risk as _eng_var,
 )
+from engine.analytics.trade_analytics import resolve_r_multiple
 from gui.shared_data_cache import _trade_cache_key
 
 logger = logging.getLogger("StrategyTester.gui.stats_calculator")
@@ -69,7 +70,7 @@ class StatsCalculator:
         self._cached_result = None
 
     @staticmethod
-    def _do_compute(trades, initial_equity):
+    def _do_compute(trades, initial_equity, pnl_arr=None, rr_arr=None, dur_arr=None, dir_arr=None):
         n = len(trades)
         if n == 0:
             return dict(total=0, n_w=0, n_l=0, n_be=0, wr=0.0, total_pnl=0.0,
@@ -87,29 +88,31 @@ class StatsCalculator:
                         skew=0.0, kurtosis=0.0, pain_index=0.0,
                         max_tuw=0, avg_tuw=0.0, common_sense=0.0)
 
-        pnl_arr = np.empty(n, dtype=float)
-        rr_arr = np.empty(n, dtype=float)
-        dur_arr = np.empty(n, dtype=int)
-        dir_arr = np.empty(n, dtype=object)
-        for i, t in enumerate(trades):
-            try:
+        # "Grail" Optimization — Use pre-computed arrays if provided
+        if pnl_arr is None:
+            pnl_arr = np.empty(n, dtype=float)
+            for i, t in enumerate(trades):
                 pnl_arr[i] = float(getattr(t, "pnl", 0.0) or 0.0)
-            except Exception:
-                pnl_arr[i] = 0.0
-            rr_v = getattr(t, "rr", None)
-            try:
-                rr_arr[i] = float(rr_v) if rr_v is not None and np.isfinite(float(rr_v)) else np.nan
-            except Exception:
-                rr_arr[i] = np.nan
-            try:
+        
+        if rr_arr is None:
+            rr_arr = np.empty(n, dtype=float)
+            for i, t in enumerate(trades):
+                rr_arr[i] = resolve_r_multiple(t)
+        
+        if dur_arr is None:
+            dur_arr = np.empty(n, dtype=int)
+            for i, t in enumerate(trades):
                 dur_arr[i] = int(getattr(t, "duration_minutes", 0) or 0)
-            except Exception:
-                dur_arr[i] = 0
-            dir_arr[i] = str(getattr(t, "direction", "") or "").lower()
+        
+        if dir_arr is None:
+            dir_arr = np.empty(n, dtype=object)
+            for i, t in enumerate(trades):
+                dir_arr[i] = str(getattr(t, "direction", "") or "").lower()
 
-        win_mask = pnl_arr > 0
-        loss_mask = pnl_arr < 0
-        be_mask = pnl_arr == 0
+        EPS = 1e-9
+        win_mask = pnl_arr > EPS
+        loss_mask = pnl_arr < -EPS
+        be_mask = np.abs(pnl_arr) <= EPS
         n_w = int(win_mask.sum())
         n_l = int(loss_mask.sum())
         n_be = int(be_mask.sum())
@@ -147,23 +150,29 @@ class StatsCalculator:
         signs = np.where(win_mask, 1, np.where(loss_mask, -1, 0))
         diffs = np.diff(signs, prepend=0)
         streak_starts = np.where(diffs != 0)[0]
-        streak_lengths = np.diff(np.concatenate([streak_starts, [n]]))
-        streak_types = signs[streak_starts]
-        win_streak_lens = streak_lengths[streak_types == 1]
-        loss_streak_lens = streak_lengths[streak_types == -1]
-        max_ws = int(win_streak_lens.max()) if win_streak_lens.size > 0 else 0
-        max_ls = int(loss_streak_lens.max()) if loss_streak_lens.size > 0 else 0
-        last_sign = int(signs[-1]) if n > 0 else 0
-        if last_sign == 1:
-            cur_streak = f"{int(streak_lengths[-1])}W"
-            cur_streak_color = "green"
-        elif last_sign == -1:
-            cur_streak = f"{int(streak_lengths[-1])}L"
-            cur_streak_color = "red"
-        elif n_be == n:
-            cur_streak = "BE"
-            cur_streak_color = "amber"
+        if len(streak_starts) > 0:
+            streak_lengths = np.diff(np.concatenate([streak_starts, [n]]))
+            streak_types = signs[streak_starts]
+            win_streak_lens = streak_lengths[streak_types == 1]
+            loss_streak_lens = streak_lengths[streak_types == -1]
+            max_ws = int(win_streak_lens.max()) if win_streak_lens.size > 0 else 0
+            max_ls = int(loss_streak_lens.max()) if loss_streak_lens.size > 0 else 0
+            last_sign = int(signs[-1]) if n > 0 else 0
+            if last_sign == 1:
+                cur_streak = f"{int(streak_lengths[-1])}W"
+                cur_streak_color = "green"
+            elif last_sign == -1:
+                cur_streak = f"{int(streak_lengths[-1])}L"
+                cur_streak_color = "red"
+            elif n_be == n:
+                cur_streak = "BE"
+                cur_streak_color = "amber"
+            else:
+                cur_streak = "\u2014"
+                cur_streak_color = "text2"
         else:
+            max_ws = 0
+            max_ls = 0
             cur_streak = "\u2014"
             cur_streak_color = "text2"
 

@@ -1656,6 +1656,9 @@ class ChartTab(QWidget):
         Intended for navigation from Trades tab popups; must never raise.
         If *force* is True, re-navigate even if the same trade was already focused.
         """
+        if not self._chart_alive:
+            return
+            
         trade_id = getattr(trade, "id", None)
         if not force and hasattr(self, "_last_focused_trade") and self._last_focused_trade == trade_id:
             return
@@ -1664,7 +1667,7 @@ class ChartTab(QWidget):
         try:
             rt = getattr(self, "res_times", None)
             if rt is None or len(rt) == 0:
-                logger.debug("focus_trade: res_times not available")
+                logger.debug(f"focus_trade(id={trade_id}): res_times not available or empty")
                 return
 
             # Safe time extraction
