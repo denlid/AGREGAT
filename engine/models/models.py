@@ -1,5 +1,5 @@
-"""
-Engine Models — Data classes for positions, trades, orders, assets, and sessions.
+﻿"""
+Engine Models вЂ” Data classes for positions, trades, orders, assets, and sessions.
 """
 
 from datetime import time
@@ -37,7 +37,7 @@ class AssetConfig:
         "enforce_trading_hours",
         "enforce_eod_close",
         "close_on_weekend",
-        # Phase 1.5 — per-asset session timezone and overrides.
+        # Phase 1.5 вЂ” per-asset session timezone and overrides.
         "session_tz",
         "sessions",
     )
@@ -81,7 +81,7 @@ class AssetConfig:
         self.enforce_trading_hours = enforce_trading_hours
         self.enforce_eod_close = enforce_eod_close
         self.close_on_weekend = close_on_weekend
-        # Phase 1.5 — IANA TZ name (e.g. "Europe/Kyiv", "UTC", "America/New_York").
+        # Phase 1.5 вЂ” IANA TZ name (e.g. "Europe/Kyiv", "UTC", "America/New_York").
         # ``None`` keeps the legacy implicit-UTC+3 behaviour where the
         # data timestamp is taken at face value. When supplied, the
         # raw timestamp is treated as UTC (or as already-localized if
@@ -177,7 +177,7 @@ class Position:
         # can compute trade duration via plain numpy subtraction without
         # round-tripping through ``pd.to_datetime`` per trade. Adapters that
         # construct a ``Position`` from a non-canonical source can leave this
-        # ``None`` — the engine will fall back to the slow path. (TZ Phase 2 / B2.)
+        # ``None`` вЂ” the engine will fall back to the slow path. (TZ Phase 2 / B2.)
         self.entry_time_np = entry_time_np
         self.volume = volume
         self.sl = sl
@@ -201,9 +201,8 @@ class Position:
 # ==========================================
 # Sentinel for Trade.__init__: distinguishes "caller did not supply a
 # precomputed datetime64" (fall back to parsing ``entry_time``) from the
-# legitimate value ``None`` (timestamp is genuinely absent). The vectorised
-# engine passes datetime64 values directly to skip the ~125 µs/trade
-# ``pd.to_datetime(str)`` round-trip — see ``vectorized_engine`` materialisation.
+# legitimate value ``None`` (timestamp is genuinely absent). Callers may pass
+# datetime64 values directly to skip the ``pd.to_datetime(str)`` round-trip.
 _NP_TIME_UNSET = object()
 
 
@@ -235,7 +234,7 @@ class Trade:
         "commission",
         "spread_cost",
         "slippage_cost",
-        # Sprint 4.2 cross-cuts — populated at trade close.
+        # Sprint 4.2 cross-cuts вЂ” populated at trade close.
         "dow",
         "hod",
         "regime",
@@ -285,10 +284,8 @@ class Trade:
         self.exit_time = exit_time
         # Pre-cache np.datetime64 for fast chart marker rendering.
         # Avoids repeated pd.to_datetime(str) on every redraw. Callers that
-        # already hold the datetime64 (the vectorised engine slices it straight
-        # from the OHLC time array) pass it via ``entry_time_np`` / ``exit_time_np``
-        # to skip the costly string parse — the dominant cost when materialising
-        # tens of thousands of trades.
+        # already hold the datetime64 pass it via ``entry_time_np`` /
+        # ``exit_time_np`` to skip the costly string parse.
         if entry_time_np is _NP_TIME_UNSET:
             try:
                 _et_ts = pd.to_datetime(entry_time, errors="coerce")
@@ -346,7 +343,7 @@ SESSIONS = [
     ("Off_Hours", time(20, 0), time(2, 0)),  # Wraps midnight
 ]
 
-# Trading hours: entries 09:00–18:00 by default, EOD close at 22:00
+# Trading hours: entries 09:00вЂ“18:00 by default, EOD close at 22:00
 TRADING_HOURS_START = time(9, 0)
 TRADING_HOURS_END = time(18, 0)
 EOD_CLOSE_TIME = time(22, 0)
@@ -360,7 +357,7 @@ def _to_time_and_weekday(
     Accepts datetime.time, str, pandas.Timestamp, datetime.datetime, np.datetime64.
     Returns (None, None) if conversion fails.
 
-    Phase 1.5 — when ``asset.session_tz`` is set, the timestamp is
+    Phase 1.5 вЂ” when ``asset.session_tz`` is set, the timestamp is
     converted to that zone before its time-of-day is extracted. Naive
     timestamps are first localized to UTC then converted; tz-aware
     inputs are converted directly. The legacy code path
@@ -377,7 +374,7 @@ def _to_time_and_weekday(
                     ts = ts.tz_localize("UTC").tz_convert(tz)
                 else:
                     ts = ts.tz_convert(tz)
-            except Exception:  # pragma: no cover — invalid tz string
+            except Exception:  # pragma: no cover вЂ” invalid tz string
                 pass
         return ts.time(), int(ts.weekday())
     except Exception:
@@ -394,7 +391,7 @@ def get_session(t: Any, asset: Optional[AssetConfig] = None) -> str:
 
     Saturday/Sunday always returns 'Weekend'.
 
-    Phase 1.5 — when ``asset.sessions`` is supplied, that list is used
+    Phase 1.5 вЂ” when ``asset.sessions`` is supplied, that list is used
     instead of the global :data:`SESSIONS`. Combined with
     ``asset.session_tz``, the same raw timestamps can map to different
     session windows for different assets.
@@ -414,17 +411,17 @@ def get_session(t: Any, asset: Optional[AssetConfig] = None) -> str:
         if start <= end:
             if start <= tt < end:
                 return name
-        else:  # Wraps midnight (Off_Hours: 20:00 → 02:00)
+        else:  # Wraps midnight (Off_Hours: 20:00 в†’ 02:00)
             if tt >= start or tt < end:
                 return name
     return "Off_Hours"
 
 
 def is_trading_hours(t: Any, asset: Optional[AssetConfig] = None) -> bool:
-    """Check if time is within configured trading hours (default 09:00–18:00 UTC+3).
+    """Check if time is within configured trading hours (default 09:00вЂ“18:00 UTC+3).
 
     If an AssetConfig is supplied, its trading_hours_* and weekend rules win.
-    Phase 1.5 — also honours ``asset.session_tz`` for the time-of-day check.
+    Phase 1.5 вЂ” also honours ``asset.session_tz`` for the time-of-day check.
     """
     tt, wd = _to_time_and_weekday(t, asset=asset)
     if tt is None:

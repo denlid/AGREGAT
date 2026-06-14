@@ -38,7 +38,14 @@ from gui.chart_tab.lod import DEFAULT_MAX_BARS, downsample_ohlc
 
 # Phase 2.3 — repaint debounce. Set to 0 to process on the next event
 # loop tick, providing TradingView-like fluidity without duplicating work.
-_RANGE_DEBOUNCE_MS = 0
+_RANGE_DEBOUNCE_MS = 16
+
+# Build candle pictures for the visible window plus a bounded look-ahead.
+# Small pans can then reuse the existing QPicture instead of rebuilding all
+# visible QLineF/QRectF objects on every mouse-move event.
+_VIEWPORT_OVERSCAN_FRACTION = 0.25
+_VIEWPORT_OVERSCAN_MIN_BARS = 20.0
+_VIEWPORT_OVERSCAN_MAX_BARS = 250.0
 
 
 class CandlestickItem(pg.GraphicsObject):
@@ -109,6 +116,9 @@ class CandlestickItem(pg.GraphicsObject):
         self._pyramid_max_bars: int = self._max_bars
         self._visible_slice_cache_key: Optional[Tuple[float, float, int]] = None
         self._visible_slice_cache_value: Tuple[int, int] = (0, 0)
+        self._rendered_slice: Tuple[int, int] = (0, 0)
+        self._rendered_x_bounds: Optional[Tuple[float, float]] = None
+        self._rendered_half_width: float = self._last_w
         self._all_wicks = []
         self._geom_rects = []
         self._geom_doji_flats = []
@@ -149,9 +159,29 @@ class CandlestickItem(pg.GraphicsObject):
     def _do_range_repaint(self) -> None:
         if self._arr.shape[0] == 0:
             return
+        prev_w = self._last_w
         self._update_width()
+        if abs(prev_w - self._last_w) <= 1e-5 and self._picture_covers_view():
+            self._paint_stats["viewport_cache_hit"] = True
+            self.update()
+            return
         self._gen()
         self.update()
+
+    def _picture_covers_view(self) -> bool:
+        """Return True when the current QPicture already spans the ViewBox."""
+        if self._view is None or self._arr.shape[0] == 0:
+            return False
+        bounds = self._rendered_x_bounds
+        if bounds is None:
+            return False
+        try:
+            xr = self._view.viewRange()[0]
+        except Exception:
+            return False
+        x0 = float(min(xr[0], xr[1]))
+        x1 = float(max(xr[0], xr[1]))
+        return x0 >= bounds[0] and x1 <= bounds[1]
 
     # ------------------------------------------------------------------
     # Phase 2 (GPU plan) — LOD pyramid sensor
@@ -336,6 +366,9 @@ class CandlestickItem(pg.GraphicsObject):
         self._geom_doji_flats = None
         self._visible_slice_cache_key = None
         self._visible_slice_cache_value = (0, 0)
+        self._rendered_slice = (0, 0)
+        self._rendered_x_bounds = None
+        self._rendered_half_width = self._last_w
         self._update_width()
         self._gen()
         self.informViewBoundsChanged()
@@ -397,10 +430,13 @@ class CandlestickItem(pg.GraphicsObject):
         # (chart_tab always feeds a monotonic ``range(n)`` — same
         # contract pyqtgraph's PlotCurveItem assumes for setData(x=)).
         xs = self._arr[:, 0]
-        w = x1 - x0
-        # Overscan by 1 full screen on each side for TradingView-like smooth panning
-        x_min = x0 - w
-        x_max = x1 + w
+        w = abs(x1 - x0)
+        pad = min(
+            _VIEWPORT_OVERSCAN_MAX_BARS,
+            max(_VIEWPORT_OVERSCAN_MIN_BARS, w * _VIEWPORT_OVERSCAN_FRACTION),
+        )
+        x_min = min(x0, x1) - pad
+        x_max = max(x0, x1) + pad
         lo = int(np.searchsorted(xs, x_min, side="left"))
         hi = int(np.searchsorted(xs, x_max, side="right"))
         out = (lo, hi)
@@ -432,6 +468,16 @@ class CandlestickItem(pg.GraphicsObject):
 
         # Phase 2.1 — clip to visible window once per repaint.
         lo, hi = self._visible_slice()
+        self._rendered_slice = (lo, hi)
+        if hi > lo:
+            xs_all = self._arr[:, 0]
+            self._rendered_x_bounds = (
+                float(xs_all[lo]) - float(self._last_w),
+                float(xs_all[hi - 1]) + float(self._last_w),
+            )
+        else:
+            self._rendered_x_bounds = None
+        self._rendered_half_width = self._last_w
         self._paint_stats["bars_culled"] = n_total - (hi - lo)
         if hi <= lo:
             self._paint_stats["gen_time_ms"] = (time.perf_counter() - t0) * 1000.0

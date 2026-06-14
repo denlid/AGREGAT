@@ -206,12 +206,12 @@ class BarReplayControls(QWidget):
 
         worker = ComputeWorker(run_cancellable, parent=self)
         worker.finished.connect(self._on_headless_finished)
-        worker.error.connect(self._on_quant_error)
+        worker.error.connect(self._on_run_error)
         # Cancel: одночасно зупиняємо фоновий потік через Event
         # і запобігаємо emit finished сигналу через worker.cancel()
         self.progress_dialog.canceled.connect(self._headless_cancel_event.set)
         
-        self._quant_worker = worker
+        self._run_worker = worker
 
         # Таймер прогресу
         self._headless_progress_timer = QTimer()
@@ -291,59 +291,7 @@ class BarReplayControls(QWidget):
         n = len(result.trades) if result is not None else 0
         logger.info("🏁 Headless visual run done — %d trades", n)
 
-    # ------------------------------------------------------------------
-    # Phase 2 — Quant (vectorised) run mode
-    # ------------------------------------------------------------------
-    def _run_quant(self) -> None:
-        """Run the loaded strategy through the vectorised engine.
-
-        Heavy NumPy work runs on a :class:`gui.workers.ComputeWorker` so the
-        UI remains responsive. A modal progress dialog with a cancel button
-        is shown while the worker is in flight; completion auto-jumps the
-        main window to the Analytics tab so the user immediately sees the
-        results of the run.
-        """
-        from gui.workers.workers import ComputeWorker
-
-        # Indeterminate progress dialog (busy bar) — Quant runs are typically
-        # short so we don't need a per-bar tick.
-        self.progress_dialog = QProgressDialog(
-            "Running vectorised backtest…", "Cancel", 0, 0, self.parent()
-        )
-        self.progress_dialog.setWindowTitle("Quant Run")
-        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self.progress_dialog.setMinimumDuration(0)
-
-        worker = ComputeWorker(self.engine.run_vectorized, parent=self)
-        worker.finished.connect(self._on_quant_finished)
-        worker.error.connect(self._on_quant_error)
-        self.progress_dialog.canceled.connect(worker.cancel)
-        self._quant_worker = worker
-        worker.start()
-
-    def _on_quant_finished(self, result) -> None:
-        """Quant worker finished — close the spinner and jump to Analytics."""
-        if self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-        # Re-emit step_completed so chart / status bar update like after Visual.
-        if self.engine.current_idx >= 0 and self.engine.total_bars > 0:
-            self.engine.step_completed.emit(
-                self.engine.current_idx,
-                self.engine.candle_at(self.engine.current_idx),
-            )
-        # Hop to the Analytics tab on the main window if we can find it.
-        win = self.window()
-        tabs = getattr(win, "tabs", None)
-        if tabs is not None:
-            for i in range(tabs.count()):
-                if tabs.tabText(i).strip().lower() == "analytics":
-                    tabs.setCurrentIndex(i)
-                    break
-        n = len(result.trades) if result is not None else 0
-        logger.info("⚡ Quant run done — %d trades in vectorised pass", n)
-
-    def _on_quant_error(self, exc: Exception) -> None:
+    def _on_run_error(self, exc: Exception) -> None:
         if self.progress_dialog:
             self.progress_dialog.close()
             self.progress_dialog = None

@@ -24,7 +24,9 @@
 
 **Rationale**: The iterative engine runs one candle at a time — Python overhead per iteration is acceptable (< 100k candles/sec). Numba/Cython would add build complexity.
 
-**Consequence**: Vectorized engine exists separately (`engine/execution/vectorized_engine.py`) for bulk Quant mode.
+**Consequence**: Backtest execution has a single authoritative step-by-step path.
+Bulk NumPy optimizations are limited to supporting data prep and analytics, not
+strategy execution.
 
 ---
 

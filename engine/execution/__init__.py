@@ -1,4 +1,4 @@
-"""Engine execution sub-package — order fills, costs, vectorized engine."""
+"""Engine execution sub-package — order fills and costs."""
 
 from engine.execution.execution import ExecutionCosts, ExecutionModel
 

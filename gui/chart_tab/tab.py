@@ -357,6 +357,11 @@ class ChartTab(QWidget):
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(60)
         self._redraw_timer.timeout.connect(self._do_deferred_redraw)
+        self._pending_range_tuple = None
+        self._range_sync_timer = QTimer()
+        self._range_sync_timer.setSingleShot(True)
+        self._range_sync_timer.setInterval(40)
+        self._range_sync_timer.timeout.connect(self._flush_range_changed)
 
         self.plot_widget.scene().sigMouseClicked.connect(self.on_mouse_clicked)
         self.engine.data_loaded.connect(self.on_data_loaded)
@@ -1351,6 +1356,15 @@ class ChartTab(QWidget):
 
     def _on_my_range_changed(self, _, range_tuple):
         if self._is_syncing or len(self.res_times) == 0:
+            return
+        self._pending_range_tuple = range_tuple
+        if not self._range_sync_timer.isActive():
+            self._range_sync_timer.start()
+
+    def _flush_range_changed(self):
+        range_tuple = self._pending_range_tuple
+        self._pending_range_tuple = None
+        if self._is_syncing or len(self.res_times) == 0 or range_tuple is None:
             return
         xr = range_tuple[0]
         t1 = self._get_time_at_idx(xr[0])

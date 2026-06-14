@@ -57,14 +57,15 @@ def _validate_strategy_structure(code: str) -> list[str]:
     """Return warnings about potential structural issues in strategy code."""
     warnings = []
     has_on_candle = "on_candle" in code
-    has_vectorized = "vectorized_signals" in code
     has_api_strategy = "Strategy(" in code and ".on_candle" in code
     has_class = "class " in code
 
     if not has_class and not has_api_strategy:
         warnings.append("No class definition or api.Strategy object found")
-    if not has_on_candle and not has_vectorized and not has_api_strategy:
-        warnings.append("No execution method (on_candle/vectorized_signals) found")
+    if not has_on_candle and not has_api_strategy:
+        warnings.append("No execution method (on_candle) found")
+    if "vectorized_signals" in code:
+        warnings.append("vectorized_signals is no longer supported; use on_candle")
     if "import " not in code:
         warnings.append("No imports found — code may be incomplete")
     if "self.params" in code and "PARAMS" not in code:

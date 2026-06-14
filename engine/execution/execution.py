@@ -41,8 +41,7 @@ ProfileName = Literal["Optimistic", "Realistic", "Custom"]
 # classical square-root market-impact rule used by institutional
 # transaction-cost models (e.g. Almgren–Chriss).
 SlippageModel = Literal["fixed", "linear", "sqrt"]
-# Numeric enum of :data:`SlippageModel` shared with the Numba inner
-# loop in :mod:`engine.analytics._vec_numba`.
+# Numeric enum of :data:`SlippageModel` used by the shared slippage helpers.
 SLIPPAGE_MODEL_FIXED = 0
 SLIPPAGE_MODEL_LINEAR = 1
 SLIPPAGE_MODEL_SQRT = 2

@@ -1,5 +1,5 @@
-"""
-Context & Strategy — The API surface exposed to strategies.
+﻿"""
+Context & Strategy вЂ” The API surface exposed to strategies.
 """
 
 from __future__ import annotations
@@ -31,10 +31,10 @@ class Param:
     """Declarative description of a single tunable strategy parameter.
 
     Strategies advertise their tunables via the class-level ``PARAMS``
-    list; the GUI walks that list to auto-build a form (Settings →
+    list; the GUI walks that list to auto-build a form (Settings в†’
     Strategy sub-tab) and persisted values flow back into
     ``self.params[name]`` before each backtest. Keep one instance per
-    parameter — every field that needs to live behind a checkbox / spin
+    parameter вЂ” every field that needs to live behind a checkbox / spin
     box / combobox is one ``Param``.
 
     Fields
@@ -63,16 +63,9 @@ class Param:
 class Strategy:
     """Base strategy interface. Strategies may inherit from this but don't have to.
 
-    A strategy is free to implement either or both of the two execution
-    APIs:
-
-    * :pymeth:`on_candle` — the original step-by-step API used by the
-      Visual / live-ready engine (:class:`engine.backtest_engine.BacktestEngine`).
-    * :pymeth:`vectorized_signals` — an optional NumPy-friendly API used by
-      the fast-quant engine (:func:`engine.vectorized_engine.run_vectorized`).
-      Strategies that only care about the on-candle path can leave this
-      unimplemented; the loader uses :func:`has_vectorized_signals` to
-      detect support at runtime.
+    Strategies execute through ``on_candle`` only. The engine advances one
+    candle at a time, so strategy code observes only confirmed history and the
+    current candle.
 
     Parameter API
     -------------
@@ -85,10 +78,10 @@ class Strategy:
     ---------------
     Strategies may also implement methods of the form
     ``on_<tf>_close(self, ctx)`` (e.g. ``on_15m_close``). The engine
-    invokes them right after the corresponding HTF bucket completes —
-    *before* the per-1m :pymeth:`on_candle` hook on the same bar — so
+    invokes them right after the corresponding HTF bucket completes вЂ”
+    *before* the per-1m :pymeth:`on_candle` hook on the same bar вЂ” so
     that "active management" decisions tied to the higher timeframe
-    (counter-CISD exits, trailing stops anchored to HTF pivots, …) can
+    (counter-CISD exits, trailing stops anchored to HTF pivots, вЂ¦) can
     be expressed without manually polling ``ctx.completed_tfs``.
     """
 
@@ -141,83 +134,10 @@ class Strategy:
     def on_candle(self, ctx: "Context") -> None:
         pass
 
-    def build_vectorized_features(self, df: Any, prepared: Any = None) -> Any:
-        """Optional precompute hook for optimizer-style repeated runs.
-
-        Strategies may override this to split heavy feature construction
-        from cheap signal generation. The default implementation returns
-        ``None``, signalling that :meth:`vectorized_signals` should be
-        used directly.
-        """
-        return None
-
-    def feature_params(self) -> Any:
-        """Return the subset of params that influence built features.
-
-        Used by the engine-side feature cache (Roadmap v2 / S1.5) to decide
-        when cached features can be reused across runs. Features depend ONLY
-        on these params — varying any other param (e.g. SL/TP thresholds)
-        does not invalidate the cache.
-
-        The default returns ``None``, which disables feature caching for the
-        strategy (every run rebuilds features). Strategies implementing the
-        feature-cache contract should override this to return a hashable tuple
-        of the indicator params, e.g.::
-
-            def feature_params(self):
-                return (self.params["fast_ema"], self.params["slow_ema"])
-
-        Returning ``None`` is safe but forfeits the cross-run cache benefit.
-        """
-        return None
-
-    def vectorized_signals_from_features(self, features: Any, params: Any = None) -> Any:
-        """Optional signal-generation hook from a prepared feature bundle.
-
-        Strategies that override :meth:`build_vectorized_features` should
-        typically override this method as well.
-        """
-        raise NotImplementedError(
-            "Strategy.vectorized_signals_from_features is not implemented. "
-            "Override it when using build_vectorized_features()."
-        )
-
-    def vectorized_signals(self, df: Any) -> Any:  # noqa: D401 — interface stub
-        """Return a per-bar signal frame for the vectorised engine.
-
-        Default implementation raises :class:`NotImplementedError` so the
-        :func:`run_vectorized` pre-check (``hasattr``) reports the
-        capability as missing rather than silently producing empty
-        results. See :func:`engine.vectorized_engine.run_vectorized` for
-        the expected frame schema.
-        """
-        raise NotImplementedError(
-            "Strategy.vectorized_signals is not implemented. "
-            "Add it to your strategy class or run with the Visual engine."
-        )
-
-
-def has_vectorized_signals(strategy: "Strategy") -> bool:
-    """Return True iff `strategy` actually overrides
-    :pymeth:`Strategy.vectorized_signals`.
-
-    Used by the GUI to decide whether the "Quant" run-mode is offered to
-    the user. We compare against the base function via ``__func__`` so
-    that a class that simply inherits from :class:`Strategy` without
-    overriding the method does not trigger the capability.
-    """
-    method = getattr(strategy, "vectorized_signals", None)
-    if method is None:
-        return False
-    base_method = Strategy.vectorized_signals
-    bound_func = getattr(method, "__func__", None)
-    return bound_func is not base_method
-
-
 class StrategyLoader:
     """Loads a user-supplied .py strategy file.
 
-    NOTE: there is **no real sandbox** — the loaded code runs with the same
+    NOTE: there is **no real sandbox** вЂ” the loaded code runs with the same
     privileges as AGREGAT itself. Only load strategies you trust.
     """
 
@@ -235,7 +155,7 @@ class StrategyLoader:
         try:
             spec.loader.exec_module(module)
         except Exception as e:
-            logger.error(f"❌ Strategy execution failed: {e!r}")
+            logger.error(f"вќЊ Strategy execution failed: {e!r}")
             raise
 
         # Try 1: engine.api.Strategy objects (new simplified API)
@@ -258,14 +178,14 @@ class StrategyLoader:
                 continue
             if item.__name__ == "Strategy":
                 continue
-            if hasattr(item, "on_candle") or hasattr(item, "vectorized_signals"):
+            if hasattr(item, "on_candle"):
                 strategy_class = item
                 break
 
         if not strategy_class:
             raise ValueError(
                 f"No valid strategy class found in {filepath}; expected at least "
-                "one of: on_candle(ctx) or vectorized_signals(df), "
+                "an on_candle(ctx) strategy class "
                 "or an engine.api.Strategy instance."
             )
 
@@ -278,26 +198,26 @@ class Context:
     Context passed to strategy's on_candle method.
 
     Properties:
-        candle         — current 1m candle dict
-        position       — current Position or None
-        equity         — current equity
-        initial_equity — starting equity
-        asset          — AssetConfig for the current asset
-        completed_tfs  — dict of {tf: bool} indicating which TFs completed this step
+        candle         вЂ” current 1m candle dict
+        position       вЂ” current Position or None
+        equity         вЂ” current equity
+        initial_equity вЂ” starting equity
+        asset          вЂ” AssetConfig for the current asset
+        completed_tfs  вЂ” dict of {tf: bool} indicating which TFs completed this step
 
     Methods:
-        buy_at_open(volume, sl=, tp=)           — queue LONG entry at next candle's open
-        sell_at_open(volume, sl=, tp=)          — queue SHORT entry at next candle's open
-        cancel_pending()                        — drop any pending order
-        close(price=, reason=)                  — close current position
-        update_sl(new_sl) / update_tp(new_tp)   — update position stops
-        log(message)                            — log to console
-        get_tf(tf)                              — completed TF candles (Zero-Future safe)
-        get_session(time=) / is_trading_hours() — session helpers
-        calculate_lot(sl_pts, risk_pct=)        — risk-based lot sizing (clamped)
-        draw_line/rect/text/remove/update       — drawing API
-        remove/update_drawings_by_tag           — batch drawing API by layer tag
-        register_layer(tag, label, default_on)  — add a toggleable UI layer
+        buy_at_open(volume, sl=, tp=)           вЂ” queue LONG entry at next candle's open
+        sell_at_open(volume, sl=, tp=)          вЂ” queue SHORT entry at next candle's open
+        cancel_pending()                        вЂ” drop any pending order
+        close(price=, reason=)                  вЂ” close current position
+        update_sl(new_sl) / update_tp(new_tp)   вЂ” update position stops
+        log(message)                            вЂ” log to console
+        get_tf(tf)                              вЂ” completed TF candles (Zero-Future safe)
+        get_session(time=) / is_trading_hours() вЂ” session helpers
+        calculate_lot(sl_pts, risk_pct=)        вЂ” risk-based lot sizing (clamped)
+        draw_line/rect/text/remove/update       вЂ” drawing API
+        remove/update_drawings_by_tag           вЂ” batch drawing API by layer tag
+        register_layer(tag, label, default_on)  вЂ” add a toggleable UI layer
     """
 
     def __init__(self, engine: Any) -> None:
@@ -338,14 +258,14 @@ class Context:
         """Read-only NumPy-backed view of completed HTF bars.
 
         Returns an :class:`engine.htf_view.HTFView` (the HTF mirror of
-        ``ctx.data``). Use the same NumPy ergonomics — ``view.close[-1]``
+        ``ctx.data``). Use the same NumPy ergonomics вЂ” ``view.close[-1]``
         for the most recent close, ``view.high[-N:]`` for the last N
         highs, etc. The slice respects the Zero-Future Rule: only HTF
         bars whose last constituent 1m bar has been processed are
         visible.
 
         Strategies that still want a list of dicts can call
-        :py:meth:`get_tf_dicts`. (TZ Phase 3 — vectorized HTF.)
+        :py:meth:`get_tf_dicts`. (TZ Phase 3 вЂ” vectorized HTF.)
         """
         return self._engine.tf_aggregator.view(tf)
 
@@ -361,7 +281,7 @@ class Context:
 
     def get_tf_forming(self, tf: str) -> Optional[Dict[str, Any]]:
         """Get the current forming (incomplete) HTF candle as a dict.
-        NOT Zero-Future safe — visualisation only.
+        NOT Zero-Future safe вЂ” visualisation only.
         """
         forming: Optional[Dict[str, Any]] = self._engine.tf_aggregator.get_forming(tf)
         return forming
@@ -382,32 +302,32 @@ class Context:
         """Log warnings for obviously wrong SL/TP values."""
         if sl is not None:
             if sl <= 0:
-                logger.warning(f"⚠️ SL={sl} is non-positive — likely a bug.")
+                logger.warning(f"вљ пёЏ SL={sl} is non-positive вЂ” likely a bug.")
             elif direction == "long" and sl > ref_price:
                 logger.warning(
-                    f"⚠️ LONG SL={sl:.4f} is above current price {ref_price:.4f} "
-                    f"— will likely trigger immediately."
+                    f"вљ пёЏ LONG SL={sl:.4f} is above current price {ref_price:.4f} "
+                    f"вЂ” will likely trigger immediately."
                 )
             elif direction == "short" and sl < ref_price:
                 logger.warning(
-                    f"⚠️ SHORT SL={sl:.4f} is below current price {ref_price:.4f} "
-                    f"— will likely trigger immediately."
+                    f"вљ пёЏ SHORT SL={sl:.4f} is below current price {ref_price:.4f} "
+                    f"вЂ” will likely trigger immediately."
                 )
         if tp is not None:
             if tp <= 0:
-                logger.warning(f"⚠️ TP={tp} is non-positive — likely a bug.")
+                logger.warning(f"вљ пёЏ TP={tp} is non-positive вЂ” likely a bug.")
             elif direction == "long" and tp < ref_price:
                 logger.warning(
-                    f"⚠️ LONG TP={tp:.4f} is below current price {ref_price:.4f} "
-                    f"— will likely trigger immediately."
+                    f"вљ пёЏ LONG TP={tp:.4f} is below current price {ref_price:.4f} "
+                    f"вЂ” will likely trigger immediately."
                 )
             elif direction == "short" and tp > ref_price:
                 logger.warning(
-                    f"⚠️ SHORT TP={tp:.4f} is above current price {ref_price:.4f} "
-                    f"— will likely trigger immediately."
+                    f"вљ пёЏ SHORT TP={tp:.4f} is above current price {ref_price:.4f} "
+                    f"вЂ” will likely trigger immediately."
                 )
         if sl is not None and tp is not None and sl == tp:
-            logger.warning(f"⚠️ SL == TP ({sl}) — trade has zero room.")
+            logger.warning(f"вљ пёЏ SL == TP ({sl}) вЂ” trade has zero room.")
 
     def buy_at_open(
         self,
@@ -490,7 +410,7 @@ class Context:
         old_sl = self._engine.position.sl
         self._engine.position.sl = new_sl
         t_str = self._format_time()
-        logger.info(f"{t_str}[Strategy] SL updated: {old_sl} → {new_sl}")
+        logger.info(f"{t_str}[Strategy] SL updated: {old_sl} в†’ {new_sl}")
 
     def update_tp(self, new_tp: Optional[float]) -> None:
         """Update the take-profit of the current position."""
@@ -500,10 +420,10 @@ class Context:
         old_tp = self._engine.position.tp
         self._engine.position.tp = new_tp
         t_str = self._format_time()
-        logger.info(f"{t_str}[Strategy] TP updated: {old_tp} → {new_tp}")
+        logger.info(f"{t_str}[Strategy] TP updated: {old_tp} в†’ {new_tp}")
 
     def move_sl_to_be(self, offset_points: float = 0.0) -> bool:
-        """Phase 3.1 (E4) — move the open position's SL to break-even.
+        """Phase 3.1 (E4) вЂ” move the open position's SL to break-even.
 
         Convenience wrapper around :py:meth:`update_sl` that handles the
         per-asset point conversion and the long/short sign flip so
@@ -522,7 +442,7 @@ class Context:
         Returns:
             ``True`` when the SL was actually moved, ``False`` if no
             position is open or the proposed SL would be looser than
-            the current one (we never widen risk in this helper —
+            the current one (we never widen risk in this helper вЂ”
             callers that *want* to widen should use
             :py:meth:`update_sl` directly).
         """
@@ -537,12 +457,12 @@ class Context:
         offset_price = float(offset_points) * tick
         if pos.direction == "long":
             new_sl = pos.entry_price + offset_price
-            # Refuse to widen — only move SL up for longs.
+            # Refuse to widen вЂ” only move SL up for longs.
             if pos.sl is not None and new_sl <= pos.sl:
                 return False
         else:
             new_sl = pos.entry_price - offset_price
-            # Refuse to widen — only move SL down for shorts.
+            # Refuse to widen вЂ” only move SL down for shorts.
             if pos.sl is not None and new_sl >= pos.sl:
                 return False
         self.update_sl(new_sl)
@@ -626,7 +546,7 @@ class Context:
                 )
                 return None
             logger.info(
-                f"{t_str}[Risk] Lot clamped: {lot:.2f} → {max_lots:.2f} (sl_pts={sl_points})"
+                f"{t_str}[Risk] Lot clamped: {lot:.2f} в†’ {max_lots:.2f} (sl_pts={sl_points})"
             )
             lot = max_lots
 
@@ -656,7 +576,7 @@ class Context:
                 return None
             logger.info(
                 f"{t_str}[Risk] Lot capped by broker limit: "
-                f"{lot:.2f} → {abs_cap:.2f} (abs_max={abs_cap})"
+                f"{lot:.2f} в†’ {abs_cap:.2f} (abs_max={abs_cap})"
             )
             lot = abs_cap
 

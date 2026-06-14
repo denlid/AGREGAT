@@ -23,8 +23,9 @@ Design notes:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Callable, Dict, Iterator, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -44,12 +45,19 @@ from engine.models.models import (
 )
 from engine.analytics.stats_accumulator import DrawdownTracker, StatsAccumulator
 from engine.data.tf_aggregator import TimeframeAggregator
-from engine.execution.vectorized_engine import VectorizedResult
-
-if TYPE_CHECKING:
-    from engine.execution.prepared_dataset import PreparedDataset
-
 logger = logging.getLogger("StrategyTester.engine.backtest")
+
+
+@dataclass
+class HeadlessRunResult:
+    """Result produced by the authoritative step-by-step headless runner."""
+
+    trades: List[Trade] = field(default_factory=list)
+    equity_curve: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float64))
+    peak_drawdown_pct: float = 0.0
+    peak_drawdown_abs: float = 0.0
+    summary: dict[str, Any] = field(default_factory=dict)
+    skipped_trades: List[dict[str, Any]] = field(default_factory=list)
 
 
 def _round_to_step(value: float, step: float) -> float:
@@ -1468,129 +1476,16 @@ class BacktestCore:
         self._fire(self.on_layer_registered, tag, label, default_on)
 
     # ------------------------------------------------------------------
-    # Vectorised (Quant) execution mode
-    # ------------------------------------------------------------------
-    def run_vectorized(
-        self,
-        *,
-        prepared: Optional[PreparedDataset] = None,
-        optimizer_mode: bool = False,
-    ) -> Optional[VectorizedResult]:
-        """Execute the loaded strategy via the fast-quant vectorised engine.
-
-        Mirrors the on-candle ``run_to_end`` path — the engine state
-        (`trades`, `equity`, `equity_track`, `max_drawdown_pct`,
-        `current_idx`) is updated and the relevant callbacks fire so the
-        GUI (or any subscriber) refreshes just like after a Visual run.
-        Returns the raw :class:`engine.vectorized_engine.VectorizedResult`
-        for callers that want to inspect the equity curve directly.
-
-        Parameters
-        ----------
-        prepared
-            Optional pre-built :class:`PreparedDataset` for the loaded ``df``.
-            When supplied, the engine skips the numpy-extract + mask-build
-            stages — the key reuse path for optimizer sweeps over one dataset
-            (Roadmap v2 / S0.2).
-        optimizer_mode
-            When True, runs in summary-only fast mode: no ``Trade`` objects,
-            no equity curve, no engine-state materialization. Returns the bare
-            :class:`VectorizedResult` (``summary`` + ``perf`` only). Use for
-            parameter sweeps where only metrics matter. The default (False)
-            keeps the full GUI single-run behaviour unchanged.
-        """
-        from engine.execution.vectorized_engine import run_vectorized as _run_vec
-
-        if self.df is None or self.strategy is None:
-            logger.warning("run_vectorized: data or strategy not loaded")
-            return None
-
-        # Optimizer fast path: skip Trade materialization + state replay
-        # entirely and return summary/perf only. We must NOT call self.reset()
-        # or touch GUI state here — sweeps run this thousands of times and the
-        # caller only consumes result.summary. (Roadmap v2 / S0.1)
-        if optimizer_mode:
-            return _run_vec(
-                self.df,
-                self.strategy,
-                asset=self.asset_config,
-                execution_model=self.execution_model,
-                initial_equity=self.initial_equity,
-                risk_pct=self.risk_pct,
-                prepared=prepared,
-                summary_only=True,
-                compact_result=True,
-                include_equity_curve=False,
-            )
-
-        # Reset state before a fresh quant run (clears trades + equity).
-        self.reset()
-        result = _run_vec(
-            self.df,
-            self.strategy,
-            asset=self.asset_config,
-            execution_model=self.execution_model,
-            initial_equity=self.initial_equity,
-            risk_pct=self.risk_pct,
-            prepared=prepared,
-        )
-
-        # Materialise the result into engine state expected by the GUI tabs.
-        self.trades = list(result.trades)
-        # Mirror the vectorised engine's skipped-trades list so the GUI's
-        # log / stats display the same number after both Visual and Quant
-        # runs (TZ Phase 6 / A8). Empty when ``enforce_trading_hours`` is
-        # off, so this is a no-op for most users.
-        self.skipped_trades = list(result.skipped_trades)
-        self.equity_track = result.equity_curve.tolist()
-        if self.equity_track:
-            self.equity = float(self.equity_track[-1])
-        # Replay the equity curve through the centralised tracker so peak /
-        # DD numbers match the on-candle path (TZ Phase 4 / Etap 4.1). The
-        # legacy mirror fields are derived from it for backwards compat.
-        self.drawdown.reset(self.initial_equity)
-        for eq in self.equity_track:
-            self.drawdown.update(float(eq))
-        self.max_equity = self.drawdown.peak_equity
-        self.max_drawdown_pct = self.drawdown.max_drawdown_pct
-        self.max_drawdown_abs = self.drawdown.max_drawdown_abs
-        self.current_idx = max(0, self.total_bars - 1)
-
-        # Repopulate the centralised StatsAccumulator and the legacy mirror
-        # fields together so future migrations to ``self.stats`` (TZ Phase 4)
-        # cannot silently desynchronise after a Quant run — TZ Phase 1 / A5.
-        self.stats.reset()
-        for t in self.trades:
-            self.stats.update(t)
-        self._stats_wins = self.stats.wins
-        self._stats_losses = self.stats.losses
-        self._stats_gross_profit = self.stats.gross_profit
-        self._stats_gross_loss = self.stats.gross_loss
-        self._stats_longs = self.stats.longs
-        self._stats_shorts = self.stats.shorts
-        self._stats_dirty = True
-
-        self.update_stats()
-        self._fire(self.on_simulation_finished)
-        logger.info(
-            "⚡ Vectorised run complete | Trades=%d | Final equity=$%.2f | Peak DD=%.2f%%",
-            len(self.trades),
-            self.equity,
-            self.max_drawdown_pct,
-        )
-        return result
-
-    # ------------------------------------------------------------------
     # Headless Visual execution mode (on_candle without Qt)
     # ------------------------------------------------------------------
-    def run_visual_headless(self, cancel_token=None) -> Optional[VectorizedResult]:
+    def run_visual_headless(self, cancel_token=None) -> Optional[HeadlessRunResult]:
         """Execute the loaded strategy via on_candle without any Qt signals.
 
         Runs the strategy on all candles in a single pass, suppressing all
         Qt notifications (no chart updates, no drawing signals, no trade
         completed signals). Drawings ARE collected in self.drawings but
-        their Qt signals are suppressed. The result is returned as a
-        VectorizedResult, compatible with all GUI tabs.
+        their Qt signals are suppressed. The result contains the same trades,
+        equity curve, skipped-trade list and summary fields the GUI tabs need.
 
         Safe to call from a background thread (ComputeWorker).
         
@@ -1628,11 +1523,11 @@ class BacktestCore:
         # on the main thread. Also do NOT emit any Qt signals from this
         # background thread (no _fire, no update_stats).
 
-        # Materialise result in VectorizedResult format
+        # Materialise result from the step-by-step engine state.
         trades = list(self.trades)
         equity_curve = np.array(self.equity_track, dtype=np.float64)
 
-        # Replay through centralised DrawdownTracker (same as run_vectorized)
+        # Replay through centralised DrawdownTracker.
         self.drawdown.reset(self.initial_equity)
         for eq in self.equity_track:
             self.drawdown.update(float(eq))
@@ -1645,7 +1540,7 @@ class BacktestCore:
         if cancel_token is None or not cancel_token.is_set():
             self.current_idx = max(0, self.total_bars - 1)
 
-        # Repopulate StatsAccumulator (same as run_vectorized)
+        # Repopulate StatsAccumulator.
         self.stats.reset()
         for t in self.trades:
             self.stats.update(t)
@@ -1665,7 +1560,7 @@ class BacktestCore:
             "peak_drawdown_abs": self.drawdown.max_drawdown_abs,
         }
 
-        return VectorizedResult(
+        return HeadlessRunResult(
             trades=trades,
             equity_curve=equity_curve,
             peak_drawdown_pct=self.drawdown.max_drawdown_pct,

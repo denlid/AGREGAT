@@ -7,10 +7,8 @@ private mirror fields for backwards-compat with tests and external code,
 but they're populated from this accumulator on every closed trade.
 
 `DrawdownTracker` is the on-line counterpart for equity-based metrics:
-peak equity, max DD in dollars and percent. Both engines (visual and
-vectorized) feed it the post-trade equity and read the same numbers
-back, so the Stats / Quant / Analytics tabs cannot drift between
-engines. (TZ Phase 4 / Etap 4.1.)
+peak equity, max DD in dollars and percent. The step-by-step engine feeds it
+post-trade equity and the Stats / Analytics tabs read the same numbers back.
 """
 
 from __future__ import annotations
@@ -98,12 +96,10 @@ class StatsAccumulator:
 class DrawdownTracker:
     """Incremental peak / drawdown tracker driven by post-trade equity.
 
-    Both engines call :meth:`update` with the running equity after every
-    closed trade and read the resulting :attr:`max_drawdown_abs` /
-    :attr:`max_drawdown_pct` back. Centralising this here removes the
-    duplicated DD math in ``BacktestCore.execute_close`` and
-    ``vectorized_engine._close``, and guarantees the Stats tab can't
-    silently desync after a Quant run.
+    BacktestCore calls :meth:`update` with the running equity after every
+    closed trade and reads the resulting :attr:`max_drawdown_abs` /
+    :attr:`max_drawdown_pct` back. Centralising this here keeps drawdown math
+    consistent across the app.
 
     Conventions:
       * ``max_drawdown_pct`` is expressed as a percent value in

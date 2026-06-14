@@ -1,15 +1,15 @@
-"""
-Technical indicators — pure NumPy, vectorised, no external dependencies.
+﻿"""
+Technical indicators - pure NumPy, no external dependencies.
 
 Single source of truth for SMA / EMA / ATR / RSI / MACD / Donchian
-channel. Both the visual (on-candle) and vectorised quant engines use
-these exact implementations, so ``run_vectorized`` and ``BacktestCore``
+channel. BacktestCore and strategies use these exact implementations so
+warm-up convention and smoothing windows stay consistent.
 cannot drift on the warm-up convention or smoothing window.
 
 All functions accept a ``np.ndarray`` of ``float64`` price points and
 return a same-length array (or tuple of arrays) where the first
 ``period - 1`` (or equivalent) values are ``NaN``. This makes it safe to
-slice with the latest index — strategies should always check
+slice with the latest index вЂ” strategies should always check
 ``np.isfinite(value)`` before using the result.
 
 The module is import-clean: zero PySide6, zero pandas. Adding it to a
@@ -95,7 +95,7 @@ def atr(
 
     True Range is computed against the *previous* close (the first bar
     falls back to its own range). The series is then smoothed with
-    Wilder's recursive average — equivalent to an EMA with
+    Wilder's recursive average вЂ” equivalent to an EMA with
     ``alpha = 1 / period``. Returns an array of the same length; the
     first ``period - 1`` values are NaN by construction.
     """

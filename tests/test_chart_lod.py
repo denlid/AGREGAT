@@ -311,9 +311,8 @@ def test_viewport_culling_no_view_draws_all_bars(qapp) -> None:
 
 def test_viewport_culling_clips_to_visible_range(qapp) -> None:
     """A narrow view must trigger ``np.searchsorted`` culling. With
-    500 bars at idx 0..499 and a view of [100.0, 200.0] the overscan
-    extends 1 full screen (100 bars) on each side, so we draw bars
-    from 0..300 = ~301 bars, culling the rest.
+    500 bars at idx 0..499 and a view of [100.0, 200.0] the bounded
+    overscan extends 25 bars on each side, so we draw roughly 151 bars.
     """
     from gui.chart_tab.items import CandlestickItem
 
@@ -324,12 +323,11 @@ def test_viewport_culling_clips_to_visible_range(qapp) -> None:
     drawn = item._paint_stats["bars_drawn"]
     culled = item._paint_stats["bars_culled"]
     assert drawn + culled == 500
-    # Overscan = 1 screen (100 bars) on each side of the 100-bar view.
-    # Left overscan clamps to 0, so we draw bars 0..300 = 301 bars.
-    assert 250 <= drawn <= 310, (
-        f"Culling slice off — drew {drawn} bars, expected ~301 with overscan"
+    # Overscan = 25 bars on each side of the 100-bar view.
+    assert 130 <= drawn <= 170, (
+        f"Culling slice off — drew {drawn} bars, expected ~151 with overscan"
     )
-    assert culled >= 190
+    assert culled >= 330
 
 
 def test_viewport_culling_view_wider_than_data_draws_all(qapp) -> None:
@@ -374,13 +372,13 @@ def test_viewport_culling_after_view_change_reflects_new_range(qapp) -> None:
     assert item._paint_stats["bars_drawn"] == 500
 
     # User zooms in: tighten the range and re-run paint generation.
-    # View = [200, 250] = 50 bars wide. Overscan = 50 bars each side.
-    # Total range = [150, 300] = 151 bars.
+    # View = [200, 250] = 50 bars wide. The 20-bar overscan floor gives
+    # a total range of [180, 270] = ~91 bars.
     view._xr = [200.0, 250.0]
     item._gen()
     drawn = item._paint_stats["bars_drawn"]
-    assert 100 <= drawn <= 160, (
-        f"After zoom-in cull window mis-sized — drew {drawn}, expected ~151 with overscan"
+    assert 80 <= drawn <= 100, (
+        f"After zoom-in cull window mis-sized — drew {drawn}, expected ~91 with overscan"
     )
 
 

@@ -10,6 +10,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from gui.chart_tab.items import CandlestickItem
+from gui.chart_tab.tab import ChartTab
 from gui.chart_tab.markers import build_trade_marker_arrays
 
 
@@ -95,6 +96,106 @@ def test_candlestick_visible_slice_uses_viewport_cache(qapp) -> None:
     lo2, hi2 = item._visible_slice()
     assert (lo2, hi2) == (lo1, hi1)
     assert item._paint_stats["viewport_cache_hit"] is True
+
+
+def _candle_arr(n: int = 512) -> np.ndarray:
+    x = np.arange(n, dtype=np.float64)
+    open_ = np.linspace(100.0, 110.0, n)
+    close = open_ + np.sin(x / 13.0)
+    low = np.minimum(open_, close) - 0.5
+    high = np.maximum(open_, close) + 0.5
+    arr = np.column_stack((x, open_, close, low, high))
+    arr.setflags(write=False)
+    return arr
+
+
+def test_candlestick_reuses_picture_when_pan_stays_inside_buffer(qapp) -> None:
+    item = CandlestickItem(max_bars=10_000)
+    item._view = _View(100.0, 200.0)
+    item.set_data(_candle_arr())
+
+    calls = []
+    original_gen = item._gen
+
+    def counted_gen():
+        calls.append(1)
+        return original_gen()
+
+    item._gen = counted_gen
+    item._view._xr = [110.0, 190.0]
+    item._do_range_repaint()
+
+    assert calls == []
+    assert item._paint_stats["viewport_cache_hit"] is True
+
+
+def test_candlestick_rebuilds_picture_when_pan_exits_buffer(qapp) -> None:
+    item = CandlestickItem(max_bars=10_000)
+    item._view = _View(100.0, 200.0)
+    item.set_data(_candle_arr())
+
+    calls = []
+    original_gen = item._gen
+
+    def counted_gen():
+        calls.append(1)
+        return original_gen()
+
+    item._gen = counted_gen
+    item._view._xr = [180.0, 280.0]
+    item._do_range_repaint()
+
+    assert calls == [1]
+
+
+def test_candlestick_rebuilds_picture_when_zoom_changes_width(qapp) -> None:
+    item = CandlestickItem(max_bars=10_000)
+    item._view = _View(100.0, 200.0)
+    item.set_data(_candle_arr())
+
+    calls = []
+    original_gen = item._gen
+
+    def counted_gen():
+        calls.append(1)
+        return original_gen()
+
+    item._gen = counted_gen
+    item._view._xr = [120.0, 160.0]
+    item._do_range_repaint()
+
+    assert calls == [1]
+
+
+def test_chart_range_sync_coalesces_rapid_range_changes(qapp) -> None:
+    engine = _Engine(_df())
+    chart = ChartTab(engine)
+    chart.redraw_chart()
+
+    emitted = []
+    chart.sigTimeRangeChanged.connect(lambda t1, t2: emitted.append((t1, t2)))
+
+    class Pager:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def ensure_visible(self, t1, t2):
+            self.calls.append((t1, t2))
+
+    pager = Pager()
+    chart._data_pager = pager
+
+    chart._on_my_range_changed(None, [[0.0, 10.0], [0.0, 1.0]])
+    chart._on_my_range_changed(None, [[20.0, 30.0], [0.0, 1.0]])
+
+    assert emitted == []
+    assert pager.calls == []
+
+    chart._flush_range_changed()
+
+    assert len(emitted) == 1
+    assert len(pager.calls) == 1
+    assert emitted[0][0] < emitted[0][1]
 
 
 def test_trade_marker_arrays_build_from_visible_rt_window(qapp) -> None:

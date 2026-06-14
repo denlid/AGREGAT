@@ -1,4 +1,4 @@
-"""Engine optimization sub-package — grid search, walk-forward."""
+"""Engine optimization sub-package: step-engine optimizers and walk-forward."""
 
 from engine.optimization.optimizer import (
     OptimizationResult,
@@ -7,10 +7,6 @@ from engine.optimization.optimizer import (
     random_search,
 )
 from engine.optimization.shared_arrays import SharedArrayBundle
-from engine.optimization.vectorized_runner import (
-    VectorizedRunner,
-    make_vectorized_runner,
-)
 
 __all__ = [
     "OptimizationRun",
@@ -18,6 +14,4 @@ __all__ = [
     "grid_search",
     "random_search",
     "SharedArrayBundle",
-    "VectorizedRunner",
-    "make_vectorized_runner",
 ]
