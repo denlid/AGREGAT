@@ -38,10 +38,10 @@ from engine.models.models import (
     PendingOrder,
     Position,
     Trade,
-    get_session,
-    is_eod,
-    is_trading_hours,
-    is_weekend,
+    get_session_from_parts,
+    is_eod_from_parts,
+    is_trading_hours_from_parts,
+    is_weekend_from_weekday,
 )
 from engine.analytics.stats_accumulator import DrawdownTracker, StatsAccumulator
 from engine.data.tf_aggregator import TimeframeAggregator
@@ -199,6 +199,36 @@ class BacktestCore:
         cols["close"] = self._close
         cols["volume"] = self._volume
         cols["time"] = self._time
+        self._refresh_time_parts()
+
+    def _refresh_time_parts(self) -> None:
+        """Precompute strategy/session time fields outside the bar loop."""
+        n = self._time.shape[0]
+        if n == 0:
+            self._minute_of_day = np.empty(0, dtype=np.int16)
+            self._weekday = np.empty(0, dtype=np.int8)
+            return
+
+        session_tz = getattr(self.asset_config, "session_tz", None)
+        if session_tz:
+            try:
+                idx = pd.DatetimeIndex(self._time).tz_localize("UTC").tz_convert(session_tz)
+                self._minute_of_day = (
+                    idx.hour.to_numpy(dtype=np.int16, copy=False) * 60
+                    + idx.minute.to_numpy(dtype=np.int16, copy=False)
+                ).astype(np.int16, copy=False)
+                self._weekday = idx.weekday.to_numpy(dtype=np.int8, copy=False)
+                return
+            except Exception:
+                logger.warning(
+                    "Failed to precompute time parts for session_tz=%r; using raw timestamps",
+                    session_tz,
+                )
+
+        minutes = self._time.astype("datetime64[m]").astype(np.int64, copy=False)
+        days = self._time.astype("datetime64[D]").astype(np.int64, copy=False)
+        self._minute_of_day = (minutes % (24 * 60)).astype(np.int16, copy=False)
+        self._weekday = ((days + 3) % 7).astype(np.int8, copy=False)
 
     @property
     def total_bars(self) -> int:
@@ -270,6 +300,8 @@ class BacktestCore:
         self._close = np.empty(0, dtype=price_dtype)
         self._volume = np.empty(0, dtype=price_dtype)
         self._time = np.empty(0, dtype="datetime64[ns]")
+        self._minute_of_day = np.empty(0, dtype=np.int16)
+        self._weekday = np.empty(0, dtype=np.int8)
 
         self.current_idx = -1
         # Strategy-facing zero-future data window. Re-bound in
@@ -433,6 +465,7 @@ class BacktestCore:
         if "eod_close" in c:
             kwargs["eod_close"] = _parse_time(c["eod_close"], _time(22, 0))
         self.asset_config = AssetConfig(**kwargs)
+        self._refresh_time_parts()
         logger.info(
             f"Asset config loaded: {name} "
             f"(PV={c['point_value']}, Buffer={c['buffer']}, Currency={c['currency']})"
@@ -743,16 +776,9 @@ class BacktestCore:
 
         # 4. EOD close — gated by ``AssetConfig.enforce_eod_close``.
         if self.position is not None and self.asset_config.enforce_eod_close:
-            ct = self._time[next_idx]
             asset = self.asset_config
             try:
-                if ct is not None and hasattr(ct, "hour") and hasattr(ct, "minute"):
-                    eod = asset.eod_close
-                    if (ct.hour, ct.minute) >= (eod.hour, eod.minute):
-                        self.execute_close(
-                            reason="EOD", exit_candle=self.candle_at(next_idx)
-                        )
-                elif is_eod(ct, asset):
+                if is_eod_from_parts(int(self._minute_of_day[next_idx]), asset):
                     self.execute_close(
                         reason="EOD", exit_candle=self.candle_at(next_idx)
                     )
@@ -761,7 +787,7 @@ class BacktestCore:
 
         # 5. Weekend close
         if self.position is not None and self.asset_config.close_on_weekend:
-            if is_weekend(self._time[next_idx]):
+            if is_weekend_from_weekday(int(self._weekday[next_idx])):
                 self.execute_close(
                     reason="WEEKEND", exit_candle=self.candle_at(next_idx)
                 )
@@ -927,12 +953,16 @@ class BacktestCore:
         # :pyattr:`skipped_trades`.
         candle_time = candle.get("time")
         asset = self.asset_config
+        minute_of_day = int(self._minute_of_day[self.current_idx])
+        weekday = int(self._weekday[self.current_idx])
         skip_reason: Optional[str] = None
-        if asset.enforce_trading_hours and not is_trading_hours(candle_time, asset):
+        if asset.enforce_trading_hours and not is_trading_hours_from_parts(
+            minute_of_day, weekday, asset
+        ):
             skip_reason = "TRADING_HOURS"
-        elif asset.close_on_weekend and is_weekend(candle_time, asset):
+        elif asset.close_on_weekend and is_weekend_from_weekday(weekday):
             skip_reason = "WEEKEND"
-        elif asset.enforce_eod_close and is_eod(candle_time, asset):
+        elif asset.enforce_eod_close and is_eod_from_parts(minute_of_day, asset):
             skip_reason = "EOD"
 
         if skip_reason is not None:
@@ -1316,21 +1346,24 @@ class BacktestCore:
             except (ValueError, TypeError):
                 duration = 0
 
-        session = get_session(pos.entry_time, asset=self.asset_config)
+        entry_weekday = -1
+        entry_minute = -1
+        if 0 <= pos.entry_index < self._weekday.shape[0]:
+            entry_weekday = int(self._weekday[pos.entry_index])
+            entry_minute = int(self._minute_of_day[pos.entry_index])
+        session = get_session_from_parts(
+            entry_minute, entry_weekday, asset=self.asset_config
+        )
 
         # Sprint 4.2 cross-cuts — derive day-of-week & hour-of-day from
         # the entry timestamp once, here, so downstream consumers don't
         # have to reparse strings.
         dow_label = "Unknown"
-        hod_value = -1
-        try:
-            entry_ts = pd.Timestamp(pos.entry_time)
+        if 0 <= entry_weekday <= 6:
             dow_label = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][
-                int(entry_ts.weekday())
+                entry_weekday
             ]
-            hod_value = int(entry_ts.hour)
-        except (TypeError, ValueError):
-            pass
+        hod_value = entry_minute // 60 if entry_minute >= 0 else -1
 
         # Signed R-multiple
         rr: Optional[float] = None

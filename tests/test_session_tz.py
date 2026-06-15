@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import time
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -14,6 +15,7 @@ from engine.models.models import (
     is_eod,
     is_trading_hours,
 )
+from engine.core.backtest_core import BacktestCore
 
 
 def _asset(tz: str | None = None, sessions=None) -> AssetConfig:
@@ -42,6 +44,32 @@ def test_session_tz_shifts_attribution_utc_to_kyiv_summer() -> None:
     ts = pd.Timestamp("2024-07-03 06:00")  # Wednesday in EEST (UTC+3)
     asset = _asset(tz="Europe/Kyiv")
     assert get_session(ts, asset=asset) == "Frankfurt"
+
+
+def test_np_datetime64_with_session_tz_keeps_timezone_semantics() -> None:
+    ts = np.datetime64("2024-07-03T06:00:00")
+    asset = _asset(tz="Europe/Kyiv")
+    assert get_session(ts, asset=asset) == "Frankfurt"
+
+
+def test_backtest_core_precomputes_asset_local_time_parts() -> None:
+    core = BacktestCore()
+    core.asset_config = _asset(tz="Europe/Kyiv")
+    df = pd.DataFrame(
+        {
+            "time": pd.to_datetime(["2024-07-03 06:00", "2024-07-03 19:00"]),
+            "open": [1.0, 1.0],
+            "high": [1.0, 1.0],
+            "low": [1.0, 1.0],
+            "close": [1.0, 1.0],
+            "volume": [1.0, 1.0],
+        }
+    )
+
+    core.load_data(df)
+
+    assert core._minute_of_day.tolist() == [9 * 60, 22 * 60]
+    assert core._weekday.tolist() == [2, 2]
 
 
 def test_session_tz_shifts_attribution_winter_offset() -> None:

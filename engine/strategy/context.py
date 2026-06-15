@@ -20,7 +20,8 @@ from engine.models.models import (
     PendingOrder,
     Position,
     get_session,
-    is_trading_hours,
+    get_session_from_parts,
+    is_trading_hours_from_parts,
 )
 
 logger = logging.getLogger("StrategyTester.engine.context")
@@ -253,6 +254,33 @@ class Context:
     def completed_tfs(self) -> Dict[str, bool]:
         return self._completed_tfs
 
+    @property
+    def minute_of_day(self) -> int:
+        idx = int(getattr(self._engine, "current_idx", -1))
+        minutes = getattr(self._engine, "_minute_of_day", None)
+        if minutes is None or idx < 0 or idx >= len(minutes):
+            return -1
+        return int(minutes[idx])
+
+    @property
+    def hour(self) -> int:
+        minute = self.minute_of_day
+        return minute // 60 if minute >= 0 else -1
+
+    @property
+    def weekday(self) -> int:
+        idx = int(getattr(self._engine, "current_idx", -1))
+        weekdays = getattr(self._engine, "_weekday", None)
+        if weekdays is None or idx < 0 or idx >= len(weekdays):
+            return -1
+        return int(weekdays[idx])
+
+    @property
+    def session(self) -> str:
+        return get_session_from_parts(
+            self.minute_of_day, self.weekday, self._engine.asset_config
+        )
+
     # --- TF Data Access (Zero-Future Safe) ---
     def get_tf(self, tf: str) -> Any:
         """Read-only NumPy-backed view of completed HTF bars.
@@ -471,13 +499,15 @@ class Context:
     # --- Session & Risk ---
     def get_session(self, time: Any = None) -> str:
         """Get session name for a given time (default: current candle time)."""
-        t = time if time is not None else self.candle.get("time", "")
-        return get_session(t)
+        if time is None:
+            return self.session
+        return get_session(time, self._engine.asset_config)
 
     def is_trading_hours(self) -> bool:
         """Check if current candle is within the asset's trading window."""
-        t = self.candle.get("time", "")
-        return is_trading_hours(t, self._engine.asset_config)
+        return is_trading_hours_from_parts(
+            self.minute_of_day, self.weekday, self._engine.asset_config
+        )
 
     DEFAULT_ABSOLUTE_MAX_LOTS: float = 100.0
 

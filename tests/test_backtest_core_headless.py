@@ -89,6 +89,22 @@ class _LogEveryCandle(Strategy):
         ctx.log("tick")
 
 
+class _ReadTimeParts(Strategy):
+    def __init__(self) -> None:
+        self.rows: list[tuple[int, int, int, str, bool]] = []
+
+    def on_candle(self, ctx) -> None:  # type: ignore[override]
+        self.rows.append(
+            (
+                ctx.minute_of_day,
+                ctx.hour,
+                ctx.weekday,
+                ctx.get_session(),
+                ctx.is_trading_hours(),
+            )
+        )
+
+
 def _df() -> pd.DataFrame:
     rows = [
         ("2024-01-02 10:00", 100, 105, 100, 102),
@@ -119,6 +135,30 @@ def _make_core() -> BacktestCore:
     core.equity = core.initial_equity
     core.max_equity = core.initial_equity
     return core
+
+
+def test_strategy_time_helpers_use_precomputed_parts(monkeypatch):
+    import engine.strategy.context as context_mod
+
+    def _unexpected_parse(*args, **kwargs):
+        raise AssertionError("timestamp parser should not run for current-bar helpers")
+
+    core = _make_core()
+    core.load_data(_df())
+    strategy = _ReadTimeParts()
+    core.load_strategy(strategy)
+
+    monkeypatch.setattr(context_mod, "get_session", _unexpected_parse)
+    result = core.run_visual_headless()
+
+    assert result is not None
+    active = core.strategy
+    assert isinstance(active, _ReadTimeParts)
+    assert active.rows == [
+        (600, 10, 1, "London_OTT", True),
+        (601, 10, 1, "London_OTT", True),
+        (602, 10, 1, "London_OTT", True),
+    ]
 
 
 def test_core_runs_a_backtest_without_qcoreapplication():

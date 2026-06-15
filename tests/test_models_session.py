@@ -2,6 +2,7 @@
 
 from datetime import datetime, time, timedelta
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -60,6 +61,19 @@ def test_get_session_off_hours_midnight_wrap():
     assert get_session(time(0, 30)) == "Off_Hours"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        np.datetime64("2024-03-13T00:30:00"),
+        np.datetime64("2024-03-13T09:00:00"),
+        np.datetime64("2024-03-13T15:30:00"),
+        np.datetime64("2024-03-16T14:00:00"),
+    ],
+)
+def test_np_datetime64_matches_timestamp_session_lookup(value):
+    assert get_session(value) == get_session(pd.Timestamp(value))
+
+
 def test_sessions_table_is_consistent():
     # Every session should be a (name, time, time) tuple
     for entry in SESSIONS:
@@ -77,6 +91,18 @@ def test_default_trading_hours_block_outside_window():
     assert is_trading_hours(WED + timedelta(hours=8, minutes=59)) is False
     assert is_trading_hours(WED + timedelta(hours=18)) is False
     assert is_trading_hours(WED + timedelta(hours=22)) is False
+
+
+def test_np_datetime64_matches_timestamp_trading_hours():
+    values = [
+        np.datetime64("2024-03-13T08:59:00"),
+        np.datetime64("2024-03-13T09:00:00"),
+        np.datetime64("2024-03-13T17:59:00"),
+        np.datetime64("2024-03-13T18:00:00"),
+        np.datetime64("2024-03-16T12:00:00"),
+    ]
+    for value in values:
+        assert is_trading_hours(value) is is_trading_hours(pd.Timestamp(value))
 
 
 def test_trading_hours_blocked_on_weekend_when_close_on_weekend():
@@ -131,6 +157,16 @@ def test_is_eod_default_22_00():
     assert is_eod(WED + timedelta(hours=23)) is True
 
 
+def test_np_datetime64_matches_timestamp_eod():
+    values = [
+        np.datetime64("2024-03-13T21:59:00"),
+        np.datetime64("2024-03-13T22:00:00"),
+        np.datetime64("2024-03-13T23:00:00"),
+    ]
+    for value in values:
+        assert is_eod(value) is is_eod(pd.Timestamp(value))
+
+
 def test_is_eod_uses_asset_eod_when_provided():
     asset = AssetConfig(
         name="TEST",
@@ -153,6 +189,17 @@ def test_is_weekend_basic():
     assert is_weekend(pd.Timestamp("2024-03-17 12:00")) is True  # Sun
     assert is_weekend(pd.Timestamp("2024-03-13 12:00")) is False  # Wed
     assert is_weekend(time(12, 0)) is False  # no weekday info
+
+
+def test_np_datetime64_matches_timestamp_weekend():
+    values = [
+        np.datetime64("2024-03-13T12:00:00"),
+        np.datetime64("2024-03-16T12:00:00"),
+        np.datetime64("2024-03-17T12:00:00"),
+        np.datetime64("2024-03-18T00:00:00"),
+    ]
+    for value in values:
+        assert is_weekend(value) is is_weekend(pd.Timestamp(value))
 
 
 def test_is_weekend_handles_invalid_input_gracefully():

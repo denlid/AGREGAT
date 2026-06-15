@@ -2,7 +2,7 @@
 Engine Models вЂ” Data classes for positions, trades, orders, assets, and sessions.
 """
 
-from datetime import time
+from datetime import date, datetime, time
 from typing import Any, Optional
 
 import numpy as np
@@ -348,6 +348,23 @@ TRADING_HOURS_START = time(9, 0)
 TRADING_HOURS_END = time(18, 0)
 EOD_CLOSE_TIME = time(22, 0)
 
+_DT64_TO_MINUTES = {
+    "ns": 60_000_000_000,
+    "us": 60_000_000,
+    "ms": 60_000,
+    "s": 60,
+    "m": 1,
+}
+_DT64_TO_DAYS = {
+    "ns": 86_400_000_000_000,
+    "us": 86_400_000_000,
+    "ms": 86_400_000,
+    "s": 86_400,
+    "m": 1_440,
+    "h": 24,
+    "D": 1,
+}
+
 
 def _to_time_and_weekday(
     t: Any, asset: Optional[AssetConfig] = None
@@ -365,6 +382,29 @@ def _to_time_and_weekday(
     """
     if isinstance(t, time):
         return t, None
+    if isinstance(t, np.datetime64) and not (
+        asset is not None and getattr(asset, "session_tz", None)
+    ):
+        try:
+            if np.isnat(t):
+                return None, None
+            item = t.item()
+            if isinstance(item, datetime):
+                return item.time(), int(item.weekday())
+            if isinstance(item, date):
+                return time(0, 0), int(item.weekday())
+            unit, step = np.datetime_data(t.dtype)
+            if step != 1 or unit not in _DT64_TO_MINUTES or unit not in _DT64_TO_DAYS:
+                raise ValueError
+            raw = int(item if isinstance(item, int) else t.view("int64"))
+            minutes_since_epoch = raw // _DT64_TO_MINUTES[unit]
+            days_since_epoch = raw // _DT64_TO_DAYS[unit]
+            minute_of_day = minutes_since_epoch % (24 * 60)
+            # 1970-01-01 was Thursday; Python/pandas weekday uses Monday=0.
+            weekday = (days_since_epoch + 3) % 7
+            return time(minute_of_day // 60, minute_of_day % 60), weekday
+        except (OverflowError, TypeError, ValueError):
+            pass
     try:
         ts = pd.Timestamp(t)
         if asset is not None and getattr(asset, "session_tz", None):
@@ -386,6 +426,71 @@ def _to_time_and_weekday(
         return None, None
 
 
+def _time_to_minute(value: time) -> int:
+    return value.hour * 60 + value.minute
+
+
+def get_session_from_parts(
+    minute_of_day: int,
+    weekday: int,
+    asset: Optional[AssetConfig] = None,
+) -> str:
+    """Return session from precomputed minute-of-day and weekday.
+
+    This is the engine hot-path API. Timestamp parsing belongs at load time;
+    per-bar session checks should only compare small integers.
+    """
+    if minute_of_day < 0:
+        return "Off_Hours"
+    if weekday >= 5:
+        return "Weekend"
+
+    sessions = (
+        asset.sessions
+        if asset is not None and getattr(asset, "sessions", None)
+        else SESSIONS
+    )
+    for name, start, end in sessions:
+        start_min = _time_to_minute(start)
+        end_min = _time_to_minute(end)
+        if start_min <= end_min:
+            if start_min <= minute_of_day < end_min:
+                return name
+        else:
+            if minute_of_day >= start_min or minute_of_day < end_min:
+                return name
+    return "Off_Hours"
+
+
+def is_trading_hours_from_parts(
+    minute_of_day: int,
+    weekday: int,
+    asset: Optional[AssetConfig] = None,
+) -> bool:
+    if minute_of_day < 0:
+        return False
+    start = asset.trading_hours_start if asset is not None else TRADING_HOURS_START
+    end = asset.trading_hours_end if asset is not None else TRADING_HOURS_END
+    weekend_block = (asset is None) or asset.close_on_weekend
+    if weekend_block and weekday >= 5:
+        return False
+    return _time_to_minute(start) <= minute_of_day < _time_to_minute(end)
+
+
+def is_eod_from_parts(
+    minute_of_day: int,
+    asset: Optional[AssetConfig] = None,
+) -> bool:
+    if minute_of_day < 0:
+        return False
+    eod = asset.eod_close if asset is not None else EOD_CLOSE_TIME
+    return minute_of_day >= _time_to_minute(eod)
+
+
+def is_weekend_from_weekday(weekday: int) -> bool:
+    return weekday >= 5
+
+
 def get_session(t: Any, asset: Optional[AssetConfig] = None) -> str:
     """Get session name for a given datetime / time / Timestamp / str.
 
@@ -399,22 +504,7 @@ def get_session(t: Any, asset: Optional[AssetConfig] = None) -> str:
     tt, wd = _to_time_and_weekday(t, asset=asset)
     if tt is None:
         return "Off_Hours"
-    if wd is not None and wd >= 5:
-        return "Weekend"
-
-    sessions = (
-        asset.sessions
-        if asset is not None and getattr(asset, "sessions", None)
-        else SESSIONS
-    )
-    for name, start, end in sessions:
-        if start <= end:
-            if start <= tt < end:
-                return name
-        else:  # Wraps midnight (Off_Hours: 20:00 в†’ 02:00)
-            if tt >= start or tt < end:
-                return name
-    return "Off_Hours"
+    return get_session_from_parts(_time_to_minute(tt), -1 if wd is None else wd, asset)
 
 
 def is_trading_hours(t: Any, asset: Optional[AssetConfig] = None) -> bool:
@@ -426,12 +516,9 @@ def is_trading_hours(t: Any, asset: Optional[AssetConfig] = None) -> bool:
     tt, wd = _to_time_and_weekday(t, asset=asset)
     if tt is None:
         return False
-    start = asset.trading_hours_start if asset is not None else TRADING_HOURS_START
-    end = asset.trading_hours_end if asset is not None else TRADING_HOURS_END
-    weekend_block = (asset is None) or asset.close_on_weekend
-    if weekend_block and wd is not None and wd >= 5:
-        return False
-    return start <= tt < end
+    return is_trading_hours_from_parts(
+        _time_to_minute(tt), -1 if wd is None else wd, asset
+    )
 
 
 def is_eod(t: Any, asset: Optional[AssetConfig] = None) -> bool:
@@ -439,14 +526,13 @@ def is_eod(t: Any, asset: Optional[AssetConfig] = None) -> bool:
     tt, _ = _to_time_and_weekday(t, asset=asset)
     if tt is None:
         return False
-    eod = asset.eod_close if asset is not None else EOD_CLOSE_TIME
-    return tt >= eod
+    return is_eod_from_parts(_time_to_minute(tt), asset)
 
 
 def is_weekend(t: Any, asset: Optional[AssetConfig] = None) -> bool:
     """Check if timestamp falls on Saturday or Sunday."""
     _, wd = _to_time_and_weekday(t, asset=asset)
-    return wd is not None and wd >= 5
+    return wd is not None and is_weekend_from_weekday(wd)
 
 
 __all__ = [
@@ -458,6 +544,10 @@ __all__ = [
     "TRADING_HOURS_START",
     "TRADING_HOURS_END",
     "EOD_CLOSE_TIME",
+    "get_session_from_parts",
+    "is_trading_hours_from_parts",
+    "is_eod_from_parts",
+    "is_weekend_from_weekday",
     "get_session",
     "is_trading_hours",
     "is_eod",

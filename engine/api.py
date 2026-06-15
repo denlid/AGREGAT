@@ -124,6 +124,22 @@ class _Context:
         engine = self._ctx._engine
         return engine._time[engine.current_idx]
 
+    @property
+    def minute_of_day(self) -> int:
+        return self._ctx.minute_of_day
+
+    @property
+    def hour(self) -> int:
+        return self._ctx.hour
+
+    @property
+    def weekday(self) -> int:
+        return self._ctx.weekday
+
+    @property
+    def session(self) -> str:
+        return self._ctx.session
+
     # ── 1m arrays ──
     @property
     def close_arr(self) -> np.ndarray:

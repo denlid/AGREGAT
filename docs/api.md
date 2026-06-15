@@ -149,9 +149,17 @@ c.high        # float — last 1m high
 c.low         # float — last 1m low
 c.open_       # float — last 1m open   (open_ because "open" is a Python builtin)
 c.volume      # float — last 1m volume
-c.time        # datetime — current bar timestamp
+c.time        # np.datetime64 — current bar timestamp
+c.minute_of_day  # int — current bar minute, 0..1439
+c.hour           # int — current bar hour, 0..23
+c.weekday        # int — Monday=0 ... Sunday=6
+c.session        # str — current session name ("London_OTT", "Weekend", ...)
 c.candle      # dict — current 1m bar as dict: {time, open, high, low, close, volume}
 ```
+
+Use `c.hour`, `c.weekday`, `c.minute_of_day`, and `c.session` for strategy
+time logic. They are precomputed by the engine and do not allocate pandas
+timestamps in the bar loop.
 
 ### Arrays (np.ndarray — pass to indicators)
 
@@ -161,7 +169,7 @@ c.high_arr        # np.ndarray — all 1m highs
 c.low_arr         # np.ndarray — all 1m lows
 c.open_arr        # np.ndarray — all 1m opens
 c.volume_arr      # np.ndarray — all 1m volumes
-c.time_arr        # np.ndarray — all 1m timestamps
+c.time_arr        # np.ndarray[datetime64] — all 1m timestamps
 
 # Access previous bars:
 c.close_arr[-1]   # last close (same as c.close)
@@ -367,7 +375,8 @@ def _(c):
 | Array of closes | `c.close_arr` (np.ndarray) |
 | Last HTF close | `c.close_htf` (float — inside on_15m_close) |
 | HTF array | `c.close_htf_arr` (np.ndarray) |
-| Bar timestamp | `c.time` (datetime), `c.time_arr[-2]` (previous) |
+| Bar timestamp | `c.time` (`np.datetime64`), `c.time_arr[-2]` (previous) |
+| Bar time parts | `c.hour`, `c.weekday`, `c.minute_of_day`, `c.session` |
 | Crossover | `crossover(ema(c.close_arr, 12), ema(c.close_arr, 26))` |
 | Position | `c.position` |
 | Equity | `c.equity` |
@@ -388,6 +397,9 @@ def _(c):
   HTF callbacks (`on_15m_close`, `on_1h_close`, `on_1d_close`) for these actions,
   or use the class-based `engine.strategy.context.Strategy` API when management
   must run every bar while a position is open.
+- Do not convert `c.time` with `pd.Timestamp(...)` on every bar just to read
+  hour, weekday, or session. Use the precomputed fields (`c.hour`,
+  `c.weekday`, `c.minute_of_day`, `c.session`) instead.
 
 ---
 
