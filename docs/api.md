@@ -11,6 +11,40 @@ Every strategy is a plain Python file. No classes. No `ctx`. No boilerplate.
 
 ---
 
+## Current execution model
+
+`@strategy.on_candle()` runs on every processed candle, including while entries
+are already open. Simple strategies can still use `strategy.long()` and
+`strategy.short()`, but Pine-like or multi-entry strategies should use explicit
+entry IDs:
+
+```python
+strategy = Strategy(
+    name="GER40",
+    pyramiding=20,
+    process_orders_on_close=True,
+)
+
+@strategy.on_candle()
+def _(c):
+    if c.position_size == 0 and long_signal:
+        strategy.entry("L1", "long", qty=1.0, sl=sl, tp=tp)
+
+    strategy.exit("x_L1", from_entry="L1", stop=sl, limit=tp)
+
+    if eod:
+        strategy.close_all(reason="EOD")
+```
+
+State fields:
+
+- `c.positions` - open entry legs keyed by entry ID.
+- `c.position_size` - signed aggregate size, positive for long and negative for short.
+- `c.position_avg_price` - volume-weighted average open price.
+- `c.opentrades` / `c.closedtrades` - open and closed leg counts.
+
+---
+
 ## Minimal strategy (10 lines)
 
 ```python
@@ -378,25 +412,21 @@ def _(c):
 | Bar timestamp | `c.time` (`np.datetime64`), `c.time_arr[-2]` (previous) |
 | Bar time parts | `c.hour`, `c.weekday`, `c.minute_of_day`, `c.session` |
 | Crossover | `crossover(ema(c.close_arr, 12), ema(c.close_arr, 26))` |
-| Position | `c.position` |
+| Positions | `c.positions`, `c.position_size`, `c.position_avg_price` |
 | Equity | `c.equity` |
 | SMA, EMA, RSI, ATR | `sma(c.close_arr, 20)`, `ema(c.close_arr, 20)` |
 | Param access | `strategy.period` (auto-cast) |
 
 ---
 
-## Runtime caveats
+## Runtime notes
 
-- Compiled `@strategy.on_candle()` callbacks are entry callbacks. They are not
-  called while a position is already open.
-- Use `on_candle` to detect and queue new entries. Do not rely on it for
-  trailing stops, manual exits, or other per-bar open-position management.
-- Management actions such as `strategy.close()`, `strategy.update_sl()`,
-  `strategy.update_tp()`, and `strategy.move_sl_to_be()` are available only when
-  the callback itself is invoked. In declarative `engine.api` strategies, use
-  HTF callbacks (`on_15m_close`, `on_1h_close`, `on_1d_close`) for these actions,
-  or use the class-based `engine.strategy.context.Strategy` API when management
-  must run every bar while a position is open.
+- Compiled `@strategy.on_candle()` callbacks run every bar, including while
+  positions are open.
+- Use `strategy.entry()` for stable entry IDs and `strategy.exit()` with
+  `from_entry` for per-entry stops/limits.
+- `process_orders_on_close=True` fills market entries/closes on the current
+  bar close; otherwise they fill on the next bar open.
 - Do not convert `c.time` with `pd.Timestamp(...)` on every bar just to read
   hour, weekday, or session. Use the precomputed fields (`c.hour`,
   `c.weekday`, `c.minute_of_day`, `c.session`) instead.
@@ -447,6 +477,6 @@ if c.close_arr[-1] > c.close_arr[-2]:
 3. **Arrays end with `_arr`** — `c.close_arr`, NOT `c.close.arr`
 4. **SL/TP are absolute prices** — NOT distances, NOT percentages
 5. **Points ≠ price** — `calculate_lot` takes points, `update_sl` takes price
-6. **One position at a time** — `strategy.long()`/`strategy.short()` check automatically
+6. **Use entry IDs for multi-entry logic** — `strategy.entry()` plus `strategy.exit(..., from_entry=...)`
 7. **No hardcoded periods** — use `strategy.period` instead of literal numbers
 8. **Always use `_arr` for indicators** — `sma(c.close_arr, 20)`, not `sma(c.close, 20)`

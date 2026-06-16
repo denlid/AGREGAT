@@ -25,26 +25,29 @@ legacy/class API.
 1. Output a complete strategy file, not a fragment.
 2. Do not define a class. Do not inherit from `engine.strategy.context.Strategy`.
 3. Do not use `ctx`; callback argument is `c`.
-4. Actions are methods on `strategy`: `strategy.long()`, `strategy.short()`,
-   `strategy.close()`, `strategy.update_sl()`, `strategy.update_tp()`,
-   `strategy.move_sl_to_be()`, `strategy.log()`.
+4. Actions are methods on `strategy`: `strategy.entry()`, `strategy.exit()`,
+   `strategy.close()`, `strategy.close_all()`, `strategy.cancel()`,
+   `strategy.long()`, `strategy.short()`, `strategy.log()`.
 5. Market data comes from `c`: `c.close`, `c.high`, `c.low`, `c.open_`,
    `c.close_arr`, `c.high_arr`, `c.low_arr`, `c.open_arr`.
 6. Indicator functions take arrays, not scalars: use `ema(c.close_arr, 20)`,
    never `ema(c.close, 20)`.
-7. `strategy.long()` and `strategy.short()` take absolute SL/TP prices, not
-   distances or percentages.
+7. `strategy.entry()` takes `id`, `"long"`/`"short"`, and `qty` or `risk`.
+   `strategy.exit()` takes `id`, `from_entry`, and absolute `stop`/`limit`.
+   `strategy.long()` and `strategy.short()` are simple aliases that also take
+   absolute SL/TP prices.
 8. Use `Param(...)` with keyword arguments when GUI bounds/labels are needed.
 9. Access parameters as `strategy.param_name`, not `self.params[...]`.
 10. Add enough length guards before indexing `[-2]`, rolling windows, HTF arrays,
     or multi-bar patterns.
 
-## Current runtime caveat
+## Runtime model
 
-Compiled `@strategy.on_candle()` is skipped while a position is already open.
-Use `on_candle` for entry detection. For open-position management, prefer HTF
-callbacks (`on_15m_close`, `on_1h_close`, `on_1d_close`) or explicitly mention
-that per-bar management requires the class-based API.
+`@strategy.on_candle()` runs on every processed candle, including while
+positions are open. Use `c.position_size`, `c.position_avg_price`,
+`c.opentrades`, and `c.positions` for open-position state. Use
+`strategy.exit(..., from_entry=...)` for per-entry SL/TP management and
+`strategy.close_all()` for EOD/manual flat logic.
 
 ## Output format
 
@@ -64,4 +67,4 @@ If the user asks a question that does not require code, answer in plain text.
 - No `class`, no `self`, no `ctx`.
 - All indicators receive arrays ending in `_arr`.
 - Every `[-2]` access has a length guard.
-- Entry SL/TP are absolute prices around `c.close`.
+- Entry/exit SL/TP are absolute prices around `c.close`.

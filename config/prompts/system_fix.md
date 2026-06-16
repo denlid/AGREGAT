@@ -46,6 +46,11 @@ the error is caused by mixing APIs.
   - short: `sl > c.close`, `tp < c.close`
 - Treating SL/TP as distances in `strategy.long()` or `strategy.short()`.
   They must be absolute prices.
+- Using `c.position` as the main state in new declarative strategies; prefer
+  `c.position_size`, `c.opentrades`, and `c.positions`.
+- Managing pyramiding with repeated `strategy.long()` calls when separate
+  entry IDs are needed; prefer `strategy.entry(id, direction, ...)` and
+  `strategy.exit(id, from_entry=...)`.
 
 ## Response format
 

@@ -13,6 +13,8 @@ from engine.core.indicators import ema, sma, atr
 
 strategy = Strategy(
     name="Human Readable Name",
+    pyramiding=1,
+    process_orders_on_close=False,
     period=Param(name="period", label="Period", kind="int", default=20, min=2, max=400, step=1),
     risk_pct=Param(name="risk_pct", label="Risk %", kind="float", default=1.0, min=0.1, max=10.0, step=0.1),
 )
@@ -34,7 +36,10 @@ def _(c):
 - MUST include enough data-length guards before using rolling indicators,
   `[-2]`, HTF arrays, or multi-bar patterns.
 - MUST use arrays for indicators, for example `ema(c.close_arr, strategy.period)`.
-- MUST use absolute SL/TP prices in `strategy.long()` and `strategy.short()`.
+- MUST use absolute SL/TP prices in `strategy.entry()`, `strategy.exit()`,
+  `strategy.long()`, and `strategy.short()`.
+- MUST use `c.position_size`, `c.opentrades`, or `c.positions` for position
+  state in new strategies.
 - SHOULD include `risk_pct` and basic SL/TP parameters unless the user
   explicitly asks otherwise.
 - SHOULD keep the strategy simple and implement only what the user requested.
@@ -44,7 +49,8 @@ def _(c):
 ```python
 sl = c.close - strategy.sl_points * c.asset.tick_size
 tp = c.close + strategy.tp_points * c.asset.tick_size
-strategy.long(sl=sl, tp=tp, risk=strategy.risk_pct, tag="LONG")
+strategy.entry("LONG", "long", risk=strategy.risk_pct, sl=sl, tp=tp)
+strategy.exit("x_LONG", from_entry="LONG", stop=sl, limit=tp)
 ```
 
 For shorts, SL is above current price and TP is below current price.

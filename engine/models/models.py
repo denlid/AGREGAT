@@ -103,39 +103,84 @@ class AssetConfig:
 
 
 # ==========================================
-# Pending Order (entry on next candle's open)
+# Orders and open entry legs
 # ==========================================
 class PendingOrder:
-    __slots__ = ("direction", "volume", "sl", "tp", "reason", "tag")
+    __slots__ = (
+        "id",
+        "kind",
+        "direction",
+        "volume",
+        "sl",
+        "tp",
+        "reason",
+        "tag",
+        "fill_timing",
+        "from_entry",
+    )
 
     def __init__(
         self,
-        direction: str,
-        volume: float,
+        direction: str = "",
+        volume: float = 1.0,
         sl: Optional[float] = None,
         tp: Optional[float] = None,
         reason: str = "",
         tag: str = "",
+        id: str = "",
+        kind: str = "entry",
+        fill_timing: str = "next_open",
+        from_entry: Optional[str] = None,
     ) -> None:
+        self.id = id or tag or direction
+        self.kind = kind
         self.direction = direction
         self.volume = volume
         self.sl = sl
         self.tp = tp
         self.reason = reason
         self.tag = tag
+        self.fill_timing = fill_timing
+        self.from_entry = from_entry
 
     def __repr__(self) -> str:
         return (
-            f"PendingOrder(direction={self.direction!r}, volume={self.volume}, "
-            f"sl={self.sl}, tp={self.tp}, reason={self.reason!r})"
+            f"PendingOrder(id={self.id!r}, kind={self.kind!r}, "
+            f"direction={self.direction!r}, volume={self.volume}, "
+            f"sl={self.sl}, tp={self.tp}, reason={self.reason!r}, "
+            f"fill_timing={self.fill_timing!r})"
         )
 
 
-# ==========================================
-# Position (open trade)
-# ==========================================
+class ExitOrder:
+    __slots__ = ("id", "from_entry", "stop", "limit", "qty", "comment")
+
+    def __init__(
+        self,
+        id: str,
+        from_entry: str,
+        stop: Optional[float] = None,
+        limit: Optional[float] = None,
+        qty: Optional[float] = None,
+        comment: str = "",
+    ) -> None:
+        self.id = id
+        self.from_entry = from_entry
+        self.stop = stop
+        self.limit = limit
+        self.qty = qty
+        self.comment = comment
+
+    def __repr__(self) -> str:
+        return (
+            f"ExitOrder(id={self.id!r}, from_entry={self.from_entry!r}, "
+            f"stop={self.stop}, limit={self.limit}, qty={self.qty})"
+        )
+
+
 class Position:
     __slots__ = (
+        "entry_id",
         "direction",
         "entry_price",
         "entry_index",
@@ -168,7 +213,9 @@ class Position:
         lock_activated: bool = False,
         tag: str = "",
         entry_time_np: Any = None,
+        entry_id: str = "",
     ) -> None:
+        self.entry_id = entry_id or tag or direction
         self.direction = direction
         self.entry_price = entry_price
         self.entry_index = entry_index
@@ -191,7 +238,8 @@ class Position:
 
     def __repr__(self) -> str:
         return (
-            f"Position(direction={self.direction!r}, entry_price={self.entry_price}, "
+            f"Position(entry_id={self.entry_id!r}, direction={self.direction!r}, "
+            f"entry_price={self.entry_price}, "
             f"entry_index={self.entry_index}, sl={self.sl}, tp={self.tp})"
         )
 
@@ -538,6 +586,7 @@ def is_weekend(t: Any, asset: Optional[AssetConfig] = None) -> bool:
 __all__ = [
     "AssetConfig",
     "PendingOrder",
+    "ExitOrder",
     "Position",
     "Trade",
     "SESSIONS",

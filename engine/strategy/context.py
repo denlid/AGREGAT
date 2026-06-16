@@ -17,7 +17,6 @@ import pandas as pd
 
 from engine.models.models import (
     AssetConfig,
-    PendingOrder,
     Position,
     get_session,
     get_session_from_parts,
@@ -87,6 +86,8 @@ class Strategy:
     """
 
     PARAMS: List[Param] = []
+    pyramiding: int = 1
+    process_orders_on_close: bool = False
 
     def __init__(self) -> None:
         self.params: Dict[str, Any] = {p.name: p.default for p in self.PARAMS}
@@ -236,6 +237,30 @@ class Context:
         return pos
 
     @property
+    def positions(self) -> Dict[str, Position]:
+        return dict(getattr(self._engine, "positions", {}))
+
+    @property
+    def position_size(self) -> float:
+        return float(getattr(self._engine, "position_size", 0.0))
+
+    @property
+    def position_avg_price(self) -> float:
+        return float(getattr(self._engine, "position_avg_price", 0.0))
+
+    @property
+    def opentrades(self) -> int:
+        return int(getattr(self._engine, "opentrades", 0))
+
+    @property
+    def closedtrades(self) -> int:
+        return int(getattr(self._engine, "closedtrades", 0))
+
+    @property
+    def pending_orders(self) -> List[Any]:
+        return list(getattr(self._engine, "pending_orders", []))
+
+    @property
     def equity(self) -> float:
         eq: float = self._engine.equity
         return eq
@@ -314,10 +339,92 @@ class Context:
         forming: Optional[Dict[str, Any]] = self._engine.tf_aggregator.get_forming(tf)
         return forming
 
-    # --- Legacy Trading API ---
-    def close(self, price: Optional[float] = None, reason: str = "MANUAL") -> None:
-        """Close current position at given price (default: current candle close)."""
-        self._engine.execute_close(price=price, reason=reason, exit_candle=self.candle)
+    # --- Trading API ---
+    def close(
+        self,
+        price: Optional[float] = None,
+        reason: str = "MANUAL",
+        id: Optional[str] = None,
+    ) -> None:
+        """Queue or execute a market close.
+
+        Without an explicit price this closes at the current candle close.
+        Use ``close_all()`` for a market order governed by the strategy fill
+        policy.
+        """
+        close_price = self.candle.get("close") if price is None else price
+        if id is None:
+            self._engine.execute_close_all(
+                price=close_price, reason=reason, exit_candle=self.candle
+            )
+        else:
+            self._engine.execute_close_leg(
+                id, price=close_price, reason=reason, exit_candle=self.candle
+            )
+            return
+
+    def close_all(self, reason: str = "MANUAL") -> None:
+        self._engine.queue_close_order(id=None, reason=reason)
+
+    def entry(
+        self,
+        id: str,
+        direction: str,
+        qty: Optional[float] = None,
+        risk: Optional[float] = None,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        comment: str = "",
+        *,
+        fill_timing: Optional[str] = None,
+    ) -> bool:
+        direction = str(direction).lower()
+        ref_price = float(self.candle.get("close", 0.0) or 0.0)
+        self._validate_sl_tp(direction, sl, tp, ref_price)
+        volume = qty
+        if volume is None:
+            if risk is None:
+                volume = 1.0
+            else:
+                if sl is None:
+                    return False
+                tick = float(getattr(self.asset, "tick_size", 1.0) or 1.0)
+                sl_points = abs(ref_price - float(sl)) / tick
+                volume = self.calculate_lot(sl_points, risk_pct=risk)
+        if volume is None or volume <= 0:
+            return False
+        return bool(
+            self._engine.queue_entry_order(
+                id=id,
+                direction=direction,
+                volume=float(volume),
+                sl=sl,
+                tp=tp,
+                reason=comment,
+                tag=id,
+                fill_timing=fill_timing,
+            )
+        )
+
+    def exit(
+        self,
+        id: str,
+        from_entry: str,
+        stop: Optional[float] = None,
+        limit: Optional[float] = None,
+        qty: Optional[float] = None,
+        comment: str = "",
+    ) -> bool:
+        return bool(
+            self._engine.set_exit_order(
+                id=id,
+                from_entry=from_entry,
+                stop=stop,
+                limit=limit,
+                qty=qty,
+                comment=comment,
+            )
+        )
 
     # --- New Trading API (pending order at next open) ---
     @staticmethod
@@ -366,21 +473,18 @@ class Context:
         tag: str = "",
     ) -> bool:
         """Queue a LONG entry at the open of the next 1m candle."""
-        if self._engine.position is not None:
-            logger.warning("buy_at_open ignored: position already open.")
-            return False
-        if self._engine.pending_order is not None:
-            logger.warning("buy_at_open ignored: pending order already exists.")
-            return False
-        self._validate_sl_tp("long", sl, tp, self.candle.get("close", 0))
-        self._engine.pending_order = PendingOrder(
-            direction="long",
-            volume=volume,
+        order_id = tag or reason or f"L{self._engine.current_idx}"
+        ok = self.entry(
+            order_id,
+            "long",
+            qty=volume,
             sl=sl,
             tp=tp,
-            reason=reason,
-            tag=tag,
+            comment=reason,
+            fill_timing="next_open",
         )
+        if not ok:
+            return False
         t_str = self._format_time()
         sl_str = f", SL={sl}" if sl is not None else ""
         tp_str = f", TP={tp}" if tp is not None else ""
@@ -398,21 +502,18 @@ class Context:
         tag: str = "",
     ) -> bool:
         """Queue a SHORT entry at the open of the next 1m candle."""
-        if self._engine.position is not None:
-            logger.warning("sell_at_open ignored: position already open.")
-            return False
-        if self._engine.pending_order is not None:
-            logger.warning("sell_at_open ignored: pending order already exists.")
-            return False
-        self._validate_sl_tp("short", sl, tp, self.candle.get("close", 0))
-        self._engine.pending_order = PendingOrder(
-            direction="short",
-            volume=volume,
+        order_id = tag or reason or f"S{self._engine.current_idx}"
+        ok = self.entry(
+            order_id,
+            "short",
+            qty=volume,
             sl=sl,
             tp=tp,
-            reason=reason,
-            tag=tag,
+            comment=reason,
+            fill_timing="next_open",
         )
+        if not ok:
+            return False
         t_str = self._format_time()
         sl_str = f", SL={sl}" if sl is not None else ""
         tp_str = f", TP={tp}" if tp is not None else ""
@@ -423,9 +524,9 @@ class Context:
 
     def cancel_pending(self) -> bool:
         """Drop any queued pending order. Returns True if one existed."""
-        if self._engine.pending_order is None:
+        removed = self._engine.cancel_order()
+        if removed <= 0:
             return False
-        self._engine.pending_order = None
         logger.info(f"{self._format_time()}[Strategy] Pending order cancelled.")
         return True
 

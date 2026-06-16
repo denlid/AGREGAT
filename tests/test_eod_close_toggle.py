@@ -1,8 +1,8 @@
-"""Tests for the ``AssetConfig.enforce_eod_close`` toggle (stage 2).
+"""Tests that EOD no longer force-closes open positions.
 
-When the toggle is **off** the engine must NOT force a position closed at
-the configured EOD minute, allowing 24h sessions / overnight strategies to
-run the bar replay without artificial exits.
+Position lifecycle belongs to the strategy. The asset-level EOD flag still
+participates in pending-entry filtering, but ``_process_one_candle`` must not
+close an already-open position before user strategy code can manage it.
 """
 
 from __future__ import annotations
@@ -77,11 +77,12 @@ def _run(asset: AssetConfig) -> BacktestCore:
     return eng
 
 
-def test_eod_force_close_active() -> None:
-    """Default behaviour: enforce_eod_close=True closes the position at 22:00."""
+def test_eod_flag_does_not_force_close_open_position() -> None:
+    """Even enforce_eod_close=True must not auto-close an open position."""
     eng = _run(_asset(enforce_eod=True))
     eod_trades = [t for t in eng.trades if t.exit_reason == "EOD"]
-    assert eod_trades, "expected at least one EOD-closed trade"
+    assert not eod_trades
+    assert eng.position is not None
 
 
 def test_eod_force_close_disabled_keeps_position_open() -> None:

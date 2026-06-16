@@ -9,7 +9,7 @@ optimisation worker — none of which require an X server or
 
 Design notes:
     • A single internal :meth:`_process_one_candle` is shared by :meth:`step`
-      and :meth:`step_n`, so EOD/SL/TP/strategy logic cannot drift between
+      and :meth:`step_n`, so SL/TP/strategy logic cannot drift between
       them.
     • Same-bar SL/TP collisions resolve worst-case (assume SL hit before TP).
     • Recovery factor uses absolute drawdown ($), not %-of-initial-equity.
@@ -35,6 +35,7 @@ from engine.core.data_view import DataView
 from engine.execution.execution import ExecutionModel
 from engine.models.models import (
     AssetConfig,
+    ExitOrder,
     PendingOrder,
     Position,
     Trade,
@@ -323,6 +324,12 @@ class BacktestCore:
         # Risk model — wired to Settings UI
         self.risk_pct: float = 1.0  # 1% of equity per trade by default
 
+        self.positions: Dict[str, Position] = {}
+        self.pending_orders: List[PendingOrder] = []
+        self.exit_orders: Dict[str, ExitOrder] = {}
+        # UI/report convenience mirror. Strategy code should use
+        # ``ctx.positions`` / ``ctx.position_size``; this points at the
+        # first open leg so existing chart marker code still has a handle.
         self.position: Optional[Position] = None
         self.pending_order: Optional[PendingOrder] = None
         self.trades: List[Trade] = []
@@ -408,6 +415,163 @@ class BacktestCore:
                 cb(*args)
             except Exception:  # pragma: no cover — defensive
                 logger.exception("BacktestCore callback raised; continuing")
+
+    def _sync_position_mirrors(self) -> None:
+        self.position = next(iter(self.positions.values()), None)
+        self.pending_order = self.pending_orders[0] if self.pending_orders else None
+
+    @property
+    def position_size(self) -> float:
+        total = 0.0
+        for pos in self.positions.values():
+            total += (1.0 if pos.direction == "long" else -1.0) * float(pos.volume)
+        return total
+
+    @property
+    def position_avg_price(self) -> float:
+        total_volume = sum(abs(float(pos.volume)) for pos in self.positions.values())
+        if total_volume <= 0.0:
+            return 0.0
+        weighted = sum(
+            float(pos.entry_price) * abs(float(pos.volume))
+            for pos in self.positions.values()
+        )
+        return weighted / total_volume
+
+    @property
+    def opentrades(self) -> int:
+        return len(self.positions)
+
+    @property
+    def closedtrades(self) -> int:
+        return len(self.trades)
+
+    def _strategy_pyramiding(self) -> int:
+        raw = getattr(self.strategy, "pyramiding", 1)
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return 1
+
+    def _strategy_fill_timing(self) -> str:
+        return (
+            "on_close"
+            if bool(getattr(self.strategy, "process_orders_on_close", False))
+            else "next_open"
+        )
+
+    def queue_entry_order(
+        self,
+        *,
+        id: str,
+        direction: str,
+        volume: float,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+        reason: str = "",
+        tag: str = "",
+        fill_timing: Optional[str] = None,
+    ) -> bool:
+        entry_id = str(id or tag or direction).strip()
+        if not entry_id:
+            logger.warning("entry ignored: empty id")
+            return False
+        direction = str(direction).lower()
+        if direction not in ("long", "short"):
+            logger.warning("entry ignored: bad direction %r", direction)
+            return False
+        try:
+            volume = float(volume)
+        except (TypeError, ValueError):
+            return False
+        if volume <= 0.0:
+            return False
+        timing = fill_timing or self._strategy_fill_timing()
+        self.pending_orders = [
+            po
+            for po in self.pending_orders
+            if not (po.kind == "entry" and po.id == entry_id)
+        ]
+        self.pending_orders.append(
+            PendingOrder(
+                id=entry_id,
+                kind="entry",
+                direction=direction,
+                volume=volume,
+                sl=sl,
+                tp=tp,
+                reason=reason,
+                tag=tag or entry_id,
+                fill_timing=timing,
+            )
+        )
+        self._sync_position_mirrors()
+        return True
+
+    def set_exit_order(
+        self,
+        *,
+        id: str,
+        from_entry: str,
+        stop: Optional[float] = None,
+        limit: Optional[float] = None,
+        qty: Optional[float] = None,
+        comment: str = "",
+    ) -> bool:
+        exit_id = str(id or from_entry).strip()
+        source = str(from_entry or "").strip()
+        if not exit_id or not source:
+            logger.warning("exit ignored: id and from_entry are required")
+            return False
+        self.exit_orders[exit_id] = ExitOrder(
+            id=exit_id,
+            from_entry=source,
+            stop=stop,
+            limit=limit,
+            qty=qty,
+            comment=comment,
+        )
+        return True
+
+    def queue_close_order(
+        self,
+        *,
+        id: Optional[str] = None,
+        reason: str = "MANUAL",
+        fill_timing: Optional[str] = None,
+    ) -> bool:
+        timing = fill_timing or self._strategy_fill_timing()
+        order_id = "__close_all__" if id is None else str(id)
+        self.pending_orders.append(
+            PendingOrder(
+                id=order_id,
+                kind="close_all" if id is None else "close",
+                direction="",
+                volume=0.0,
+                reason=reason,
+                tag=order_id,
+                fill_timing=timing,
+                from_entry=None if id is None else str(id),
+            )
+        )
+        self._sync_position_mirrors()
+        return True
+
+    def cancel_order(self, id: Optional[str] = None) -> int:
+        if id is None:
+            count = len(self.pending_orders) + len(self.exit_orders)
+            self.pending_orders.clear()
+            self.exit_orders.clear()
+            self._sync_position_mirrors()
+            return count
+        key = str(id)
+        before = len(self.pending_orders)
+        self.pending_orders = [po for po in self.pending_orders if po.id != key]
+        removed = before - len(self.pending_orders)
+        if self.exit_orders.pop(key, None) is not None:
+            removed += 1
+        self._sync_position_mirrors()
+        return removed
 
     # ------------------------------------------------------------------
     # Asset Configuration
@@ -687,8 +851,10 @@ class BacktestCore:
         self.max_drawdown_pct = 0.0
         self.max_drawdown_abs = 0.0
         self.drawdown.reset(self.initial_equity)
-        self.position = None
-        self.pending_order = None
+        self.positions.clear()
+        self.pending_orders.clear()
+        self.exit_orders.clear()
+        self._sync_position_mirrors()
         trades_count = len(self.trades)
         self.trades.clear()
         self.drawings.clear()
@@ -748,10 +914,10 @@ class BacktestCore:
         ``self.current_idx`` is advanced to ``next_idx`` at the top so that
         ``Trade.entry_index`` / ``Trade.exit_index`` always equal the index
         of the bar where the fill / exit actually happened — regardless of
-        whether the close is triggered by SL/TP/EOD/WEEKEND (pre-strategy)
-        or by the strategy calling ``ctx.close()`` (post-strategy). This
-        also keeps ``ctx.data.close[-1]`` pointing at the bar the strategy
-        is being asked to react to.
+        whether the close is triggered by SL/TP (pre-strategy) or by the
+        strategy calling ``ctx.close()`` (post-strategy). This also keeps
+        ``ctx.data.close[-1]`` pointing at the bar the strategy is being
+        asked to react to.
         """
         # Advance the bar pointer first — see method docstring.
         self.current_idx = next_idx
@@ -762,38 +928,19 @@ class BacktestCore:
         # them go through ``ctx.get_tf(tf)`` which returns an
         # ``HTFView`` over the cached arrays. (TZ Phase 3.)
         completed_tfs = self.tf_aggregator.advance_to(next_idx)
+        candle_dict = self.candle_at(next_idx)
 
         # 2. Fill pending order at this candle's open
         # (needs dict because _fill_pending accesses time for logging)
-        if self.pending_order is not None:
-            self._fill_pending(self.candle_at(next_idx))
+        self._fill_pending_orders(candle_dict, fill_timing="next_open", price_key="open")
 
         # 3. Position housekeeping (MAE/MFE then SL/TP collision)
         # Use zero-alloc fast path — dict only built on actual close.
-        if self.position is not None:
+        if self.positions:
             self._update_mae_mfe_fast(next_idx)
             self._check_sl_tp_fast(next_idx)
 
-        # 4. EOD close — gated by ``AssetConfig.enforce_eod_close``.
-        if self.position is not None and self.asset_config.enforce_eod_close:
-            asset = self.asset_config
-            try:
-                if is_eod_from_parts(int(self._minute_of_day[next_idx]), asset):
-                    self.execute_close(
-                        reason="EOD", exit_candle=self.candle_at(next_idx)
-                    )
-            except Exception as e:  # pragma: no cover — defensive
-                logger.error(f"EOD check failed at idx={next_idx}: {e!r}")
-
-        # 5. Weekend close
-        if self.position is not None and self.asset_config.close_on_weekend:
-            if is_weekend_from_weekday(int(self._weekday[next_idx])):
-                self.execute_close(
-                    reason="WEEKEND", exit_candle=self.candle_at(next_idx)
-                )
-
-        # 6. Strategy hook — build candle dict once for ctx.candle
-        candle_dict = self.candle_at(next_idx)
+        # 4. Strategy hook — build candle dict once for ctx.candle
         self.ctx.candle = candle_dict
         self.ctx._completed_tfs = completed_tfs
         if self.strategy is not None:
@@ -821,7 +968,9 @@ class BacktestCore:
                 self._fire(self.on_error, msg)
                 return False
 
-        # 7. Phase 1.1 — record realised + unrealised equity at bar close.
+        self._fill_pending_orders(candle_dict, fill_timing="on_close", price_key="close")
+
+        # 5. Phase 1.1 — record realised + unrealised equity at bar close.
         # Cheap (a few ops per bar) and only allocated when explicitly
         # enabled via ``enable_bar_equity_tracking(True)``.
         if self.track_bar_equity and self.bar_equity is not None:
@@ -838,15 +987,18 @@ class BacktestCore:
         the running mark to keep the curve continuous; the realised cost
         will be deducted on the actual close exit.
         """
-        if self.position is None:
+        if not self.positions:
             return float(self.equity)
-        pos = self.position
         close = float(self._close[idx])
-        if pos.direction == "long":
-            unrealised_points = close - pos.entry_price
-        else:
-            unrealised_points = pos.entry_price - close
-        unrealised = unrealised_points * pos.volume * self.asset_config.point_value
+        unrealised = 0.0
+        for pos in self.positions.values():
+            if pos.direction == "long":
+                unrealised_points = close - pos.entry_price
+            else:
+                unrealised_points = pos.entry_price - close
+            unrealised += (
+                unrealised_points * pos.volume * self.asset_config.point_value
+            )
         return float(self.equity + unrealised)
 
     def step(self) -> None:
@@ -930,6 +1082,142 @@ class BacktestCore:
     # ------------------------------------------------------------------
     # Pending Order System
     # ------------------------------------------------------------------
+    def _entry_skip_reason(self) -> Optional[str]:
+        asset = self.asset_config
+        minute_of_day = int(self._minute_of_day[self.current_idx])
+        weekday = int(self._weekday[self.current_idx])
+        if asset.enforce_trading_hours and not is_trading_hours_from_parts(
+            minute_of_day, weekday, asset
+        ):
+            return "TRADING_HOURS"
+        if asset.close_on_weekend and is_weekend_from_weekday(weekday):
+            return "WEEKEND"
+        if asset.enforce_eod_close and is_eod_from_parts(minute_of_day, asset):
+            return "EOD"
+        return None
+
+    def _fill_pending_orders(
+        self,
+        candle: Dict[str, Any],
+        *,
+        fill_timing: str,
+        price_key: str,
+    ) -> None:
+        if not self.pending_orders:
+            return
+        selected: List[PendingOrder] = []
+        remaining: List[PendingOrder] = []
+        for order in self.pending_orders:
+            if order.fill_timing == fill_timing:
+                selected.append(order)
+            else:
+                remaining.append(order)
+        self.pending_orders = remaining
+        self._sync_position_mirrors()
+
+        if not selected:
+            return
+        quoted = float(candle[price_key])
+        changed = False
+        for order in selected:
+            if order.kind == "entry":
+                changed = self._open_leg_from_order(order, candle, quoted) or changed
+            elif order.kind == "close_all":
+                changed = self.execute_close_all(
+                    price=quoted,
+                    reason=order.reason or "MANUAL",
+                    exit_candle=candle,
+                ) or changed
+            elif order.kind == "close" and order.from_entry is not None:
+                changed = self.execute_close_leg(
+                    order.from_entry,
+                    price=quoted,
+                    reason=order.reason or "MANUAL",
+                    exit_candle=candle,
+                ) or changed
+        if changed and not self._suppress_signals:
+            self._fire(self.on_position_changed)
+
+    def _open_leg_from_order(
+        self,
+        order: PendingOrder,
+        candle: Dict[str, Any],
+        quoted: float,
+    ) -> bool:
+        skip_reason = self._entry_skip_reason()
+        if skip_reason is not None:
+            self.skipped_trades.append(
+                {
+                    "time": str(candle.get("time") or ""),
+                    "reason": skip_reason,
+                    "direction": order.direction,
+                    "id": order.id,
+                }
+            )
+            logger.info(
+                "[%s] Skipped %s fill for %s - pending dropped.",
+                skip_reason,
+                order.direction.upper(),
+                order.id,
+            )
+            return False
+
+        if order.id in self.positions:
+            logger.info("entry %s ignored: leg already open", order.id)
+            return False
+        same_direction = sum(
+            1 for pos in self.positions.values() if pos.direction == order.direction
+        )
+        if same_direction >= self._strategy_pyramiding():
+            self.skipped_trades.append(
+                {
+                    "time": str(candle.get("time") or ""),
+                    "reason": "PYRAMIDING_LIMIT",
+                    "direction": order.direction,
+                    "id": order.id,
+                }
+            )
+            return False
+
+        price = self.execution_model.adjust_fill_price(
+            quoted,
+            order.direction,
+            self.asset_config,
+            volume=order.volume,
+            bar_spread_points=self.spread_at(self.current_idx),
+        )
+        candle_time_raw = candle["time"]
+        candle_time = str(candle_time_raw)
+        try:
+            entry_time_np = np.datetime64(candle_time_raw)
+        except (ValueError, TypeError):
+            entry_time_np = None
+
+        self.positions[order.id] = Position(
+            direction=order.direction,
+            entry_price=price,
+            entry_index=self.current_idx,
+            entry_time=candle_time,
+            entry_time_np=entry_time_np,
+            volume=order.volume,
+            sl=order.sl,
+            tp=order.tp,
+            initial_sl=order.sl,
+            tag=order.tag,
+            entry_id=order.id,
+        )
+        self._sync_position_mirrors()
+
+        t_str = pd.Timestamp(candle_time_raw).strftime("%Y-%m-%d %H:%M")
+        sl_str = f", SL: {order.sl:.2f}" if order.sl else ""
+        tp_str = f", TP: {order.tp:.2f}" if order.tp else ""
+        slip_str = f" (slip+spread: {price - quoted:+.4f})" if price != quoted else ""
+        logger.info(
+            f"[{t_str}] Engine: Opened {order.direction.upper()} {order.id} "
+            f"at {price:.4f} (Vol: {order.volume:.2f}{sl_str}{tp_str}){slip_str}"
+        )
+        return True
+
     def _fill_pending(self, candle: Dict[str, Any]) -> None:
         """Fill a pending order at this candle's open price."""
         if self.pending_order is None:
@@ -1174,32 +1462,31 @@ class BacktestCore:
         Phase 1.6 — entry bar uses close-only excursion (see
         :py:meth:`_update_mae_mfe` for rationale).
         """
-        pos = self.position
-        if pos is None:
+        if not self.positions:
             return
-        if pos.entry_index == idx:
-            close_price = float(self._close[idx])
-            if pos.direction == "long":
-                adverse = max(0.0, pos.entry_price - close_price)
-                favorable = max(0.0, close_price - pos.entry_price)
-            else:
-                adverse = max(0.0, close_price - pos.entry_price)
-                favorable = max(0.0, pos.entry_price - close_price)
-        else:
-            high = float(self._high[idx])
-            low = float(self._low[idx])
-            if pos.direction == "long":
+        high = float(self._high[idx])
+        low = float(self._low[idx])
+        close_price = float(self._close[idx])
+        for pos in self.positions.values():
+            if pos.entry_index == idx:
+                if pos.direction == "long":
+                    adverse = max(0.0, pos.entry_price - close_price)
+                    favorable = max(0.0, close_price - pos.entry_price)
+                else:
+                    adverse = max(0.0, close_price - pos.entry_price)
+                    favorable = max(0.0, pos.entry_price - close_price)
+            elif pos.direction == "long":
                 adverse = pos.entry_price - low
                 favorable = high - pos.entry_price
             else:
                 adverse = high - pos.entry_price
                 favorable = pos.entry_price - low
-        if adverse > pos.mae:
-            pos.mae = adverse
-        if favorable > pos.mfe:
-            pos.mfe = favorable
+            if adverse > pos.mae:
+                pos.mae = adverse
+            if favorable > pos.mfe:
+                pos.mfe = favorable
 
-    def _check_sl_tp_fast(self, idx: int) -> None:
+    def _check_sl_tp_fast_single_legacy(self, idx: int) -> None:
         """Zero-alloc SL/TP check using direct array access.
 
         Semantically identical to ``_check_sl_tp`` but avoids building
@@ -1268,6 +1555,122 @@ class BacktestCore:
                 self.execute_close(
                     price=tp + slip, reason="TP", exit_candle=self.candle_at(idx)
                 )
+
+    def _check_sl_tp_fast(self, idx: int) -> None:
+        """Resolve stop/limit exits for every open entry leg."""
+        if not self.positions:
+            return
+        bar_open = float(self._open[idx])
+        high = float(self._high[idx])
+        low = float(self._low[idx])
+        exit_candle: Optional[Dict[str, Any]] = None
+        closed_any = False
+
+        for entry_id, pos in list(self.positions.items()):
+            candidates: List[tuple[Optional[float], Optional[float], Optional[float]]] = [
+                (pos.sl, pos.tp, None)
+            ]
+            for order in self.exit_orders.values():
+                if order.from_entry == entry_id:
+                    candidates.append((order.stop, order.limit, order.qty))
+            if all(stop is None and limit is None for stop, limit, _ in candidates):
+                continue
+
+            slip = self.execution_model.slippage_price(
+                self.asset_config, volume=pos.volume
+            )
+            if exit_candle is None:
+                exit_candle = self.candle_at(idx)
+
+            for stop, limit, qty in candidates:
+                closed = False
+                if stop is None and limit is None:
+                    continue
+                if pos.direction == "long":
+                    if stop is not None and bar_open < stop:
+                        closed = self.execute_close_leg(
+                            entry_id,
+                            price=bar_open - slip,
+                            reason="GAP_SL",
+                            exit_candle=exit_candle,
+                            qty=qty,
+                            adjust_price=False,
+                            emit_signal=False,
+                        )
+                    elif stop is not None and low <= stop:
+                        base_reason = (
+                            "LOCK"
+                            if pos.lock_activated
+                            else ("BE" if pos.be_activated else "SL")
+                        )
+                        closed = self.execute_close_leg(
+                            entry_id,
+                            price=stop - slip,
+                            reason=base_reason,
+                            exit_candle=exit_candle,
+                            qty=qty,
+                            adjust_price=False,
+                            emit_signal=False,
+                        )
+                    elif limit is not None and high >= limit:
+                        closed = self.execute_close_leg(
+                            entry_id,
+                            price=limit - slip,
+                            reason="TP",
+                            exit_candle=exit_candle,
+                            qty=qty,
+                            adjust_price=False,
+                            emit_signal=False,
+                        )
+                else:
+                    spread = self.execution_model.spread_price(
+                        self.asset_config,
+                        spread_points_override=self.spread_at(idx),
+                    )
+                    ask_open = bar_open + spread
+                    ask_high = high + spread
+                    ask_low = low + spread
+                    if stop is not None and ask_open > stop:
+                        closed = self.execute_close_leg(
+                            entry_id,
+                            price=ask_open + slip,
+                            reason="GAP_SL",
+                            exit_candle=exit_candle,
+                            qty=qty,
+                            adjust_price=False,
+                            emit_signal=False,
+                        )
+                    elif stop is not None and ask_high >= stop:
+                        base_reason = (
+                            "LOCK"
+                            if pos.lock_activated
+                            else ("BE" if pos.be_activated else "SL")
+                        )
+                        closed = self.execute_close_leg(
+                            entry_id,
+                            price=stop + slip,
+                            reason=base_reason,
+                            exit_candle=exit_candle,
+                            qty=qty,
+                            adjust_price=False,
+                            emit_signal=False,
+                        )
+                    elif limit is not None and ask_low <= limit:
+                        closed = self.execute_close_leg(
+                            entry_id,
+                            price=limit + slip,
+                            reason="TP",
+                            exit_candle=exit_candle,
+                            qty=qty,
+                            adjust_price=False,
+                            emit_signal=False,
+                        )
+                if closed:
+                    closed_any = True
+                    break
+
+        if closed_any and not self._suppress_signals:
+            self._fire(self.on_position_changed)
 
     # ------------------------------------------------------------------
     # Trading actions
@@ -1432,6 +1835,196 @@ class BacktestCore:
             f"PnL: {pnl:.2f} ({pnl_points:+.1f}pts) | Reason: {reason} | "
             f"Eq: {self.equity:.2f} (Δ {self.equity - prev_equity:+.2f})"
         )
+
+    def execute_close_leg(
+        self,
+        entry_id: str,
+        price: Optional[float] = None,
+        reason: str = "MANUAL",
+        exit_candle: Optional[Dict[str, Any]] = None,
+        qty: Optional[float] = None,
+        *,
+        adjust_price: bool = True,
+        emit_signal: bool = True,
+    ) -> bool:
+        pos = self.positions.get(str(entry_id))
+        if pos is None:
+            return False
+
+        candle = exit_candle if exit_candle is not None else self.ctx.candle
+        if price is None:
+            price = candle["close"]
+
+        close_volume = float(pos.volume if qty is None else min(float(qty), pos.volume))
+        if close_volume <= 0.0:
+            return False
+
+        if adjust_price and reason in ("MANUAL", "EOD", "WEEKEND"):
+            price = self.execution_model.adjust_close_price(
+                price,
+                pos.direction,
+                self.asset_config,
+                volume=close_volume,
+                bar_spread_points=self.spread_at(self.current_idx),
+            )
+
+        if pos.direction == "long":
+            pnl_points = price - pos.entry_price
+        else:
+            pnl_points = pos.entry_price - price
+        gross_pnl = pnl_points * close_volume * self.asset_config.point_value
+        costs = self.execution_model.costs_for_round_trip(
+            close_volume, self.asset_config
+        )
+        pnl = _round_to_step(gross_pnl - costs.commission_cost, 0.01)
+
+        prev_equity = self.equity
+        self.equity = _round_to_step(self.equity + pnl, 0.01)
+        self.drawdown.update(self.equity)
+        self.max_equity = self.drawdown.peak_equity
+        self.max_drawdown_abs = self.drawdown.max_drawdown_abs
+        self.max_drawdown_pct = self.drawdown.max_drawdown_pct
+
+        duration = 0
+        exit_time_raw = candle["time"]
+        if pos.entry_time_np is not None:
+            try:
+                exit_np = np.datetime64(exit_time_raw)
+                delta = exit_np - pos.entry_time_np
+                duration = max(0, int(delta / np.timedelta64(1, "m")))
+            except (ValueError, TypeError):
+                duration = 0
+        if duration == 0 and pos.entry_time_np is None:
+            try:
+                entry_time = pd.to_datetime(pos.entry_time)
+                exit_time = pd.to_datetime(exit_time_raw)
+                duration = max(0, int((exit_time - entry_time).total_seconds() / 60))
+            except (ValueError, TypeError):
+                duration = 0
+
+        entry_weekday = -1
+        entry_minute = -1
+        if 0 <= pos.entry_index < self._weekday.shape[0]:
+            entry_weekday = int(self._weekday[pos.entry_index])
+            entry_minute = int(self._minute_of_day[pos.entry_index])
+        session = get_session_from_parts(
+            entry_minute, entry_weekday, asset=self.asset_config
+        )
+
+        dow_label = "Unknown"
+        if 0 <= entry_weekday <= 6:
+            dow_label = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][
+                entry_weekday
+            ]
+        hod_value = entry_minute // 60 if entry_minute >= 0 else -1
+
+        rr: Optional[float] = None
+        if pos.initial_sl is not None and pos.initial_sl > 0:
+            sl_distance = abs(pos.entry_price - pos.initial_sl)
+            if sl_distance > 0:
+                rr = pnl_points / sl_distance
+
+        mae_dollars = pos.mae * close_volume * self.asset_config.point_value
+        mfe_dollars = pos.mfe * close_volume * self.asset_config.point_value
+
+        self._next_trade_id += 1
+        trade = Trade(
+            id=self._next_trade_id,
+            direction=pos.direction,
+            entry_price=pos.entry_price,
+            exit_price=price,
+            pnl=pnl,
+            pnl_points=pnl_points,
+            entry_index=pos.entry_index,
+            exit_index=self.current_idx,
+            entry_time=str(pos.entry_time),
+            exit_time=str(candle["time"]),
+            volume=close_volume,
+            duration_minutes=duration,
+            exit_reason=reason,
+            mae=pos.mae,
+            mfe=pos.mfe,
+            mae_dollars=_round_to_step(mae_dollars, 0.01),
+            mfe_dollars=_round_to_step(mfe_dollars, 0.01),
+            session=session,
+            initial_sl=pos.initial_sl if pos.initial_sl is not None else 0.0,
+            rr=rr,
+            tag=pos.tag or pos.entry_id,
+            commission=_round_to_step(costs.commission_cost, 0.01),
+            spread_cost=_round_to_step(costs.spread_cost, 0.01),
+            slippage_cost=_round_to_step(costs.slippage_cost, 0.01),
+            dow=dow_label,
+            hod=hod_value,
+        )
+
+        self.trades.append(trade)
+        self.equity_track.append(self.equity)
+
+        if close_volume >= pos.volume:
+            self.positions.pop(str(entry_id), None)
+            self.exit_orders = {
+                oid: order
+                for oid, order in self.exit_orders.items()
+                if order.from_entry != str(entry_id)
+            }
+        else:
+            pos.volume = _round_to_step(pos.volume - close_volume, 1e-9)
+
+        self._sync_position_mirrors()
+
+        self.stats.update(trade)
+        self._stats_wins = self.stats.wins
+        self._stats_losses = self.stats.losses
+        self._stats_gross_profit = self.stats.gross_profit
+        self._stats_gross_loss = self.stats.gross_loss
+        self._stats_longs = self.stats.longs
+        self._stats_shorts = self.stats.shorts
+        self._stats_dirty = True
+
+        if not self._suppress_signals:
+            self._fire(self.on_trade_completed, trade)
+            if emit_signal:
+                self._fire(self.on_position_changed)
+
+        t_str = pd.Timestamp(exit_time_raw).strftime("%Y-%m-%d %H:%M")
+        logger.info(
+            f"[{t_str}] Engine: Closed {trade.direction.upper()} {entry_id} "
+            f"at {price:.2f} | PnL: {pnl:.2f} ({pnl_points:+.1f}pts) | "
+            f"Reason: {reason} | Eq: {self.equity:.2f} "
+            f"(Δ {self.equity - prev_equity:+.2f})"
+        )
+        return True
+
+    def execute_close_all(
+        self,
+        price: Optional[float] = None,
+        reason: str = "MANUAL",
+        exit_candle: Optional[Dict[str, Any]] = None,
+        *,
+        emit_signal: bool = True,
+    ) -> bool:
+        if not self.positions:
+            return False
+        changed = False
+        for entry_id in list(self.positions.keys()):
+            changed = self.execute_close_leg(
+                entry_id,
+                price=price,
+                reason=reason,
+                exit_candle=exit_candle,
+                emit_signal=False,
+            ) or changed
+        if changed and emit_signal and not self._suppress_signals:
+            self._fire(self.on_position_changed)
+        return changed
+
+    def _execute_close_single_legacy(
+        self,
+        price: Optional[float] = None,
+        reason: str = "MANUAL",
+        exit_candle: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.execute_close_all(price=price, reason=reason, exit_candle=exit_candle)
 
     # ------------------------------------------------------------------
     # Drawing management

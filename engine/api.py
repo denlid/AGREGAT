@@ -266,6 +266,30 @@ class _Context:
         return self._ctx.position
 
     @property
+    def positions(self) -> Any:
+        return self._ctx.positions
+
+    @property
+    def position_size(self) -> float:
+        return float(self._ctx.position_size)
+
+    @property
+    def position_avg_price(self) -> float:
+        return float(self._ctx.position_avg_price)
+
+    @property
+    def opentrades(self) -> int:
+        return int(self._ctx.opentrades)
+
+    @property
+    def closedtrades(self) -> int:
+        return int(self._ctx.closedtrades)
+
+    @property
+    def pending_orders(self) -> Any:
+        return self._ctx.pending_orders
+
+    @property
     def equity(self) -> float:
         return float(self._ctx.equity)
 
@@ -348,8 +372,17 @@ class Strategy:
                 strategy.long(sl=c.close - 50, tp=c.close + 100)
     """
 
-    def __init__(self, name: str, **params: Any) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        pyramiding: int = 1,
+        process_orders_on_close: bool = False,
+        **params: Any,
+    ) -> None:
         self._name = name
+        self._pyramiding = int(pyramiding)
+        self._process_orders_on_close = bool(process_orders_on_close)
         self._params_def: Dict[str, Dict[str, Any]] = {}
         self._callbacks: Dict[str, Callable] = {}
         self._htf_callbacks: Dict[str, Callable] = {}
@@ -481,6 +514,50 @@ class Strategy:
     # Actions — accessed as strategy.long(), strategy.log(), etc.
     # ------------------------------------------------------------------
     @staticmethod
+    def entry(id: str,
+              direction: str,
+              qty: Optional[float] = None,
+              risk: Optional[float] = None,
+              sl: Optional[float] = None,
+              tp: Optional[float] = None,
+              comment: str = "") -> None:
+        ctx = _current_ctx
+        if ctx is not None:
+            ctx.entry(
+                id,
+                direction,
+                qty=qty,
+                risk=risk,
+                sl=sl,
+                tp=tp,
+                comment=comment,
+            )
+
+    @staticmethod
+    def exit(id: str,
+             from_entry: str,
+             stop: Optional[float] = None,
+             limit: Optional[float] = None,
+             qty: Optional[float] = None,
+             comment: str = "") -> None:
+        ctx = _current_ctx
+        if ctx is not None:
+            ctx.exit(
+                id,
+                from_entry,
+                stop=stop,
+                limit=limit,
+                qty=qty,
+                comment=comment,
+            )
+
+    @staticmethod
+    def close_all(reason: str = "MANUAL") -> None:
+        ctx = _current_ctx
+        if ctx is not None:
+            ctx.close_all(reason=reason)
+
+    @staticmethod
     def long(sl: Optional[float] = None,
              tp: Optional[float] = None,
              risk: Optional[float] = None,
@@ -492,8 +569,6 @@ class Strategy:
         """
         ctx = _current_ctx
         if ctx is None:
-            return
-        if ctx.position is not None:
             return
         entry_price = float(ctx.data.close[-1])
         if sl is None:
@@ -509,8 +584,8 @@ class Strategy:
         vol = ctx.calculate_lot(sl_points, risk_pct=risk)
         if vol is None or vol <= 0:
             return
-        ctx.buy_at_open(volume=vol, sl=sl_price, tp=tp_price,
-                       reason=f"Long {tag}", tag=tag)
+        entry_id = tag or f"L{ctx._engine.current_idx}"
+        ctx.entry(entry_id, "long", qty=vol, sl=sl_price, tp=tp_price, comment=f"Long {tag}")
 
     @staticmethod
     def short(sl: Optional[float] = None,
@@ -520,8 +595,6 @@ class Strategy:
         """Queue a SHORT entry at next candle open."""
         ctx = _current_ctx
         if ctx is None:
-            return
-        if ctx.position is not None:
             return
         entry_price = float(ctx.data.close[-1])
         if sl is None:
@@ -537,8 +610,8 @@ class Strategy:
         vol = ctx.calculate_lot(sl_points, risk_pct=risk)
         if vol is None or vol <= 0:
             return
-        ctx.sell_at_open(volume=vol, sl=sl_price, tp=tp_price,
-                        reason=f"Short {tag}", tag=tag)
+        entry_id = tag or f"S{ctx._engine.current_idx}"
+        ctx.entry(entry_id, "short", qty=vol, sl=sl_price, tp=tp_price, comment=f"Short {tag}")
 
     @staticmethod
     def log(message: str) -> None:
@@ -547,10 +620,14 @@ class Strategy:
             ctx.log(message)
 
     @staticmethod
-    def close(price: Optional[float] = None, reason: str = "MANUAL") -> None:
+    def close(
+        price: Optional[float] = None,
+        reason: str = "MANUAL",
+        id: Optional[str] = None,
+    ) -> None:
         ctx = _current_ctx
         if ctx is not None:
-            ctx.close(price=price, reason=reason)
+            ctx.close(price=price, reason=reason, id=id)
 
     @staticmethod
     def cancel() -> None:
@@ -667,6 +744,8 @@ class Strategy:
         class _CompiledStrategy(_BaseStrategy):
             name = declarative_self._name
             PARAMS = params
+            pyramiding = declarative_self._pyramiding
+            process_orders_on_close = declarative_self._process_orders_on_close
             _declarative = declarative_self
 
             def __init__(self) -> None:
@@ -674,8 +753,6 @@ class Strategy:
                 declarative_self.reset()
 
             def on_candle(self, ctx: Any) -> None:
-                if ctx.position:
-                    return
                 cb = callbacks.get("on_candle")
                 if cb is not None:
                     _set_ctx(ctx)
